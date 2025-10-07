@@ -37,6 +37,11 @@ endef
 PY := $(shell if command -v python3 >/dev/null 2>&1; then echo python3; else echo "docker-compose exec -T ai-engine python"; fi)
 PY_INFO := $(shell if command -v python3 >/dev/null 2>&1; then echo ""; else echo "Host python3 not found; using 'docker-compose exec -T ai-engine python' inside the ai-engine container."; fi)
 
+# ----------------------------------------------------------------------------
+# Compose detection (supports Docker Compose v2 plugin and legacy docker-compose)
+# ----------------------------------------------------------------------------
+DC := $(shell (docker compose version >/dev/null 2>&1 && echo "docker compose") || (docker-compose --version >/dev/null 2>&1 && echo "docker-compose") || echo "")
+
 # ==============================================================================
 # LOCAL DEVELOPMENT
 # ==============================================================================
@@ -427,4 +432,4 @@ help:
 	@echo "Targets:"
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
 
-.PHONY: build up down logs logs-all ps deploy deploy-safe deploy-force deploy-full deploy-no-cache server-logs server-logs-snapshot server-status server-clear-logs server-health test-local test-integration test-ari test-externalmedia verify-deployment verify-remote-sync verify-server-commit verify-config monitor-externalmedia monitor-externalmedia-once monitor-up monitor-down monitor-logs help
+.PHONY: build up down logs logs-all ps deploy deploy-safe deploy-force deploy-full deploy-no-cache server-logs server-logs-snapshot server-status server-clear-logs server-health test-local test-integration test-ari test-externalmedia verify-deployment verify-remote-sync verify-server-commit verify-config monitor-externalmedia monitor-externalmedia-once monitor-up monitor-down monitor-logs monitor-status help

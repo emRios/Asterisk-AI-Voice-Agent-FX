@@ -62,6 +62,10 @@ class CallSession:
     # VAD and audio processing state
     vad_state: Dict[str, Any] = field(default_factory=dict)
     fallback_state: Dict[str, Any] = field(default_factory=dict)
+    enhanced_vad_enabled: bool = False
+    enhanced_vad_frames: int = 0
+    enhanced_vad_speech_frames: int = 0
+    last_provider_audio_ts: float = 0.0
     
     # Cleanup and lifecycle
     cleanup_after_tts: bool = False

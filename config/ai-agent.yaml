@@ -161,22 +161,24 @@ external_media:
 llm:
   initial_greeting: "Hello, how can I help you today?"
   prompt: "You are a concise and helpful voice assistant. Keep replies under 20 words unless asked for detail."
-  model: "gpt-4o"
   api_key: "${OPENAI_API_KEY}" # Example of using env var substitution
 
 
 # VAD Configuration - Optimized for 4+ second utterances
 vad:
+  enhanced_enabled: true      # Enable enhanced VAD + multi-criteria barge-in (feature flag)
   # WebRTC VAD settings
-  webrtc_aggressiveness: 0   # Least aggressive (0-3) for telephony audio
-  webrtc_start_frames: 3     # Consecutive frames to start recording
-  webrtc_end_silence_frames: 50  # Silence frames to end recording (1000ms)
-  
+  webrtc_aggressiveness: 1   # Slightly more aggressive (0-3) for telephony audio
+  webrtc_start_frames: 2     # Consecutive frames to start recording (40ms)
+  webrtc_end_silence_frames: 18  # Consecutive silence frames to end (360ms)
+  energy_threshold: 1600     # Base RMS energy threshold for speech
+  confidence_threshold: 0.6  # Minimum enhanced VAD confidence to count as speech
+  adaptive_threshold_enabled: false  # Keep static thresholds for first rollout
+  noise_adaptation_rate: 0.1
   # Utterance settings - optimized for 4+ second duration
   min_utterance_duration_ms: 4000  # Minimum 4 seconds for accurate STT
   max_utterance_duration_ms: 10000 # Maximum 10 seconds
   utterance_padding_ms: 200        # Padding before/after speech
-  
   # Fallback settings
   fallback_enabled: true           # Enable fallback when VAD fails
   fallback_interval_ms: 4000       # Send audio every 4 seconds as fallback

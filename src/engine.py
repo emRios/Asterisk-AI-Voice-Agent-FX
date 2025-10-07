@@ -44,6 +44,7 @@ from .providers.deepgram import DeepgramProvider
 from .providers.local import LocalProvider
 from .providers.openai_realtime import OpenAIRealtimeProvider
 from .core import SessionStore, PlaybackManager, ConversationCoordinator
+from .core.vad_manager import EnhancedVADManager, VADResult
 from .core.streaming_playback_manager import StreamingPlaybackManager
 from .core.models import CallSession
 
@@ -263,6 +264,28 @@ class Engine:
         self.local_channels: Dict[str, str] = {}  # channel_id -> legacy local_channel_id
         self.audiosocket_channels: Dict[str, str] = {}  # call_id -> audiosocket_channel_id
         
+        self.vad_manager: Optional[EnhancedVADManager] = None
+        try:
+            vad_cfg = getattr(config, "vad", None)
+            if vad_cfg and getattr(vad_cfg, "enhanced_enabled", False):
+                self.vad_manager = EnhancedVADManager(
+                    energy_threshold=int(getattr(vad_cfg, "energy_threshold", 1500)),
+                    confidence_threshold=float(getattr(vad_cfg, "confidence_threshold", 0.6)),
+                    adaptive_threshold_enabled=bool(getattr(vad_cfg, "adaptive_threshold_enabled", False)),
+                    noise_adaptation_rate=float(getattr(vad_cfg, "noise_adaptation_rate", 0.1)),
+                    webrtc_aggressiveness=int(getattr(vad_cfg, "webrtc_aggressiveness", 1)),
+                    min_speech_frames=int(getattr(vad_cfg, "webrtc_start_frames", 2)),
+                    max_silence_frames=int(getattr(vad_cfg, "webrtc_end_silence_frames", 15)),
+                )
+                logger.info(
+                    "Enhanced VAD enabled",
+                    energy_threshold=self.vad_manager.energy_threshold,
+                    confidence_threshold=self.vad_manager.confidence_threshold,
+                    adaptive=self.vad_manager.adaptive_threshold_enabled,
+                )
+        except Exception:
+            logger.error("Failed to initialize Enhanced VAD", exc_info=True)
+
         # WebRTC VAD for robust speech detection
         self.webrtc_vad = None
         if WEBRTC_VAD_AVAILABLE:
@@ -697,6 +720,7 @@ class Engine:
                 audio_capture_enabled=False,
                 status="connected"
             )
+            session.enhanced_vad_enabled = bool(self.vad_manager)
             await self._save_session(session, new=True)
             # Export config metrics for this call
             try:
@@ -970,6 +994,7 @@ class Engine:
                 status="waiting_for_local",
                 audio_capture_enabled=False
             )
+            session.enhanced_vad_enabled = bool(self.vad_manager)
             await self._save_session(session, new=True)
             
             # Originate Local channel
@@ -1568,6 +1593,17 @@ class Engine:
                     )
                     return
 
+            vad_result: Optional[VADResult] = None
+            if self.vad_manager:
+                try:
+                    vad_result = await self._run_enhanced_vad(session, audio_bytes)
+                except Exception:
+                    logger.debug(
+                        "Enhanced VAD processing error",
+                        call_id=caller_channel_id,
+                        exc_info=True,
+                    )
+
             # Self-echo mitigation and barge-in detection
             # If TTS is playing (capture disabled), decide whether to drop or trigger barge-in
             if hasattr(session, 'audio_capture_enabled') and not session.audio_capture_enabled:
@@ -1601,24 +1637,66 @@ class Engine:
                                  tts_elapsed_ms=tts_elapsed_ms, protect_ms=initial_protect)
                     return
 
-                # Barge-in detection: accumulate candidate window based on energy
-                try:
-                    energy = audioop.rms(audio_bytes, 2)
-                except Exception:
-                    energy = 0
-
+                # Barge-in detection: accumulate candidate window based on multi-criteria (VAD + energy)
                 threshold = int(getattr(cfg, 'energy_threshold', 1000))
-                frame_ms = 20  # AudioSocket frames are 20 ms
-                if energy >= threshold:
-                    # Start of potential barge-in window
-                    if int(getattr(session, 'barge_in_candidate_ms', 0)) == 0:
-                        try:
-                            session.barge_start_ts = now
-                        except Exception:
-                            session.barge_start_ts = 0.0
-                    session.barge_in_candidate_ms = int(getattr(session, 'barge_in_candidate_ms', 0)) + frame_ms
+                frame_ms = 20
+                energy = 0
+                confidence = 0.0
+                vad_speech = False
+                webrtc_positive = False
+
+                if vad_result:
+                    frame_ms = max(vad_result.frame_duration_ms, 1)
+                    energy = vad_result.energy_level
+                    confidence = vad_result.confidence
+                    vad_speech = vad_result.is_speech
+                    webrtc_positive = vad_result.webrtc_result
+                    try:
+                        session.vad_state['last_vad_result'] = {
+                            'is_speech': vad_speech,
+                            'confidence': confidence,
+                            'energy': energy,
+                            'webrtc': webrtc_positive,
+                        }
+                    except Exception:
+                        pass
                 else:
-                    session.barge_in_candidate_ms = 0
+                    try:
+                        pcm16_frame = audioop.ulaw2lin(audio_bytes, 2)
+                        energy = audioop.rms(pcm16_frame, 2)
+                    except Exception:
+                        energy = 0
+
+                criteria_met = 0
+                if vad_speech:
+                    criteria_met += 1
+                if energy >= threshold:
+                    criteria_met += 1
+                if vad_result and confidence >= getattr(self.vad_manager, 'confidence_threshold', 0.6):
+                    criteria_met += 1
+                if webrtc_positive:
+                    criteria_met += 1
+
+                if vad_result:
+                    if criteria_met >= 2:
+                        if int(getattr(session, 'barge_in_candidate_ms', 0)) == 0:
+                            try:
+                                session.barge_start_ts = now
+                            except Exception:
+                                session.barge_start_ts = 0.0
+                        session.barge_in_candidate_ms = int(getattr(session, 'barge_in_candidate_ms', 0)) + frame_ms
+                    else:
+                        session.barge_in_candidate_ms = 0
+                else:
+                    if energy >= threshold:
+                        if int(getattr(session, 'barge_in_candidate_ms', 0)) == 0:
+                            try:
+                                session.barge_start_ts = now
+                            except Exception:
+                                session.barge_start_ts = 0.0
+                        session.barge_in_candidate_ms = int(getattr(session, 'barge_in_candidate_ms', 0)) + frame_ms
+                    else:
+                        session.barge_in_candidate_ms = 0
 
                 # Cooldown check to avoid flapping
                 cooldown_ms = int(getattr(cfg, 'cooldown_ms', 500))
@@ -1626,7 +1704,9 @@ class Engine:
                 in_cooldown = (now - last_barge_in_ts) * 1000 < cooldown_ms if last_barge_in_ts else False
 
                 min_ms = int(getattr(cfg, 'min_ms', 250))
-                if not in_cooldown and session.barge_in_candidate_ms >= min_ms:
+                should_trigger = not in_cooldown and session.barge_in_candidate_ms >= min_ms
+
+                if should_trigger:
                     # Trigger barge-in: stop active playback(s), clear gating, and continue forwarding audio
                     try:
                         playback_ids = await self.session_store.list_playbacks_for_call(caller_channel_id)
@@ -1656,20 +1736,33 @@ class Engine:
                         except Exception:
                             pass
                         await self._save_session(session)
-                        logger.info("🎧 BARGE-IN triggered", call_id=caller_channel_id)
+                        logger.info(
+                            "🎧 BARGE-IN triggered",
+                            call_id=caller_channel_id,
+                            energy=energy,
+                            criteria_met=criteria_met,
+                            confidence=confidence,
+                            vad_speech=vad_speech,
+                            webrtc=webrtc_positive,
+                        )
                     except Exception:
                         logger.error("Error triggering barge-in", call_id=caller_channel_id, exc_info=True)
                     # After barge-in, fall through to forward this frame to provider
                 else:
                     # Not yet triggered; drop inbound frame while TTS is active
-                    if energy > 0:
-                        if self.conversation_coordinator:
-                            try:
-                                self.conversation_coordinator.note_audio_during_tts(caller_channel_id)
-                            except Exception:
-                                pass
-                    logger.debug("Dropping inbound during TTS (candidate_ms=%d, energy=%d)",
-                                 session.barge_in_candidate_ms, energy)
+                    if energy > 0 and self.conversation_coordinator:
+                        try:
+                            self.conversation_coordinator.note_audio_during_tts(caller_channel_id)
+                        except Exception:
+                            pass
+                    logger.debug(
+                        "Dropping inbound during TTS",
+                        call_id=caller_channel_id,
+                        candidate_ms=session.barge_in_candidate_ms,
+                        energy=energy,
+                        criteria_met=criteria_met,
+                        confidence=confidence,
+                    )
                     return
 
             # If pipeline execution is forced, route to pipeline queue after converting to PCM16 @ 16 kHz
@@ -1693,6 +1786,55 @@ class Engine:
             await provider.send_audio(audio_bytes)
         except Exception as exc:
             logger.error("Error handling AudioSocket audio", conn_id=conn_id, error=str(exc), exc_info=True)
+
+    async def _run_enhanced_vad(self, session: CallSession, audio_bytes_ulaw: bytes) -> Optional[VADResult]:
+        """Convert μ-law audio to 20 ms PCM16 frames and run enhanced VAD."""
+        if not self.vad_manager or not audio_bytes_ulaw:
+            return None
+
+        try:
+            pcm16 = EnhancedVADManager.mu_law_to_pcm16(audio_bytes_ulaw)
+        except Exception:
+            logger.debug(
+                "Enhanced VAD conversion failed",
+                call_id=session.call_id,
+                exc_info=True,
+            )
+            return None
+
+        if not pcm16:
+            return None
+
+        vad_state = session.vad_state.setdefault("enhanced_vad", {})
+        frame_buffer: bytearray = vad_state.setdefault("frame_buffer", bytearray())
+        frame_buffer.extend(pcm16)
+
+        result: Optional[VADResult] = None
+        stats = vad_state.setdefault("stats", {"frames": 0, "speech_frames": 0})
+
+        while len(frame_buffer) >= 320:
+            frame = bytes(frame_buffer[:320])
+            del frame_buffer[:320]
+            result = await self.vad_manager.process_frame(session.call_id, frame)
+            stats["frames"] = stats.get("frames", 0) + 1
+            if result.is_speech:
+                stats["speech_frames"] = stats.get("speech_frames", 0) + 1
+
+        if result:
+            try:
+                total = max(stats.get("frames", 0), 1)
+                speech_ratio = stats.get("speech_frames", 0) / total
+                session.vad_state["enhanced_summary"] = {
+                    "frames": stats.get("frames", 0),
+                    "speech_frames": stats.get("speech_frames", 0),
+                    "speech_ratio": speech_ratio,
+                    "last_confidence": result.confidence,
+                    "last_energy": result.energy_level,
+                }
+            except Exception:
+                pass
+
+        return result
 
     async def _export_config_metrics(self, call_id: str) -> None:
         """Expose configured knobs as Prometheus gauges for this call."""

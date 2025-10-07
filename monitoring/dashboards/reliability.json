@@ -5,6 +5,18 @@
   "schemaVersion": 39,
   "version": 1,
   "refresh": "5s",
+  "templating": {
+    "list": [
+      {
+        "name": "call",
+        "label": "Call",
+        "type": "query",
+        "query": "label_values(ai_agent_streaming_active, call_id)",
+        "includeAll": true,
+        "multi": false
+      }
+    ]
+  },
   "panels": [
     {
       "type": "stat",
@@ -19,7 +31,7 @@
       "title": "Streaming Fallbacks (5m)",
       "gridPos": {"h": 4, "w": 6, "x": 6, "y": 0},
       "targets": [
-        {"expr": "sum(rate(ai_agent_streaming_fallbacks_total[5m])) or vector(0)", "refId": "A"}
+        {"expr": "sum(rate(ai_agent_streaming_fallbacks_total{call_id=~\"$call\"}[5m])) or vector(0)", "refId": "A"}
       ]
     },
     {
@@ -27,7 +39,7 @@
       "title": "Keepalive Timeouts (5m)",
       "gridPos": {"h": 4, "w": 6, "x": 12, "y": 0},
       "targets": [
-        {"expr": "sum(rate(ai_agent_streaming_keepalive_timeouts_total[5m])) or vector(0)", "refId": "A"}
+        {"expr": "sum(rate(ai_agent_streaming_keepalive_timeouts_total{call_id=~\"$call\"}[5m])) or vector(0)", "refId": "A"}
       ]
     },
     {
@@ -35,7 +47,7 @@
       "title": "Barge-in Events (5m)",
       "gridPos": {"h": 4, "w": 6, "x": 18, "y": 0},
       "targets": [
-        {"expr": "sum(rate(ai_agent_barge_in_events_total[5m])) or vector(0)", "refId": "A"}
+        {"expr": "sum(rate(ai_agent_barge_in_events_total{call_id=~\"$call\"}[5m])) or vector(0)", "refId": "A"}
       ]
     },
     {
@@ -43,7 +55,7 @@
       "title": "Streaming Fallbacks (rate)",
       "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4},
       "targets": [
-        {"expr": "sum by (call_id) (rate(ai_agent_streaming_fallbacks_total[$__rate_interval]))", "refId": "A"}
+        {"expr": "sum by (call_id) (rate(ai_agent_streaming_fallbacks_total{call_id=~\"$call\"}[$__rate_interval])) or vector(0)", "refId": "A"}
       ]
     },
     {
@@ -51,7 +63,7 @@
       "title": "Keepalive Timeouts (rate)",
       "gridPos": {"h": 8, "w": 12, "x": 12, "y": 4},
       "targets": [
-        {"expr": "sum by (call_id) (rate(ai_agent_streaming_keepalive_timeouts_total[$__rate_interval]))", "refId": "A"}
+        {"expr": "sum by (call_id) (rate(ai_agent_streaming_keepalive_timeouts_total{call_id=~\"$call\"}[$__rate_interval])) or vector(0)", "refId": "A"}
       ]
     },
     {
@@ -68,6 +80,22 @@
       "gridPos": {"h": 8, "w": 12, "x": 12, "y": 12},
       "targets": [
         {"expr": "rate(ai_agent_audiosocket_tx_bytes_total[$__rate_interval])", "refId": "A"}
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Stream RX Bytes per call (rate)",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 20},
+      "targets": [
+        {"expr": "sum by (call_id) (rate(ai_agent_stream_rx_bytes_total{call_id=~\"$call\"}[$__rate_interval])) or vector(0)", "refId": "A"}
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Stream TX Bytes per call (rate)",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 20},
+      "targets": [
+        {"expr": "sum by (call_id) (rate(ai_agent_stream_tx_bytes_total{call_id=~\"$call\"}[$__rate_interval])) or vector(0)", "refId": "A"}
       ]
     }
   ]

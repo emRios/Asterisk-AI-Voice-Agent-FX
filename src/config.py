@@ -146,10 +146,16 @@ class LLMConfig(BaseModel):
 
 
 class VADConfig(BaseModel):
+    enhanced_enabled: bool = Field(default=False)
     # WebRTC VAD settings
     webrtc_aggressiveness: int = 0
     webrtc_start_frames: int = 3
     webrtc_end_silence_frames: int = 50
+    # Enhanced VAD thresholds
+    energy_threshold: int = 1500
+    confidence_threshold: float = 0.6
+    adaptive_threshold_enabled: bool = False
+    noise_adaptation_rate: float = 0.1
     
     # Utterance settings - optimized for 4+ second duration
     min_utterance_duration_ms: int = 4000
