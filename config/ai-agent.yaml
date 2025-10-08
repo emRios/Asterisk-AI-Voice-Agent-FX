@@ -130,14 +130,14 @@ barge_in:
 # Streaming configuration (for downstream_mode=stream)
 streaming:
   sample_rate: 8000          # Output sample rate for streaming audio
-  jitter_buffer_ms: 120      # Slightly deeper buffer for stability
+  jitter_buffer_ms: 90       # Slightly reduced buffer for faster start while maintaining stability
   keepalive_interval_ms: 5000 # Keepalive interval for streaming connections
   connection_timeout_ms: 10000 # Connection timeout for streaming
   fallback_timeout_ms: 20000  # Avoid premature fallback during greeting
   chunk_size_ms: 20          # Frame size; 20 ms recommended for telephony cadence
-  min_start_ms: 200          # Faster start for general playback
-  greeting_min_start_ms: 100 # Faster start specifically for greeting
-  low_watermark_ms: 340      # Slightly higher to avoid underruns during streaming
+  min_start_ms: 120          # Lower start threshold for quicker playback
+  greeting_min_start_ms: 60  # Extra-fast start specifically for greeting
+  low_watermark_ms: 180      # Lower watermark to begin playback with less buffered audio
   provider_grace_ms: 1400    # Longer grace to avoid tail clipping on stop
   logging_level: "info"      # Optional override for streaming logger verbosity
 
