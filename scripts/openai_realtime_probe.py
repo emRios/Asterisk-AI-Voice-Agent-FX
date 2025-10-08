@@ -83,8 +83,6 @@ async def main() -> None:
                 "voice": VOICE,
                 "input_audio_format": "pcm16",
                 "output_audio_format": "pcm16",
-                "input_audio_sample_rate_hz": SAMPLE_RATE,
-                "output_audio_sample_rate_hz": SAMPLE_RATE,
             },
         }
         await ws.send(json.dumps(session_update))
