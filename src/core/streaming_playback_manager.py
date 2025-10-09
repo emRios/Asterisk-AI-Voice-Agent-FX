@@ -810,7 +810,36 @@ class StreamingPlaybackManager:
                         self._decrement_buffered_bytes(call_id, len(chunk))
             
             if remaining_audio:
-                mulaw_audio = bytes(remaining_audio)
+                raw_buf = bytes(remaining_audio)
+
+                # Convert provider-encoded buffer to μ-law @ 8 kHz for Asterisk file playback
+                try:
+                    info = self.active_streams.get(call_id, {})
+                    src_encoding = str(info.get('source_encoding') or '').lower().strip() or 'slin16'
+                    try:
+                        src_rate = int(info.get('source_sample_rate') or 0) or self.sample_rate
+                    except Exception:
+                        src_rate = self.sample_rate
+
+                    # Normalize to PCM16
+                    if src_encoding in ("ulaw", "mulaw", "g711_ulaw", "mu-law"):
+                        pcm = mulaw_to_pcm16le(raw_buf)
+                        src_rate = 8000
+                    else:
+                        pcm = raw_buf
+
+                    # Resample to 8 kHz for μ-law file playback
+                    if src_rate != 8000:
+                        pcm, _ = resample_audio(pcm, src_rate, 8000)
+
+                    # Convert to μ-law
+                    mulaw_audio = pcm16le_to_mulaw(pcm)
+                except Exception:
+                    logger.warning("Fallback conversion failed; passing raw bytes to file playback",
+                                   call_id=call_id,
+                                   stream_id=stream_id,
+                                   exc_info=True)
+                    mulaw_audio = raw_buf
 
                 # Use fallback playback manager
                 fallback_playback_id = await self.fallback_playback_manager.play_audio(

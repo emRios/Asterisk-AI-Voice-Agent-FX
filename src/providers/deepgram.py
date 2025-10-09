@@ -134,7 +134,25 @@ class DeepgramProvider(AIProviderInterface):
 
                 input_encoding = (getattr(self.config, "input_encoding", None) or "linear16").strip().lower()
                 target_rate = int(getattr(self.config, "input_sample_rate_hz", 8000) or 8000)
-                actual_format = "ulaw" if chunk_len == 160 else "pcm16"
+                # Infer actual inbound format and source rate from canonical 20 ms frame sizes
+                #  - 160 B ≈ μ-law @ 8 kHz (20 ms)
+                #  - 320 B ≈ PCM16 @ 8 kHz (20 ms)
+                #  - 640 B ≈ PCM16 @ 16 kHz (20 ms)
+                if chunk_len == 160:
+                    actual_format = "ulaw"
+                    src_rate = 8000
+                elif chunk_len == 320:
+                    actual_format = "pcm16"
+                    src_rate = 8000
+                elif chunk_len == 640:
+                    actual_format = "pcm16"
+                    src_rate = 16000
+                else:
+                    actual_format = "pcm16" if input_encoding in ("slin16", "linear16", "pcm16") else "ulaw"
+                    try:
+                        src_rate = int(getattr(self.config, "input_sample_rate_hz", 0) or 0) or (16000 if actual_format == "pcm16" else 8000)
+                    except Exception:
+                        src_rate = 8000
 
                 payload: bytes = audio_chunk
                 pcm_for_rms: Optional[bytes] = None
@@ -167,22 +185,24 @@ class DeepgramProvider(AIProviderInterface):
                         self._input_resample_state = None
 
                 elif input_encoding in ("slin16", "linear16", "pcm16"):
+                    # Normalize inbound to PCM16 and resample from detected source rate to target_rate
                     if actual_format == "ulaw":
-                        pcm_8k = mulaw_to_pcm16le(audio_chunk)
+                        pcm_src = mulaw_to_pcm16le(audio_chunk)
+                        src_rate = 8000
                     else:
-                        pcm_8k = audio_chunk
-
-                    pcm_for_rms = pcm_8k
-                    if target_rate and target_rate != 8000:
-                        pcm_8k, self._input_resample_state = resample_audio(
-                            pcm_8k,
-                            8000,
+                        pcm_src = audio_chunk
+                    pcm_for_rms = pcm_src
+                    if target_rate and target_rate != src_rate:
+                        pcm_dst, self._input_resample_state = resample_audio(
+                            pcm_src,
+                            src_rate,
                             target_rate,
                             state=self._input_resample_state,
                         )
+                        payload = pcm_dst
                     else:
                         self._input_resample_state = None
-                    payload = pcm_8k
+                        payload = pcm_src
                 else:
                     logger.warning(
                         "Unsupported Deepgram input_encoding",

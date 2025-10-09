@@ -456,20 +456,40 @@ class OpenAIRealtimeProvider(AIProviderInterface):
                 pass
 
         chunk_len = len(audio_chunk)
-        actual_format = "ulaw" if chunk_len == 160 else "pcm16"
-
-        # AudioSocket delivers 8 kHz frames; treat everything as such.
-        source_rate = 8000
-        if actual_format == "ulaw":
-            pcm_8k = mulaw_to_pcm16le(audio_chunk)
+        # Infer actual transport format from canonical 20 ms frame sizes when possible
+        #  - 160 B ≈ μ-law @ 8 kHz (20 ms)
+        #  - 320 B ≈ PCM16 @ 8 kHz (20 ms)
+        #  - 640 B ≈ PCM16 @ 16 kHz (20 ms)
+        if chunk_len == 160:
+            actual_format = "ulaw"
+            inferred_rate = 8000
+        elif chunk_len == 320:
+            actual_format = "pcm16"
+            inferred_rate = 8000
+        elif chunk_len == 640:
+            actual_format = "pcm16"
+            inferred_rate = 16000
         else:
-            pcm_8k = audio_chunk
+            actual_format = "pcm16" if fmt in ("slin16", "linear16", "pcm16") else "ulaw"
+            inferred_rate = int(getattr(self.config, "input_sample_rate_hz", 0) or 0) or 8000
+
+        # Select source_rate based on declared encoding and inference
+        if actual_format == "ulaw":
+            source_rate = 8000
+        else:
+            # PCM path: prefer declared input_sample_rate_hz if set, else inference
+            declared_rate = int(getattr(self.config, "input_sample_rate_hz", 0) or 0)
+            source_rate = declared_rate or inferred_rate or 8000
+        if actual_format == "ulaw":
+            pcm_src = mulaw_to_pcm16le(audio_chunk)
+        else:
+            pcm_src = audio_chunk
 
         provider_rate = int(getattr(self.config, "provider_input_sample_rate_hz", 0) or 0)
 
         if provider_rate and provider_rate != source_rate:
             pcm_provider_rate, self._input_resample_state = resample_audio(
-                pcm_8k,
+                pcm_src,
                 source_rate,
                 provider_rate,
                 state=self._input_resample_state,
@@ -477,7 +497,7 @@ class OpenAIRealtimeProvider(AIProviderInterface):
             return pcm_provider_rate
 
         self._input_resample_state = None
-        return pcm_8k
+        return pcm_src
 
     async def _receive_loop(self):
         assert self.websocket is not None
