@@ -2705,12 +2705,25 @@ class Engine:
                                     detail=detail,
                                 )
                             self._runtime_alignment_logged.add(call_id)
+
+                        # Determine downstream target encoding/sample rate for this call based on AudioSocket config.
+                        try:
+                            target_encoding = (self.config.audiosocket.format or "ulaw").lower()
+                        except Exception:
+                            target_encoding = "ulaw"
+                        try:
+                            target_sample_rate = int(self.config.streaming.sample_rate)
+                        except Exception:
+                            target_sample_rate = 8000
+
                         await self.streaming_playback_manager.start_streaming_playback(
                             call_id,
                             q,
                             playback_type=playback_type,
                             source_encoding=fmt_info.get("encoding"),
                             source_sample_rate=fmt_info.get("sample_rate"),
+                            target_encoding=target_encoding,
+                            target_sample_rate=target_sample_rate,
                         )
                     except Exception:
                         logger.error("Failed to start streaming playback", call_id=call_id, exc_info=True)

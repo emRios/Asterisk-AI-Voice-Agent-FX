@@ -190,6 +190,8 @@ class StreamingPlaybackManager:
         playback_type: str = "response",
         source_encoding: Optional[str] = None,
         source_sample_rate: Optional[int] = None,
+        target_encoding: Optional[str] = None,
+        target_sample_rate: Optional[int] = None,
     ) -> Optional[str]:
         """
         Start streaming audio playback for a call.
@@ -306,6 +308,20 @@ class StreamingPlaybackManager:
                 src_rate = int(source_sample_rate) if source_sample_rate is not None else self.sample_rate
             except Exception:
                 src_rate = self.sample_rate
+
+            # Determine downstream target format/sample rate for this stream.
+            resolved_target_format = (target_encoding or self.audiosocket_format or "ulaw").lower()
+            try:
+                resolved_target_rate = (
+                    int(target_sample_rate)
+                    if target_sample_rate is not None
+                    else int(self.sample_rate)
+                )
+            except Exception:
+                resolved_target_rate = self.sample_rate
+            if resolved_target_rate <= 0:
+                resolved_target_rate = self.sample_rate
+
             self._resample_states[call_id] = None
             # Store stream info
             # Determine if egress slin16 should be byteswapped based on mode and inbound probe
@@ -342,6 +358,8 @@ class StreamingPlaybackManager:
                 'source_sample_rate': src_rate,
                 'egress_swap': egress_swap,
                 'egress_swap_mode': mode,
+                'target_format': resolved_target_format,
+                'target_sample_rate': resolved_target_rate,
                 'tx_bytes': 0,
             }
             self._startup_ready[call_id] = False
@@ -363,8 +381,8 @@ class StreamingPlaybackManager:
                     stream_id=stream_id,
                     source_encoding=src_encoding,
                     source_sample_rate=src_rate,
-                    target_format=(self.audiosocket_format or "ulaw").lower(),
-                    target_sample_rate=self.sample_rate,
+                    target_format=resolved_target_format,
+                    target_sample_rate=resolved_target_rate,
                     egress_swap=egress_swap,
                     egress_swap_mode=mode,
                 )
@@ -533,9 +551,9 @@ class StreamingPlaybackManager:
 
                 if self.audio_transport == "audiosocket":
                     # Segment to fixed 20ms frames and pace sends
-                    fmt = (self.audiosocket_format or "ulaw").lower()
+                    fmt = target_fmt
                     bytes_per_sample = 1 if fmt in ("ulaw", "mulaw", "mu-law") else 2
-                    frame_size = int(self.sample_rate * (self.chunk_size_ms / 1000.0) * bytes_per_sample)
+                    frame_size = int(target_rate * (self.chunk_size_ms / 1000.0) * bytes_per_sample)
                     if frame_size <= 0:
                         frame_size = 160 if bytes_per_sample == 1 else 320  # 8k@20ms
 
@@ -545,7 +563,13 @@ class StreamingPlaybackManager:
                     while (total_len - offset) >= frame_size:
                         frame = pending[offset:offset + frame_size]
                         offset += frame_size
-                        success = await self._send_audio_chunk(call_id, stream_id, frame)
+                        success = await self._send_audio_chunk(
+                            call_id,
+                            stream_id,
+                            frame,
+                            target_fmt=target_fmt,
+                            target_rate=target_rate,
+                        )
                         if not success:
                             return False
                         self._decrement_buffered_bytes(call_id, frame_size)
@@ -556,7 +580,13 @@ class StreamingPlaybackManager:
                     self.frame_remainders[call_id] = pending[offset:]
                 else:
                     # ExternalMedia/RTP path: send as-is (RTP layer handles timing)
-                    success = await self._send_audio_chunk(call_id, stream_id, processed_chunk)
+                    success = await self._send_audio_chunk(
+                        call_id,
+                        stream_id,
+                        processed_chunk,
+                        target_fmt=target_fmt,
+                        target_rate=target_rate,
+                    )
                     if not success:
                         return False
                     # Treat entire chunk as consumed bytes
@@ -580,17 +610,27 @@ class StreamingPlaybackManager:
             return chunk
 
         try:
-            target_fmt = (self.audiosocket_format or "ulaw").lower()
-            target_rate = int(self.sample_rate)
-
             stream_info = self.active_streams.get(call_id, {}) if call_id in self.active_streams else {}
+
+            target_fmt = (stream_info.get("target_format") or self.audiosocket_format or "ulaw").lower()
+            try:
+                target_rate = int(stream_info.get("target_sample_rate", self.sample_rate))
+            except Exception:
+                target_rate = int(self.sample_rate)
+            if target_rate <= 0:
+                target_rate = int(self.sample_rate)
+
             src_encoding_raw = (stream_info.get("source_encoding") or "").lower().strip()
-            src_rate = int(stream_info.get("source_sample_rate") or target_rate)
+            try:
+                src_rate = int(stream_info.get("source_sample_rate") or target_rate)
+            except Exception:
+                src_rate = target_rate
             if not src_encoding_raw:
                 src_encoding_raw = "slin16"
 
             # Determine if we must swap bytes for PCM16 egress
             egress_swap = bool(stream_info.get('egress_swap', False))
+            mode = (stream_info.get('egress_swap_mode') or self.egress_swap_mode).lower()
 
             # Fast path: already matches target format and rate
             if (
@@ -605,14 +645,9 @@ class StreamingPlaybackManager:
                 and target_fmt in ("slin16", "linear16", "pcm16")
                 and src_rate == target_rate
             ):
-                # Fast path PCM16->PCM16: still apply egress swap if required
+                # Fast path PCM16->PCM16: still apply egress swap if required (with auto-probe)
                 self._resample_states[call_id] = None
-                if egress_swap:
-                    try:
-                        return audioop.byteswap(chunk, 2)
-                    except Exception:
-                        logger.debug("PCM16 egress swap failed; sending native bytes", call_id=call_id)
-                return chunk
+                return self._apply_pcm_endianness(call_id, chunk, stream_info, mode)
 
             working = chunk
             resample_state = self._resample_states.get(call_id)
@@ -639,13 +674,8 @@ class StreamingPlaybackManager:
             # Convert to target encoding
             if target_fmt in ("ulaw", "mulaw", "g711_ulaw", "mu-law"):
                 return pcm16le_to_mulaw(working)
-            # Otherwise target PCM16, with optional egress byteswap
-            if egress_swap:
-                try:
-                    return audioop.byteswap(working, 2)
-                except Exception:
-                    logger.debug("PCM16 egress swap failed; sending native bytes", call_id=call_id)
-            return working
+            # Otherwise target PCM16, with optional (or auto) egress byteswap
+            return self._apply_pcm_endianness(call_id, working, stream_info, mode)
         except Exception as exc:
             logger.error(
                 "Audio chunk processing failed",
@@ -655,7 +685,15 @@ class StreamingPlaybackManager:
             )
             return None
 
-    async def _send_audio_chunk(self, call_id: str, stream_id: str, chunk: bytes) -> bool:
+    async def _send_audio_chunk(
+        self,
+        call_id: str,
+        stream_id: str,
+        chunk: bytes,
+        *,
+        target_fmt: Optional[str] = None,
+        target_rate: Optional[int] = None,
+    ) -> bool:
         """Send audio chunk via configured streaming transport."""
         try:
             session = await self.session_store.get_by_call_id(call_id)
@@ -691,7 +729,11 @@ class StreamingPlaybackManager:
                     return False
                 # One-time debug for first outbound frame to identify codec/format
                 if call_id not in self._first_send_logged:
-                    fmt = (self.audiosocket_format or "ulaw").lower()
+                    fmt = (target_fmt or self.audiosocket_format or "ulaw").lower()
+                    try:
+                        sample_rate = int(target_rate if target_rate is not None else self.sample_rate)
+                    except Exception:
+                        sample_rate = self.sample_rate
                     try:
                         egress_swap = bool(self.active_streams.get(call_id, {}).get('egress_swap', False))
                     except Exception:
@@ -707,36 +749,12 @@ class StreamingPlaybackManager:
                         transport=self.audio_transport,
                         audiosocket_format=fmt,
                         frame_bytes=len(chunk),
-                        sample_rate=self.sample_rate,
+                        sample_rate=sample_rate,
                         chunk_size_ms=self.chunk_size_ms,
                         egress_swap=egress_swap,
                         egress_swap_mode=egress_mode,
                         conn_id=conn_id,
                     )
-                    # One-time PCM16 egress probe: compare native vs swapped RMS for outbound frame
-                    if fmt in ("slin16", "linear16", "pcm16"):
-                        try:
-                            rms_native = audioop.rms(chunk, 2)
-                        except Exception:
-                            rms_native = 0
-                        try:
-                            swapped = audioop.byteswap(chunk, 2)
-                            rms_swapped = audioop.rms(swapped, 2)
-                        except Exception:
-                            rms_swapped = 0
-                        try:
-                            logger.info(
-                                "🎵 STREAMING OUTBOUND - Probe",
-                                call_id=call_id,
-                                stream_id=stream_id,
-                                audiosocket_format=fmt,
-                                egress_swap=egress_swap,
-                                egress_swap_mode=egress_mode,
-                                rms_native=rms_native,
-                                rms_swapped=rms_swapped,
-                            )
-                        except Exception:
-                            pass
                     self._first_send_logged.add(call_id)
                 # Optional broadcast mode for diagnostics
                 if self.audiosocket_broadcast_debug:
@@ -787,10 +805,108 @@ class StreamingPlaybackManager:
                         exc_info=True)
             return False
 
-    def _frame_size_bytes(self) -> int:
+    def _apply_pcm_endianness(
+        self,
+        call_id: str,
+        pcm_bytes: bytes,
+        stream_info: Dict[str, Any],
+        mode: str,
+    ) -> bytes:
+        """Ensure PCM16 egress matches the negotiated byte order with auto correction."""
+        if not pcm_bytes:
+            return pcm_bytes
+
+        target_fmt = (stream_info.get('target_format') or self.audiosocket_format or "ulaw").lower()
+        if target_fmt not in ("slin16", "linear16", "pcm16"):
+            return pcm_bytes
+
+        mode = (mode or "auto").lower()
+        egress_swap = bool(stream_info.get('egress_swap', False))
+        stream_id = stream_info.get('stream_id')
+
+        probe_needed = not stream_info.get('egress_probe_done', False)
+        swapped_bytes: Optional[bytes] = None
+        rms_native = rms_swapped = 0
+
+        if probe_needed or mode == "force_true":
+            try:
+                rms_native = audioop.rms(pcm_bytes, 2)
+            except Exception:
+                rms_native = 0
+            try:
+                swapped_bytes = audioop.byteswap(pcm_bytes, 2)
+                rms_swapped = audioop.rms(swapped_bytes, 2)
+            except Exception:
+                swapped_bytes = None
+                rms_swapped = 0
+
+            if probe_needed:
+                stream_info['egress_probe_done'] = True
+                try:
+                    logger.info(
+                        "🎵 STREAMING OUTBOUND - Probe",
+                        call_id=call_id,
+                        stream_id=stream_id,
+                        audiosocket_format=target_fmt,
+                        egress_swap=egress_swap,
+                        egress_swap_mode=mode,
+                        rms_native=rms_native,
+                        rms_swapped=rms_swapped,
+                        target_sample_rate=stream_info.get('target_sample_rate', self.sample_rate),
+                    )
+                except Exception:
+                    pass
+
+                if mode != "force_false" and swapped_bytes is not None:
+                    threshold = max(512, 4 * max(1, rms_native))
+                    if not egress_swap and rms_swapped >= threshold:
+                        stream_info['egress_swap'] = True
+                        stream_info['egress_swap_auto'] = True
+                        egress_swap = True
+                        try:
+                            logger.warning(
+                                "Auto-correcting PCM16 egress endianness",
+                                call_id=call_id,
+                                stream_id=stream_id,
+                                egress_swap_mode=mode,
+                                rms_native=rms_native,
+                                rms_swapped=rms_swapped,
+                                threshold=threshold,
+                            )
+                        except Exception:
+                            pass
+                        # If we already have swapped bytes from the probe, reuse it.
+                        if swapped_bytes is not None:
+                            return swapped_bytes
+
+            if mode == "force_true" and not egress_swap:
+                stream_info['egress_swap'] = True
+                egress_swap = True
+                if swapped_bytes is not None:
+                    return swapped_bytes
+
+        if egress_swap:
+            try:
+                return audioop.byteswap(pcm_bytes, 2)
+            except Exception:
+                logger.debug("PCM16 egress swap failed; sending native bytes", call_id=call_id)
+
+        return pcm_bytes
+
+    def _frame_size_bytes(self, call_id: Optional[str] = None) -> int:
         fmt = (self.audiosocket_format or "ulaw").lower()
+        sample_rate = self.sample_rate
+        if call_id and call_id in self.active_streams:
+            info = self.active_streams.get(call_id, {})
+            fmt = (info.get('target_format') or fmt).lower()
+            try:
+                sr = int(info.get('target_sample_rate', sample_rate))
+            except Exception:
+                sr = sample_rate
+            if sr > 0:
+                sample_rate = sr
         bytes_per_sample = 1 if fmt in ("ulaw", "mulaw", "g711_ulaw", "mu-law") else 2
-        frame_size = int(self.sample_rate * (self.chunk_size_ms / 1000.0) * bytes_per_sample)
+        frame_size = int(sample_rate * (self.chunk_size_ms / 1000.0) * bytes_per_sample)
         if frame_size <= 0:
             frame_size = 160 if bytes_per_sample == 1 else 320
         return frame_size
@@ -802,7 +918,7 @@ class StreamingPlaybackManager:
         *,
         include_remainder: bool = False,
     ) -> int:
-        frame_size = self._frame_size_bytes()
+        frame_size = self._frame_size_bytes(call_id)
         try:
             info = self.active_streams.get(call_id, {})
             buffered_bytes = int(info.get('buffered_bytes', 0))
@@ -1071,12 +1187,18 @@ class StreamingPlaybackManager:
                     self._decrement_buffered_bytes(call_id, len(rem))
                     if self.audio_transport == "audiosocket":
                         fmt = (self.audiosocket_format or "ulaw").lower()
+                        info = self.active_streams.get(call_id, {})
+                        fmt = (info.get('target_format') or fmt).lower()
+                        try:
+                            sr = int(info.get('target_sample_rate', self.sample_rate))
+                        except Exception:
+                            sr = self.sample_rate
                         bytes_per_sample = 1 if fmt in ("ulaw", "mulaw", "mu-law") else 2
-                        frame_size = int(self.sample_rate * (self.chunk_size_ms / 1000.0) * bytes_per_sample) or (160 if bytes_per_sample == 1 else 320)
+                        frame_size = int(sr * (self.chunk_size_ms / 1000.0) * bytes_per_sample) or (160 if bytes_per_sample == 1 else 320)
                         # Zero-pad to a full frame boundary to avoid truncation artifacts
                         if len(rem) < frame_size:
                             rem = rem + (b"\x00" * (frame_size - len(rem)))
-                        await self._send_audio_chunk(call_id, stream_id, rem[:frame_size])
+                        await self._send_audio_chunk(call_id, stream_id, rem[:frame_size], target_fmt=fmt, target_rate=sr)
                         # small pacing to let Asterisk play the last frame
                         await asyncio.sleep(self.chunk_size_ms / 1000.0)
                     else:

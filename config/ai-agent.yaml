@@ -143,7 +143,7 @@ streaming:
   low_watermark_ms: 200      # Pause streaming when buffer dips below this watermark; rebuild depth to avoid underruns.
   provider_grace_ms: 500     # Absorb late provider chunks after stream cleanup (ms); prevents tail-chop artifacts.
   logging_level: "info"      # Optional override for streaming logger verbosity
-  egress_swap_mode: "force_false"  # Force LE PCM16 on egress to validate Asterisk expectations (auto|force_true|force_false)
+  egress_swap_mode: "auto"   # Auto-detect PCM16 byte order (auto|force_true|force_false)
 
 # Asterisk connection settings (will be overridden by environment variables)
 asterisk:
