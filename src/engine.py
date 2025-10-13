@@ -222,8 +222,22 @@ class Engine:
         # Initialize streaming playback manager
         streaming_config = {}
         if hasattr(config, 'streaming') and config.streaming:
+            audiosocket_fmt = "ulaw"
+            try:
+                if getattr(config, "audiosocket", None) and getattr(config.audiosocket, "format", None):
+                    audiosocket_fmt = str(config.audiosocket.format).lower()
+            except Exception:
+                audiosocket_fmt = "ulaw"
+            streaming_sample_rate = config.streaming.sample_rate
+            if self._canonicalize_encoding(audiosocket_fmt) in {"slin16", "linear16", "pcm16"}:
+                try:
+                    rate_hint = int(getattr(config.streaming, 'sample_rate', 0) or 0)
+                except Exception:
+                    rate_hint = 0
+                if rate_hint <= 0 or rate_hint == 8000:
+                    streaming_sample_rate = 16000
             streaming_config = {
-                'sample_rate': config.streaming.sample_rate,
+                'sample_rate': streaming_sample_rate,
                 'jitter_buffer_ms': config.streaming.jitter_buffer_ms,
                 'keepalive_interval_ms': config.streaming.keepalive_interval_ms,
                 'connection_timeout_ms': config.streaming.connection_timeout_ms,
@@ -235,7 +249,10 @@ class Engine:
                 'provider_grace_ms': config.streaming.provider_grace_ms,
                 'logging_level': config.streaming.logging_level,
                 'egress_swap_mode': getattr(config.streaming, 'egress_swap_mode', 'auto'),
-                'egress_force_mulaw': getattr(config.streaming, 'egress_force_mulaw', False),
+                'egress_force_mulaw': self._should_force_mulaw(
+                    getattr(config.streaming, 'egress_force_mulaw', False),
+                    audiosocket_fmt,
+                ),
             }
         # Debug/diagnostics: allow broadcasting outbound frames to all AudioSocket conns
         try:
@@ -3532,6 +3549,23 @@ class Engine:
         return mapping.get(token, token)
 
     @staticmethod
+    def _should_force_mulaw(force_flag: bool, audiosocket_fmt: Optional[str]) -> bool:
+        """Gate egress μ-law forcing to transports that actually expect μ-law frames."""
+        if not force_flag:
+            return False
+        canonical = Engine._canonicalize_encoding(audiosocket_fmt)
+        if canonical in ("", "ulaw", "mulaw", "g711_ulaw", "mu-law"):
+            return True
+        try:
+            logger.info(
+                "Disabling egress_force_mulaw for non-μ-law AudioSocket transport",
+                audiosocket_format=audiosocket_fmt,
+            )
+        except Exception:
+            pass
+        return False
+
+    @staticmethod
     def _infer_transport_from_frame(frame_len: int) -> Tuple[str, int]:
         """Infer transport format/sample-rate from canonical frame lengths."""
         mapping = {
@@ -3552,7 +3586,13 @@ class Engine:
     ) -> Tuple[bytes, int]:
         """Convert wire-format audio to PCM16 little-endian."""
         canonical = self._canonicalize_encoding(wire_fmt) or "ulaw"
-        rate = wire_rate or 8000
+        rate = wire_rate or 0
+        if rate <= 0:
+            try:
+                _, inferred_rate = self._infer_transport_from_frame(len(audio_bytes))
+            except Exception:
+                inferred_rate = 0
+            rate = inferred_rate or 8000
         pcm = audio_bytes
         try:
             if canonical in ("ulaw", "mulaw", "g711_ulaw", "mu-law"):

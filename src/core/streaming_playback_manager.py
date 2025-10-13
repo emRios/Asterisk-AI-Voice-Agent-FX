@@ -186,11 +186,43 @@ class StreamingPlaybackManager:
             logger.warning("Streaming playback logging level set to WARNING")
         elif self.logging_level not in ("info", "debug", "warning"):
             logger.info("Streaming playback logging level", value=self.logging_level)
-        
+
         logger.info("StreamingPlaybackManager initialized",
                    sample_rate=self.sample_rate,
                    jitter_buffer_ms=self.jitter_buffer_ms)
-    
+
+    @staticmethod
+    def _canonicalize_encoding(value: Optional[str]) -> str:
+        if not value:
+            return ""
+        token = str(value).strip().lower()
+        mapping = {
+            "mu-law": "ulaw",
+            "mulaw": "ulaw",
+            "g711_ulaw": "ulaw",
+            "g711ulaw": "ulaw",
+            "linear16": "slin16",
+            "pcm16": "slin16",
+            "slin": "slin16",
+            "slin12": "slin16",
+            "slin16": "slin16",
+        }
+        return mapping.get(token, token)
+
+    @staticmethod
+    def _is_mulaw(value: Optional[str]) -> bool:
+        canonical = StreamingPlaybackManager._canonicalize_encoding(value)
+        return canonical in {"ulaw", "mulaw", "g711_ulaw", "mu-law"}
+
+    @staticmethod
+    def _default_sample_rate_for_format(fmt: Optional[str], fallback: int) -> int:
+        canonical = StreamingPlaybackManager._canonicalize_encoding(fmt)
+        if canonical in {"ulaw", "mulaw", "g711_ulaw", "mu-law"}:
+            return 8000
+        if canonical in {"slin16", "linear16", "pcm16"}:
+            return fallback if fallback > 0 else 16000
+        return fallback if fallback > 0 else 8000
+
     async def start_streaming_playback(
         self,
         call_id: str,
@@ -308,17 +340,18 @@ class StreamingPlaybackManager:
             )
             self.keepalive_tasks[call_id] = keepalive_task
             
-            src_encoding = (source_encoding or "").lower().strip()
-            if not src_encoding:
-                # Default to PCM expectations when unspecified
-                src_encoding = "slin16"
+            src_encoding = self._canonicalize_encoding(source_encoding) or "slin16"
             try:
                 src_rate = int(source_sample_rate) if source_sample_rate is not None else self.sample_rate
             except Exception:
                 src_rate = self.sample_rate
 
             # Determine downstream target format/sample rate for this stream.
-            resolved_target_format = (target_encoding or self.audiosocket_format or "ulaw").lower()
+            resolved_target_format = (
+                self._canonicalize_encoding(target_encoding)
+                or self._canonicalize_encoding(self.audiosocket_format)
+                or "ulaw"
+            )
             try:
                 resolved_target_rate = (
                     int(target_sample_rate)
@@ -328,10 +361,19 @@ class StreamingPlaybackManager:
             except Exception:
                 resolved_target_rate = self.sample_rate
             if resolved_target_rate <= 0:
-                resolved_target_rate = self.sample_rate
-            if self.egress_force_mulaw:
+                resolved_target_rate = self._default_sample_rate_for_format(
+                    resolved_target_format,
+                    self.sample_rate,
+                )
+            mulaw_transport = self._is_mulaw(self.audiosocket_format)
+            if self.egress_force_mulaw and mulaw_transport:
                 resolved_target_format = "ulaw"
                 resolved_target_rate = 8000
+            elif not self._is_mulaw(resolved_target_format) and mulaw_transport and target_sample_rate is None:
+                resolved_target_rate = self._default_sample_rate_for_format(
+                    self.audiosocket_format,
+                    resolved_target_rate,
+                )
 
             self._resample_states[call_id] = None
             # Store stream info
@@ -339,7 +381,7 @@ class StreamingPlaybackManager:
             mode = self.egress_swap_mode
             egress_swap_auto = False
             try:
-                if (self.audiosocket_format or "ulaw").lower() in ("slin16", "linear16", "pcm16"):
+                if self._canonicalize_encoding(self.audiosocket_format) in {"slin16", "linear16", "pcm16"}:
                     egress_swap_auto = bool(session.vad_state.get("pcm16_inbound_swap", False))
             except Exception:
                 egress_swap_auto = False
@@ -514,13 +556,17 @@ class StreamingPlaybackManager:
         """Process audio chunks from jitter buffer."""
         try:
             stream_info = self.active_streams.get(call_id, {}) if call_id in self.active_streams else {}
-            target_fmt = (stream_info.get("target_format") or self.audiosocket_format or "ulaw").lower()
+            target_fmt = (
+                self._canonicalize_encoding(stream_info.get("target_format"))
+                or self._canonicalize_encoding(self.audiosocket_format)
+                or "ulaw"
+            )
             try:
                 target_rate = int(stream_info.get("target_sample_rate", self.sample_rate))
             except Exception:
                 target_rate = int(self.sample_rate)
             if target_rate <= 0:
-                target_rate = int(self.sample_rate)
+                target_rate = self._default_sample_rate_for_format(target_fmt, int(self.sample_rate))
 
             # Hold playback until jitter buffer has the minimum startup chunks
             ready = self._startup_ready.get(call_id, False)
@@ -633,15 +679,19 @@ class StreamingPlaybackManager:
         try:
             stream_info = self.active_streams.get(call_id, {}) if call_id in self.active_streams else {}
 
-            target_fmt = (stream_info.get("target_format") or self.audiosocket_format or "ulaw").lower()
+            target_fmt = (
+                self._canonicalize_encoding(stream_info.get("target_format"))
+                or self._canonicalize_encoding(self.audiosocket_format)
+                or "ulaw"
+            )
             try:
                 target_rate = int(stream_info.get("target_sample_rate", self.sample_rate))
             except Exception:
                 target_rate = int(self.sample_rate)
             if target_rate <= 0:
-                target_rate = int(self.sample_rate)
+                target_rate = self._default_sample_rate_for_format(target_fmt, int(self.sample_rate))
 
-            src_encoding_raw = (stream_info.get("source_encoding") or "").lower().strip()
+            src_encoding_raw = self._canonicalize_encoding(stream_info.get("source_encoding"))
             try:
                 src_rate = int(stream_info.get("source_sample_rate") or target_rate)
             except Exception:
@@ -655,8 +705,8 @@ class StreamingPlaybackManager:
 
             # Fast path: already matches target format and rate
             if (
-                src_encoding_raw in ("ulaw", "mulaw", "g711_ulaw", "mu-law")
-                and target_fmt in ("ulaw", "mulaw", "g711_ulaw", "mu-law")
+                self._is_mulaw(src_encoding_raw)
+                and self._is_mulaw(target_fmt)
                 and src_rate == target_rate
             ):
                 self._resample_states[call_id] = None
@@ -674,7 +724,7 @@ class StreamingPlaybackManager:
             resample_state = self._resample_states.get(call_id)
 
             # Convert source to PCM16 for resampling/format conversion when needed
-            if src_encoding_raw in ("ulaw", "mulaw", "g711_ulaw", "mu-law"):
+            if self._is_mulaw(src_encoding_raw):
                 working = mulaw_to_pcm16le(working)
                 src_encoding = "pcm16"
             else:
@@ -693,7 +743,7 @@ class StreamingPlaybackManager:
             self._resample_states[call_id] = resample_state
 
             # Convert to target encoding
-            if target_fmt in ("ulaw", "mulaw", "g711_ulaw", "mu-law"):
+            if self._is_mulaw(target_fmt):
                 return pcm16le_to_mulaw(working)
             # Otherwise target PCM16, with optional (or auto) egress byteswap
             return self._apply_pcm_endianness(call_id, working, stream_info, mode)
@@ -724,12 +774,22 @@ class StreamingPlaybackManager:
             stream_info = self.active_streams.get(call_id, {})
             if self.audio_diag_callback:
                 try:
-                    effective_fmt = (target_fmt or stream_info.get("target_format") or self.audiosocket_format or "ulaw")
-                    effective_rate = int(
-                        target_rate
-                        or stream_info.get("target_sample_rate")
-                        or self.sample_rate
+                    effective_fmt = (
+                        self._canonicalize_encoding(target_fmt)
+                        or self._canonicalize_encoding(stream_info.get("target_format"))
+                        or self._canonicalize_encoding(self.audiosocket_format)
+                        or "ulaw"
                     )
+                    try:
+                        effective_rate = int(
+                            target_rate
+                            or stream_info.get("target_sample_rate")
+                            or self.sample_rate
+                        )
+                    except Exception:
+                        effective_rate = self.sample_rate
+                    if effective_rate <= 0:
+                        effective_rate = self._default_sample_rate_for_format(effective_fmt, self.sample_rate)
                     stage = f"transport_out:{stream_info.get('playback_type', 'response')}"
                     await self.audio_diag_callback(call_id, stage, chunk, effective_fmt, effective_rate)
                 except Exception:
@@ -763,11 +823,17 @@ class StreamingPlaybackManager:
                     return False
                 # One-time debug for first outbound frame to identify codec/format
                 if call_id not in self._first_send_logged:
-                    fmt = (target_fmt or self.audiosocket_format or "ulaw").lower()
+                    fmt = (
+                        self._canonicalize_encoding(target_fmt)
+                        or self._canonicalize_encoding(self.audiosocket_format)
+                        or "ulaw"
+                    )
                     try:
                         sample_rate = int(target_rate if target_rate is not None else self.sample_rate)
                     except Exception:
                         sample_rate = self.sample_rate
+                    if sample_rate <= 0:
+                        sample_rate = self._default_sample_rate_for_format(fmt, self.sample_rate)
                     try:
                         egress_swap = bool(self.active_streams.get(call_id, {}).get('egress_swap', False))
                     except Exception:
@@ -850,7 +916,11 @@ class StreamingPlaybackManager:
         if not pcm_bytes:
             return pcm_bytes
 
-        target_fmt = (stream_info.get('target_format') or self.audiosocket_format or "ulaw").lower()
+        target_fmt = (
+            self._canonicalize_encoding(stream_info.get('target_format'))
+            or self._canonicalize_encoding(self.audiosocket_format)
+            or "ulaw"
+        )
         if target_fmt not in ("slin16", "linear16", "pcm16"):
             if call_id and not stream_info.get('egress_swap_skip_logged', False):
                 stream_info['egress_swap_skip_logged'] = True
@@ -944,18 +1014,24 @@ class StreamingPlaybackManager:
         return pcm_bytes
 
     def _frame_size_bytes(self, call_id: Optional[str] = None) -> int:
-        fmt = (self.audiosocket_format or "ulaw").lower()
+        fmt = (
+            self._canonicalize_encoding(self.audiosocket_format)
+            or "ulaw"
+        )
         sample_rate = self.sample_rate
         if call_id and call_id in self.active_streams:
             info = self.active_streams.get(call_id, {})
-            fmt = (info.get('target_format') or fmt).lower()
+            fmt = (
+                self._canonicalize_encoding(info.get('target_format'))
+                or fmt
+            )
             try:
                 sr = int(info.get('target_sample_rate', sample_rate))
             except Exception:
                 sr = sample_rate
             if sr > 0:
                 sample_rate = sr
-        bytes_per_sample = 1 if fmt in ("ulaw", "mulaw", "g711_ulaw", "mu-law") else 2
+        bytes_per_sample = 1 if self._is_mulaw(fmt) else 2
         frame_size = int(sample_rate * (self.chunk_size_ms / 1000.0) * bytes_per_sample)
         if frame_size <= 0:
             frame_size = 160 if bytes_per_sample == 1 else 320
@@ -1073,14 +1149,17 @@ class StreamingPlaybackManager:
                 # Convert provider-encoded buffer to μ-law @ 8 kHz for Asterisk file playback
                 try:
                     info = self.active_streams.get(call_id, {})
-                    src_encoding = str(info.get('source_encoding') or '').lower().strip() or 'slin16'
+                    src_encoding = (
+                        self._canonicalize_encoding(info.get('source_encoding'))
+                        or 'slin16'
+                    )
                     try:
                         src_rate = int(info.get('source_sample_rate') or 0) or self.sample_rate
                     except Exception:
                         src_rate = self.sample_rate
 
                     # Normalize to PCM16
-                    if src_encoding in ("ulaw", "mulaw", "g711_ulaw", "mu-law"):
+                    if self._is_mulaw(src_encoding):
                         pcm = mulaw_to_pcm16le(raw_buf)
                         src_rate = 8000
                     else:
@@ -1236,14 +1315,22 @@ class StreamingPlaybackManager:
                 if rem:
                     self._decrement_buffered_bytes(call_id, len(rem))
                     if self.audio_transport == "audiosocket":
-                        fmt = (self.audiosocket_format or "ulaw").lower()
+                        fmt = (
+                            self._canonicalize_encoding(self.audiosocket_format)
+                            or "ulaw"
+                        )
                         info = self.active_streams.get(call_id, {})
-                        fmt = (info.get('target_format') or fmt).lower()
+                        fmt = (
+                            self._canonicalize_encoding(info.get('target_format'))
+                            or fmt
+                        )
                         try:
                             sr = int(info.get('target_sample_rate', self.sample_rate))
                         except Exception:
                             sr = self.sample_rate
-                        bytes_per_sample = 1 if fmt in ("ulaw", "mulaw", "mu-law") else 2
+                        if sr <= 0:
+                            sr = self._default_sample_rate_for_format(fmt, self.sample_rate)
+                        bytes_per_sample = 1 if self._is_mulaw(fmt) else 2
                         frame_size = int(sr * (self.chunk_size_ms / 1000.0) * bytes_per_sample) or (160 if bytes_per_sample == 1 else 320)
                         # Zero-pad to a full frame boundary to avoid truncation artifacts
                         if len(rem) < frame_size:
@@ -1284,8 +1371,11 @@ class StreamingPlaybackManager:
                 if call_id in self.active_streams:
                     info = self.active_streams[call_id]
                     try:
-                        fmt = (self.audiosocket_format or "ulaw").lower()
-                        bps = 1 if fmt in ("ulaw", "mulaw", "g711_ulaw", "mu-law") else 2
+                        fmt = (
+                            self._canonicalize_encoding(self.audiosocket_format)
+                            or "ulaw"
+                        )
+                        bps = 1 if self._is_mulaw(fmt) else 2
                         sr = max(1, int(self.sample_rate))
                         tx = int(info.get('tx_bytes', 0))
                         eff_seconds = float(tx) / float(max(1, bps * sr))
