@@ -194,6 +194,9 @@ class StreamingPlaybackManager:
             self.diag_enable_taps = bool(self.streaming_config.get('diag_enable_taps', False))
         except Exception:
             self.diag_enable_taps = False
+        # If explicit flag is not set, enable taps when logging is DEBUG to aid diagnostics
+        if not self.diag_enable_taps and self.logging_level == "debug":
+            self.diag_enable_taps = True
         try:
             self.diag_pre_secs = int(self.streaming_config.get('diag_pre_secs', 2))
         except Exception:
