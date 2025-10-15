@@ -176,6 +176,8 @@ llm:
 
 # VAD Configuration - Optimized for 4+ second utterances
 vad:
+  use_provider_vad: true       # Delegate VAD/turn detection to provider (Deepgram)
+  enhanced_enabled: false      # Disable local enhanced VAD to avoid double-gating
   # WebRTC VAD settings
   webrtc_aggressiveness: 0   # Least aggressive (0-3) for telephony audio
   webrtc_start_frames: 3     # Consecutive frames to start recording
