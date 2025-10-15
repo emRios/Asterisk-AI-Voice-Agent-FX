@@ -330,6 +330,19 @@ class StreamingPlaybackManager:
                 else:
                     adaptive_min_ms = max(base_min_ms, 400)
             adaptive_min_chunks = max(1, int(math.ceil(adaptive_min_ms / chunk_ms)))
+            # Resume floor: ensure back-to-back resumes have a minimum budget (160–200ms)
+            try:
+                pg_ms = int(self.provider_grace_ms or 500)
+            except Exception:
+                pg_ms = 500
+            if playback_type == "greeting":
+                resume_floor_ms = base_min_ms
+            else:
+                if gap_ms <= pg_ms:
+                    resume_floor_ms = max(160, min(200, adaptive_min_ms))
+                else:
+                    resume_floor_ms = adaptive_min_ms
+            resume_floor_chunks = max(1, int(math.ceil(resume_floor_ms / chunk_ms)))
             configured_min_start = (
                 self.greeting_min_start_chunks if playback_type == "greeting" else adaptive_min_chunks
             )
@@ -347,12 +360,12 @@ class StreamingPlaybackManager:
                     applied_chunks=min_start_chunks,
                 )
             # Scale low watermark proportionally to the adaptive warm-up
-            # Use ~2/3 of min_start by default, but do not exceed configured low_watermark.
+            # Use ~2/3 of min_start by default, but do not go BELOW configured low_watermark (treat as floor).
             try:
                 scaled_lw = int(max(0, math.ceil(min_start_chunks * (2.0/3.0))))
             except Exception:
                 scaled_lw = min_start_chunks // 2
-            configured_low_watermark = min(self.low_watermark_chunks, scaled_lw)
+            configured_low_watermark = max(self.low_watermark_chunks, scaled_lw)
             low_watermark_chunks = 0
             if configured_low_watermark:
                 max_low = max(0, min_start_chunks - 1)
@@ -383,6 +396,8 @@ class StreamingPlaybackManager:
                     gap_ms=gap_ms,
                     adaptive_min_ms=(adaptive_min_ms if playback_type != "greeting" else base_min_ms),
                     adaptive_warmup_ms=(adaptive_min_ms if playback_type != "greeting" else base_min_ms),
+                    resume_floor_ms=resume_floor_ms,
+                    resume_floor_chunks=resume_floor_chunks,
                     min_start_chunks=min_start_chunks,
                     low_watermark_chunks=low_watermark_chunks,
                     chunk_ms=chunk_ms,
@@ -501,6 +516,7 @@ class StreamingPlaybackManager:
                 'first_frame_observed': False,
                 'min_start_chunks': min_start_chunks,
                 'low_watermark_chunks': low_watermark_chunks,
+                'resume_floor_chunks': resume_floor_chunks,
                 'jitter_buffer_chunks': jb_chunks,
                 'buffered_bytes': 0,
                 'end_reason': None,
@@ -708,7 +724,11 @@ class StreamingPlaybackManager:
                         min_need = int(self.active_streams.get(call_id, {}).get('min_start_chunks', self.min_start_chunks))
                     except Exception:
                         min_need = self.min_start_chunks
-                    target_frames = max(low_watermark_chunks + 1, min_need)
+                    try:
+                        resume_floor_chunks = int(self.active_streams.get(call_id, {}).get('resume_floor_chunks', min_need))
+                    except Exception:
+                        resume_floor_chunks = min_need
+                    target_frames = max(low_watermark_chunks + 1, min_need, resume_floor_chunks)
                     t0 = time.time()
                     try:
                         max_wait = max(0.2, float(self.provider_grace_ms) / 1000.0)
@@ -724,6 +744,8 @@ class StreamingPlaybackManager:
                                  call_id=call_id,
                                  stream_id=stream_id,
                                  target_frames=target_frames,
+                                 resume_floor_chunks=resume_floor_chunks,
+                                 min_start_chunks=min_need,
                                  buffered_frames=self._estimate_available_frames(call_id, jitter_buffer, include_remainder=False))
                     # Re-check loop conditions after rebuild
                     continue
