@@ -175,7 +175,7 @@ class StreamingPlaybackManager:
         # Per-call resampler state (used when converting between rates)
         self._resample_states: Dict[str, Optional[tuple]] = {}
         # Per-call DC-block filter state: last_x, last_y
-        self._dc_block_state: Dict[str, tuple[int, int]] = {}
+        self._dc_block_state: Dict[str, Tuple[float, float]] = {}
         # First outbound frame logged tracker
         self._first_send_logged: Set[str] = set()
         # Startup gating to allow jitter buffers to fill before playback begins
@@ -1096,17 +1096,15 @@ class StreamingPlaybackManager:
                     back_pcm = b""
                     try:
                         raw_pcm = mulaw_to_pcm16le(chunk)
-                        cleaned_pcm, dc_removed = self._remove_dc_from_pcm16(
+                        cleaned_pcm, _ = self._remove_dc_from_pcm16(
                             call_id,
                             raw_pcm,
                             threshold=256,
                             stage="stream-fastpath",
                         )
-                        if dc_removed:
-                            chunk = pcm16le_to_mulaw(cleaned_pcm)
-                            back_pcm = cleaned_pcm
-                        else:
-                            back_pcm = raw_pcm
+                        filtered_pcm = self._apply_dc_block(call_id, cleaned_pcm)
+                        chunk = pcm16le_to_mulaw(filtered_pcm)
+                        back_pcm = filtered_pcm
                     except Exception:
                         back_pcm = b""
 
@@ -1221,6 +1219,7 @@ class StreamingPlaybackManager:
                     threshold=256,
                     stage="stream-pipeline",
                 )
+                working = self._apply_dc_block(call_id, working)
                 src_encoding = "pcm16"
             else:
                 # Source is PCM16. Probe endianness once and auto-correct to little-endian for downstream ops.
@@ -1294,6 +1293,7 @@ class StreamingPlaybackManager:
                             pass
                 except Exception:
                     pass
+                working = self._apply_dc_block(call_id, working)
 
             # Resample to target rate when necessary
             if src_rate != target_rate:
@@ -1321,6 +1321,7 @@ class StreamingPlaybackManager:
                         stream_info['post_resample_dc_correction_logged'] = True
             except Exception:
                 pass
+            working = self._apply_dc_block(call_id, working)
             self._resample_states[call_id] = resample_state
 
             # Apply a light DC-block filter on PCM16 prior to target encoding
@@ -1338,6 +1339,7 @@ class StreamingPlaybackManager:
                     threshold=256,
                     stage="stream-pre-encode",
                 )
+                working = self._apply_dc_block(call_id, working)
                 if getattr(self, 'diag_enable_taps', False) and call_id in self.active_streams:
                     info = self.active_streams.get(call_id, {})
                     try:
@@ -1580,31 +1582,29 @@ class StreamingPlaybackManager:
             return None
 
     def _apply_dc_block(self, call_id: str, pcm_bytes: bytes, r: float = 0.995) -> bytes:
-        """Apply first-order DC-block filter y[n] = x[n] - x[n-1] + r*y[n-1] to PCM16 LE bytes."""
+        """Apply first-order DC-block filter y[n] = x[n] - x[n-1] + r*y[n-1]."""
         if not pcm_bytes:
             return pcm_bytes
         try:
             import array
-            # Interpret as little-endian signed 16-bit
+
             buf = array.array('h')
             buf.frombytes(pcm_bytes)
-            # Ensure correct endianness
             if buf.itemsize != 2:
                 return pcm_bytes
-            last = self._dc_block_state.get(call_id, (0, 0))
-            x1, y1 = int(last[0]), int(last[1])
-            # Filter
-            for i in range(len(buf)):
-                x0 = int(buf[i])
-                y0 = x0 - x1 + int(r * y1)
-                # Clamp to int16
-                if y0 > 32767:
-                    y0 = 32767
-                elif y0 < -32768:
-                    y0 = -32768
-                buf[i] = y0
-                x1, y1 = x0, y0
-            self._dc_block_state[call_id] = (x1, y1)
+
+            prev_x, prev_y = self._dc_block_state.get(call_id, (0.0, 0.0))
+            for idx, sample in enumerate(buf):
+                x = float(sample)
+                y = x - prev_x + r * prev_y
+                prev_x, prev_y = x, y
+                if y > 32767.0:
+                    y = 32767.0
+                elif y < -32768.0:
+                    y = -32768.0
+                buf[idx] = int(y)
+
+            self._dc_block_state[call_id] = (prev_x, prev_y)
             return buf.tobytes()
         except Exception:
             return pcm_bytes
@@ -2509,6 +2509,7 @@ class StreamingPlaybackManager:
                 del self.jitter_buffers[call_id]
             self._startup_ready.pop(call_id, None)
             self._resample_states.pop(call_id, None)
+            self._dc_block_state.pop(call_id, None)
             # Reset metrics
             try:
                 _STREAMING_ACTIVE_GAUGE.labels(call_id).set(0)
