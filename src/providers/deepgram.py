@@ -236,6 +236,11 @@ class DeepgramProvider(AIProviderInterface):
         if not greeting_val:
             greeting_val = "Hello, how can I help you today?"
 
+        listen_model = self._get_config_value('model', None) or getattr(self.llm_config, 'listen_model', None) or "nova-2-general"
+        speak_model = self._get_config_value('tts_model', None) or getattr(self.llm_config, 'tts_model', None) or "aura-asteria-en"
+        think_model = getattr(self.llm_config, 'model', None) or "gpt-4o"
+        think_prompt = getattr(self.llm_config, 'prompt', None) or "You are a helpful assistant."
+
         settings = {
             "type": "Settings",
             "audio": {
@@ -245,9 +250,9 @@ class DeepgramProvider(AIProviderInterface):
             "agent": {
                 "greeting": greeting_val,
                 "language": "en-US",
-                "listen": { "provider": { "type": "deepgram", "model": self.config.model } },
-                "think": { "provider": { "type": "open_ai", "model": self.llm_config.model }, "prompt": self.llm_config.prompt },
-                "speak": { "provider": { "type": "deepgram", "model": self.config.tts_model } }
+                "listen": { "provider": { "type": "deepgram", "model": listen_model } },
+                "think": { "provider": { "type": "open_ai", "model": think_model }, "prompt": think_prompt },
+                "speak": { "provider": { "type": "deepgram", "model": speak_model } }
             }
         }
         await self.websocket.send(json.dumps(settings))
