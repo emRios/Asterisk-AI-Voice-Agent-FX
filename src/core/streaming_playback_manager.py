@@ -642,15 +642,10 @@ class StreamingPlaybackManager:
             while True:
                 try:
                     # Wait for audio chunk with timeout
-                    chunk = await asyncio.wait_for(
-                        audio_chunks.get(), 
-                        timeout=fallback_timeout
-                    )
-                    
+                    chunk = await asyncio.wait_for(audio_chunks.get(), timeout=fallback_timeout)
+
                     if chunk is None:  # End of stream signal from provider
-                        logger.info("🎵 STREAMING PLAYBACK - End of stream",
-                                   call_id=call_id,
-                                   stream_id=stream_id)
+                        logger.info("🎵 STREAMING PLAYBACK - End of stream", call_id=call_id, stream_id=stream_id)
                         try:
                             if call_id in self.active_streams:
                                 self.active_streams[call_id]['end_reason'] = 'end-of-stream'
@@ -662,14 +657,9 @@ class StreamingPlaybackManager:
                         except Exception:
                             pass
                         break
-                    
-                    # Update timing
-                    now = time.time()
-                    last_send_time = now
-                    if call_id in self.active_streams:
-                        self.active_streams[call_id]['last_chunk_time'] = now
-                        self.active_streams[call_id]['chunks_sent'] += 1
-                    # Update metrics and session counters for queued chunk
+
+                    # Update timing and metrics
+                    last_send_time = time.time()
                     try:
                         _STREAMING_BYTES_TOTAL.labels(call_id).inc(len(chunk))
                         _STREAMING_JITTER_DEPTH.labels(call_id).set(jitter_buffer.qsize())
@@ -682,26 +672,41 @@ class StreamingPlaybackManager:
                     except Exception:
                         logger.debug("Streaming metrics update failed", call_id=call_id)
 
-                    # Add to jitter buffer
+                    # Enqueue provider chunk for downstream processing
                     await jitter_buffer.put(chunk)
+
+                    # Normalize buffered_bytes accounting to target (egress) bytes so warm-up gating matches wire frame size
                     try:
                         if call_id in self.active_streams:
                             info = self.active_streams[call_id]
-                            info['buffered_bytes'] = int(info.get('buffered_bytes', 0)) + len(chunk)
-                            # Track total bytes queued to this streaming segment (pre-send)
+                            src_enc = self._canonicalize_encoding(info.get('source_encoding')) or "slin16"
+                            try:
+                                src_rate = int(info.get('source_sample_rate') or 0) or int(self.sample_rate)
+                            except Exception:
+                                src_rate = int(self.sample_rate)
+                            tgt_fmt = self._canonicalize_encoding(info.get('target_format')) or self._canonicalize_encoding(self.audiosocket_format) or "ulaw"
+                            try:
+                                tgt_rate = int(info.get('target_sample_rate') or 0) or int(self.sample_rate)
+                            except Exception:
+                                tgt_rate = int(self.sample_rate)
+                            if tgt_rate <= 0:
+                                tgt_rate = self._default_sample_rate_for_format(tgt_fmt, int(self.sample_rate))
+                            src_bps = 1 if self._is_mulaw(src_enc) else 2
+                            tgt_bps = 1 if self._is_mulaw(tgt_fmt) else 2
+                            try:
+                                ratio = (tgt_bps / float(max(1, src_bps))) * (float(tgt_rate) / float(max(1, src_rate)))
+                                egress_bytes = int(max(1, round(len(chunk) * max(0.5, ratio))))
+                            except Exception:
+                                egress_bytes = len(chunk)
+                            info['buffered_bytes'] = int(info.get('buffered_bytes', 0)) + egress_bytes
                             info['queued_bytes'] = int(info.get('queued_bytes', 0)) + len(chunk)
                     except Exception:
                         pass
 
-                    # Producer does not drain; pacer loop handles jitter buffer consumption
-                    
                 except asyncio.TimeoutError:
                     # No audio chunk received within timeout
                     if time.time() - last_send_time > fallback_timeout:
-                        logger.warning("🎵 STREAMING PLAYBACK - Timeout, falling back to file playback",
-                                     call_id=call_id,
-                                     stream_id=stream_id,
-                                     timeout=fallback_timeout)
+                        logger.warning("🎵 STREAMING PLAYBACK - Timeout, falling back to file playback", call_id=call_id, stream_id=stream_id, timeout=fallback_timeout)
                         await self._record_fallback(call_id, f"timeout>{fallback_timeout}s")
                         await self._fallback_to_file_playback(call_id, stream_id)
                         if not sentinel_sent:
@@ -712,19 +717,6 @@ class StreamingPlaybackManager:
                                 pass
                         break
                     continue
-                    
-        except Exception as e:
-            logger.error("Error in streaming audio loop",
-                        call_id=call_id,
-                        stream_id=stream_id,
-                        error=str(e),
-                        exc_info=True)
-            await self._record_fallback(call_id, str(e))
-            await self._fallback_to_file_playback(call_id, stream_id)
-            if not sentinel_sent:
-                with suppress(asyncio.CancelledError, Exception):
-                    await jitter_buffer.put(_JITTER_SENTINEL)
-                sentinel_sent = True
         finally:
             if not sentinel_sent:
                 with suppress(asyncio.CancelledError, Exception):

@@ -1241,6 +1241,28 @@ class Engine:
 
             if not session.provider_session_active:
                 await self._start_provider_session(caller_channel_id)
+
+            # Start MixMonitor on the AudioSocket channel to capture agent leg for RCA
+            try:
+                ts = time.strftime("%Y%m%d-%H%M%S")
+                out_filename = f"out-{caller_channel_id}-{ts}.wav"
+                # Record only while bridged ('b'); default MixMonitor mixes read/write on this channel
+                app_args = f"{out_filename},b"
+                ok = await self.ari_client.execute_application(audiosocket_channel_id, "MixMonitor", app_args)
+                if ok:
+                    logger.info(
+                        "📼 MixMonitor started on AudioSocket channel",
+                        audiosocket_channel_id=audiosocket_channel_id,
+                        filename=out_filename,
+                    )
+                else:
+                    logger.warning(
+                        "Failed to start MixMonitor on AudioSocket channel",
+                        audiosocket_channel_id=audiosocket_channel_id,
+                        filename=out_filename,
+                    )
+            except Exception:
+                logger.debug("MixMonitor start failed on AudioSocket channel", exc_info=True)
         except Exception as exc:
             logger.error(
                 "🎯 HYBRID ARI - Failed to process AudioSocket channel",
