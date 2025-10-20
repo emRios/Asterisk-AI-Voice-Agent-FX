@@ -1242,27 +1242,34 @@ class Engine:
             if not session.provider_session_active:
                 await self._start_provider_session(caller_channel_id)
 
-            # Start MixMonitor on the AudioSocket channel to capture agent leg for RCA
+            # Start ARI channel recording on the AudioSocket channel to capture agent leg for RCA
             try:
                 ts = time.strftime("%Y%m%d-%H%M%S")
-                out_filename = f"out-{caller_channel_id}-{ts}.wav"
-                # Record only while bridged ('b'); default MixMonitor mixes read/write on this channel
-                app_args = f"{out_filename},b"
-                ok = await self.ari_client.execute_application(audiosocket_channel_id, "MixMonitor", app_args)
+                rec_name = f"out-{caller_channel_id}-{ts}"
+                ok = await self.ari_client.record_channel(
+                    audiosocket_channel_id,
+                    name=rec_name,
+                    format="wav",
+                    if_exists="overwrite",
+                    max_duration_seconds=360,
+                    max_silence_seconds=0,
+                    beep=False,
+                    terminate_on="none",
+                )
                 if ok:
                     logger.info(
-                        "📼 MixMonitor started on AudioSocket channel",
+                        "📼 ARI channel recording started on AudioSocket channel",
                         audiosocket_channel_id=audiosocket_channel_id,
-                        filename=out_filename,
+                        name=rec_name,
                     )
                 else:
                     logger.warning(
-                        "Failed to start MixMonitor on AudioSocket channel",
+                        "Failed to start ARI channel recording on AudioSocket channel",
                         audiosocket_channel_id=audiosocket_channel_id,
-                        filename=out_filename,
+                        name=rec_name,
                     )
             except Exception:
-                logger.debug("MixMonitor start failed on AudioSocket channel", exc_info=True)
+                logger.debug("ARI channel recording start failed on AudioSocket channel", exc_info=True)
         except Exception as exc:
             logger.error(
                 "🎯 HYBRID ARI - Failed to process AudioSocket channel",
@@ -1990,6 +1997,43 @@ class Engine:
                 profile_fmt = "ulaw"
                 profile_rate = 8000
             pcm_bytes, pcm_rate = self._wire_to_pcm16(audio_bytes, profile_fmt, swap_needed_flag, profile_rate)
+            # Remove DC bias and apply a light DC-block filter to stabilize ASR input
+            try:
+                if pcm_bytes:
+                    try:
+                        mean = int(audioop.avg(pcm_bytes, 2))
+                    except Exception:
+                        mean = 0
+                    if mean:
+                        try:
+                            pcm_bytes = audioop.bias(pcm_bytes, 2, -mean)
+                        except Exception:
+                            pass
+                    # Per-call DC-block state
+                    if not hasattr(self, "_dc_block_state_inbound"):
+                        self._dc_block_state_inbound = {}
+                    prev_x, prev_y = self._dc_block_state_inbound.get(caller_channel_id, (0.0, 0.0))
+                    try:
+                        import array
+                        r = 0.995
+                        buf = array.array('h')
+                        buf.frombytes(pcm_bytes)
+                        if buf.itemsize == 2:
+                            for i, s in enumerate(buf):
+                                x = float(int(s))
+                                y = x - prev_x + r * prev_y
+                                prev_x, prev_y = x, y
+                                if y > 32767.0:
+                                    y = 32767.0
+                                elif y < -32768.0:
+                                    y = -32768.0
+                                buf[i] = int(y)
+                            pcm_bytes = buf.tobytes()
+                            self._dc_block_state_inbound[caller_channel_id] = (prev_x, prev_y)
+                    except Exception:
+                        pass
+            except Exception:
+                logger.debug("Inbound DC conditioning failed", call_id=caller_channel_id, exc_info=True)
             try:
                 if pcm_bytes:
                     self._update_audio_diagnostics(session, "transport_in", pcm_bytes, "slin16", pcm_rate)

@@ -173,9 +173,9 @@ class StreamingPlaybackManager:
         except Exception:
             self.limiter_enabled = True
         try:
-            self.limiter_headroom_ratio: float = float(self.streaming_config.get('limiter_headroom_ratio', 0.8))
+            self.limiter_headroom_ratio: float = float(self.streaming_config.get('limiter_headroom_ratio', 0.65))
         except Exception:
-            self.limiter_headroom_ratio = 0.8
+            self.limiter_headroom_ratio = 0.65
         try:
             self.attack_ms: int = int(self.streaming_config.get('attack_ms', 25))  # fade-in at start of segment
         except Exception:
@@ -1490,8 +1490,24 @@ class StreamingPlaybackManager:
                         logger.debug("First-window snapshot failed (ulaw)", call_id=call_id, exc_info=True)
                     return ulaw_bytes
                 return pcm16le_to_mulaw(working)
-            # Otherwise target PCM16, with optional (or auto) egress byteswap
+            # Otherwise target PCM16, apply optional envelope/limiter, with optional (or auto) egress byteswap
+            # Short attack envelope to avoid hot-start clicks on PCM path too
+            try:
+                info = self.active_streams.get(call_id, {})
+                try:
+                    rate = int(target_rate)
+                except Exception:
+                    rate = target_rate
+                working = self._apply_attack_envelope(call_id, working, int(rate) if isinstance(rate, int) else int(self.sample_rate), info)
+            except Exception:
+                pass
             out_pcm = self._apply_pcm_endianness(call_id, working, stream_info, mode)
+            # Apply soft limiter on PCM egress to prevent clipping (mirrors μ-law path behavior)
+            try:
+                if self.limiter_enabled and out_pcm:
+                    out_pcm = self._apply_soft_limiter(out_pcm, self.limiter_headroom_ratio)
+            except Exception:
+                pass
             if getattr(self, 'diag_enable_taps', False) and call_id in self.active_streams:
                 info = self.active_streams.get(call_id, {})
                 try:

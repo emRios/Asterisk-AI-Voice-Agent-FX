@@ -293,6 +293,59 @@ class ARIClient:
             logger.error("Error stopping playback", playback_id=playback_id, exc_info=True)
             return False
 
+    async def record_channel(
+        self,
+        channel_id: str,
+        name: str,
+        format: str = "wav",
+        if_exists: str = "overwrite",
+        max_duration_seconds: int = 180,
+        max_silence_seconds: int = 0,
+        beep: bool = False,
+        terminate_on: str = "none",
+    ) -> bool:
+        """Start recording a channel via ARI (preferred over invoking MixMonitor).
+
+        ARI route: POST /ari/channels/{channelId}/record
+        Common params: name, format, ifExists, maxDurationSeconds, maxSilenceSeconds, beep, terminateOn
+        """
+        try:
+            logger.info(
+                "Starting ARI channel recording",
+                channel_id=channel_id,
+                name=name,
+                format=format,
+                ifExists=if_exists,
+            )
+            # Some ARI implementations accept JSON body for these params
+            payload = {
+                "name": name,
+                "format": format,
+                "ifExists": if_exists,
+                "maxDurationSeconds": int(max_duration_seconds),
+                "maxSilenceSeconds": int(max_silence_seconds),
+                "beep": bool(beep),
+                "terminateOn": terminate_on,
+            }
+            response = await self.send_command(
+                "POST",
+                f"channels/{channel_id}/record",
+                data=payload,
+            )
+            status = response.get("status") if isinstance(response, dict) else None
+            if status is not None and not (200 <= int(status) < 300):
+                logger.error(
+                    "Failed to start ARI channel recording",
+                    channel_id=channel_id,
+                    response=response,
+                )
+                return False
+            logger.info("ARI channel recording started", channel_id=channel_id, name=name)
+            return True
+        except Exception:
+            logger.error("Error starting ARI channel recording", channel_id=channel_id, exc_info=True)
+            return False
+
     async def add_channel_to_bridge(self, bridge_id: str, channel_id: str) -> bool:
         """Add a channel to a bridge."""
         try:
