@@ -64,7 +64,7 @@ if [ -n "$IN_WAVS" ]; then
 fi
 
 if [ -n "$CID" ]; then
-  ssh "$SERVER_USER@$SERVER_HOST" "CID=$CID; SRC=/tmp/ai-engine-captures/$CID; TMP=/tmp/ai-capture-$CID; TAR=/tmp/ai-capture-$CID.tgz; if docker exec ai_engine test -d $SRC; then docker cp ai_engine:$SRC $TMP 2>/dev/null && tar czf $TAR -C /tmp ai-capture-$CID && rm -rf $TMP; fi" || true
+  ssh "$SERVER_USER@$SERVER_HOST" "CID=$CID; SRC=/tmp/ai-engine-captures/\$CID; TMP=/tmp/ai-capture-\$CID; TAR=/tmp/ai-capture-\$CID.tgz; if docker exec ai_engine test -d \"\$SRC\"; then docker cp ai_engine:\"\$SRC\" \"\$TMP\" 2>/dev/null && tar czf \"\$TAR\" -C /tmp ai-capture-\$CID && rm -rf \"\$TMP\"; fi" || true
   if scp "$SERVER_USER@$SERVER_HOST:/tmp/ai-capture-$CID.tgz" "$BASE/" 2>/dev/null; then
     ssh "$SERVER_USER@$SERVER_HOST" "rm -f /tmp/ai-capture-$CID.tgz" || true
     mkdir -p "$BASE/captures"
@@ -74,6 +74,10 @@ fi
 
 # Fetch server-side ai-agent.yaml for transport/provider troubleshooting
 scp "$SERVER_USER@$SERVER_HOST:$PROJECT_PATH/config/ai-agent.yaml" "$BASE/config/" 2>/dev/null || true
+
+# Fetch Asterisk dialplan custom file and full log for context
+scp "$SERVER_USER@$SERVER_HOST:/etc/asterisk/extensions_custom.conf" "$BASE/config/" 2>/dev/null || true
+scp "$SERVER_USER@$SERVER_HOST:/var/log/asterisk/full" "$BASE/logs/asterisk-full.log" 2>/dev/null || true
 
 # Fetch Deepgram usage for this call when credentials are available (robust Python fallback).
 DG_PROJECT_ID="${DG_PROJECT_ID:-}"

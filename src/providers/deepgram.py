@@ -137,6 +137,10 @@ class DeepgramProvider(AIProviderInterface):
         self._model_caps_cache: Optional[Dict[str, Any]] = None
         self._caps_expires_at: float = 0.0
         self._caps_last_success: bool = False
+        # Settings retry state
+        self._settings_retry_attempted: bool = False
+        self._last_settings_payload: Optional[dict] = None
+        self._last_settings_minimal: Optional[dict] = None
 
     @property
     def supported_codecs(self) -> List[str]:
@@ -302,11 +306,12 @@ class DeepgramProvider(AIProviderInterface):
         # Only include speak-level override if capabilities were fetched and include this voice
         include_speak_override = bool(self._caps_last_success and isinstance(locals().get('caps', {}), dict) and speak_model in (caps or {}))
 
+        include_output_override = bool(self._caps_last_success)
+
         settings = {
             "type": "Settings",
             "audio": {
-            "input": { "encoding": input_format, "sample_rate": int(input_sample_rate) },
-            "output": { "encoding": self._dg_output_encoding, "sample_rate": int(self._dg_output_rate) }
+            "input": { "encoding": input_format, "sample_rate": int(input_sample_rate) }
             },
             "agent": {
             "greeting": greeting_val,
@@ -318,6 +323,11 @@ class DeepgramProvider(AIProviderInterface):
             }
             }
         }
+        if include_output_override:
+            try:
+                settings["audio"]["output"] = { "encoding": self._dg_output_encoding, "sample_rate": int(self._dg_output_rate) }
+            except Exception:
+                pass
         if include_speak_override:
             try:
                 settings["agent"]["speak"]["audio"] = {
@@ -328,6 +338,24 @@ class DeepgramProvider(AIProviderInterface):
                 }
             except Exception:
                 pass
+        # Build and store a minimal Settings payload for fallback retry on UNPARSABLE error
+        try:
+            self._last_settings_minimal = {
+                "type": "Settings",
+                "audio": {
+                    "input": { "encoding": input_format, "sample_rate": int(input_sample_rate) }
+                },
+                "agent": {
+                    "greeting": greeting_val,
+                    "language": "en-US",
+                    "listen": { "provider": { "type": "deepgram", "model": listen_model } },
+                    "think": { "provider": { "type": "open_ai", "model": think_model }, "prompt": think_prompt },
+                    "speak": { "provider": { "type": "deepgram", "model": speak_model } }
+                }
+            }
+        except Exception:
+            self._last_settings_minimal = None
+        self._last_settings_payload = settings
         await self.websocket.send(json.dumps(settings))
         # Mark settings sent; readiness only upon server response (ACK) or timeout
         self._settings_sent = True
@@ -365,13 +393,10 @@ class DeepgramProvider(AIProviderInterface):
                         logger.debug("Immediate greeting injection failed", exc_info=True)
             except Exception:
                 pass
-        asyncio.create_task(_inject_greeting_immediate())
-
         # Wait up to 1.0s for a server response to mark readiness
         try:
             if self._ack_event is not None:
                 await asyncio.wait_for(self._ack_event.wait(), timeout=1.0)
-                self._ready_to_stream = True
             else:
                 logger.debug("ACK gate not initialized; skipping wait")
         except asyncio.TimeoutError:
@@ -389,7 +414,8 @@ class DeepgramProvider(AIProviderInterface):
                         logger.debug("Greeting injection failed", exc_info=True)
             except Exception:
                 pass
-        asyncio.create_task(_inject_greeting_if_quiet())
+        # Disable fallback greeting injection; avoid extra messages pre-ack
+        # asyncio.create_task(_inject_greeting_if_quiet())
         summary = {
             "input_encoding": str(input_encoding).lower(),
             "input_sample_rate_hz": int(input_sample_rate),
@@ -840,13 +866,15 @@ class DeepgramProvider(AIProviderInterface):
                 if isinstance(message, str):
                     try:
                         event_data = json.loads(message)
-                        # Any server message after settings marks stream readiness and ACK
-                        self._ready_to_stream = True
-                        try:
-                            if self._ack_event and not self._ack_event.is_set():
-                                self._ack_event.set()
-                        except Exception:
-                            pass
+                        et = event_data.get("type") if isinstance(event_data, dict) else None
+                        # Mark readiness only upon SettingsApplied to avoid pre-ACK races
+                        if et == "SettingsApplied":
+                            self._ready_to_stream = True
+                            try:
+                                if self._ack_event and not self._ack_event.is_set():
+                                    self._ack_event.set()
+                            except Exception:
+                                pass
                         # One-time ACK settings log for effective audio configs (log full payload)
                         try:
                             if getattr(self, "_settings_sent", False) and not getattr(self, "_ack_logged", False):
@@ -903,15 +931,34 @@ class DeepgramProvider(AIProviderInterface):
                                 call_id=self.call_id,
                                 event_type=et,
                             )
-                            # Short-circuit on Settings Error per spec
-                            if et == "Error":
+                            # Set ACK gate only on SettingsApplied (not Welcome)
+                            if et == "SettingsApplied" and self._ack_event and not self._ack_event.is_set():
                                 try:
-                                    # Stop session to avoid sending to closed socket
-                                    asyncio.create_task(self.stop_session())
+                                    self._ack_event.set()
                                 except Exception:
                                     pass
-                                # Skip further processing of this message
-                                continue
+                            # Settings Error handling: retry once with minimal Settings, then stop
+                            if et == "Error":
+                                # Log payload details at error for RCA
+                                try:
+                                    logger.error("Deepgram error detail", call_id=self.call_id, payload=event_data)
+                                except Exception:
+                                    pass
+                                # If not yet retried and we have a minimal payload, attempt resend once
+                                if not self._settings_retry_attempted and self._last_settings_minimal and self.websocket and not self.websocket.closed:
+                                    try:
+                                        self._settings_retry_attempted = True
+                                        logger.warning("Deepgram Settings error; retrying with minimal Settings", call_id=self.call_id)
+                                        await self.websocket.send(json.dumps(self._last_settings_minimal))
+                                        # Do not continue here; allow loop to process next server message
+                                    except Exception:
+                                        logger.debug("Failed to send minimal Settings retry", exc_info=True)
+                                else:
+                                    try:
+                                        asyncio.create_task(self.stop_session())
+                                    except Exception:
+                                        pass
+                                    continue
                             if isinstance(event_data, dict) and et == "ConversationText":
                                 try:
                                     logger.info(
@@ -937,7 +984,7 @@ class DeepgramProvider(AIProviderInterface):
                         # Post-ACK injection when readiness events arrive and audio hasn't started
                         try:
                             et = event_data.get("type") if isinstance(event_data, dict) else None
-                            if et in ("SettingsApplied", "Welcome") and not self._in_audio_burst and self._greeting_injections < 2:
+                            if et == "SettingsApplied" and not self._in_audio_burst and self._greeting_injections < 2:
                                 if self.websocket and not self.websocket.closed:
                                     logger.info("Injecting greeting after ACK", call_id=self.call_id, event_type=et)
                                     self._greeting_injections += 1
@@ -1198,23 +1245,10 @@ class DeepgramProvider(AIProviderInterface):
     async def _inject_message_dual(self, text: str):
         if not text or not self.websocket:
             return
-        # Primary: V1 shape
         try:
             await self.websocket.send(json.dumps({"type": "InjectAgentMessage", "content": text}))
         except Exception:
-            logger.debug("Primary InjectAgentMessage failed", exc_info=True)
-        # Fallback: early-access variant for compatibility
-        async def _fallback_case():
-            try:
-                await asyncio.sleep(0.5)
-                if self.websocket and not self.websocket.closed and not self._in_audio_burst:
-                    try:
-                        await self.websocket.send(json.dumps({"type": "Inject Agent Message", "message": {"text": text}}))
-                    except Exception:
-                        logger.debug("Fallback Inject Agent Message failed", exc_info=True)
-            except Exception:
-                pass
-        asyncio.create_task(_fallback_case())
+            logger.debug("InjectAgentMessage failed", exc_info=True)
     
     def get_provider_info(self) -> Dict[str, Any]:
         """Get information about the provider and its capabilities."""

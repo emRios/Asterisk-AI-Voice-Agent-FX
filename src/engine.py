@@ -230,8 +230,13 @@ class Engine:
             except Exception:
                 audiosocket_fmt = "ulaw"
             streaming_sample_rate = int(getattr(config.streaming, 'sample_rate', 8000) or 8000)
+            # For PCM transport over AudioSocket, prefer 16 kHz by default unless explicitly set
             if self._canonicalize_encoding(audiosocket_fmt) in {"slin16", "linear16", "pcm16"}:
-                streaming_sample_rate = 8000
+                try:
+                    if not getattr(config.streaming, 'sample_rate', None):
+                        streaming_sample_rate = 16000
+                except Exception:
+                    streaming_sample_rate = 16000
             streaming_config = {
                 'sample_rate': streaming_sample_rate,
                 'jitter_buffer_ms': config.streaming.jitter_buffer_ms,

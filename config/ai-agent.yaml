@@ -114,7 +114,7 @@ downstream_mode: "stream"
 audiosocket:
   host: "0.0.0.0"          # Bind address (use 127.0.0.1 when engine and Asterisk share a host)
   port: 8090               # TCP port for AudioSocket connections
-  format: "slin"           # Wire format: 16-bit PCM LE @ 8kHz for AudioSocket; must match dialplan's AudioSocket() media argument.
+  format: "slin16"           # Wire format: 16-bit PCM LE @ 8kHz for AudioSocket; must match dialplan's AudioSocket() media argument.
 
 # Barge-in configuration
 barge_in:
@@ -131,7 +131,7 @@ barge_in:
 
 # Streaming configuration (for downstream_mode=stream)
 streaming:
-  sample_rate: 8000          # Output sample rate for streaming audio (μ-law 8kHz path)
+  sample_rate: 16000          # Output sample rate for streaming audio (μ-law 8kHz path)
   jitter_buffer_ms: 520      # Target depth; 520ms keeps at least min_start + spare in buffer
   keepalive_interval_ms: 5000 # Keepalive interval for streaming connections
   connection_timeout_ms: 10000 # Connection timeout for streaming
@@ -216,7 +216,7 @@ providers:
     input_sample_rate_hz: 8000
     continuous_input: true        # Stream audio continuously for best responsiveness
                                   # TIP: Keep this true for real-time conversations
-    allow_output_autodetect: true
+    allow_output_autodetect: false
     output_encoding: "linear16"
     output_sample_rate_hz: 8000
   openai:
