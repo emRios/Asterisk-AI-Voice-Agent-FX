@@ -2046,6 +2046,53 @@ class Engine:
             except Exception:
                 logger.debug("Inbound diagnostics update failed", call_id=caller_channel_id, exc_info=True)
 
+            # Unconditional continuous-input forward: Deepgram expects raw audio flow
+            try:
+                provider_name = getattr(session, 'provider_name', None) or self.config.default_provider
+                provider = self.providers.get(provider_name)
+            except Exception:
+                provider = None
+            continuous_input = False
+            try:
+                if provider_name == "deepgram":
+                    continuous_input = True
+                else:
+                    pcfg = getattr(provider, 'config', None)
+                    if isinstance(pcfg, dict):
+                        continuous_input = bool(pcfg.get('continuous_input', False))
+                    else:
+                        continuous_input = bool(getattr(pcfg, 'continuous_input', False))
+            except Exception:
+                continuous_input = False
+            if continuous_input and provider and hasattr(provider, 'send_audio'):
+                # Forward immediately, independent of audio_capture_enabled/VAD
+                try:
+                    self._update_audio_diagnostics(session, "provider_in", pcm_bytes, "slin16", pcm_rate)
+                except Exception:
+                    logger.debug("Provider input diagnostics update failed (unconditional)", call_id=caller_channel_id, exc_info=True)
+                try:
+                    prov_payload, prov_enc, prov_rate = self._encode_for_provider(
+                        session.call_id,
+                        provider_name,
+                        provider,
+                        pcm_bytes,
+                        pcm_rate,
+                    )
+                    try:
+                        self.audio_capture.append_encoded(
+                            session.call_id,
+                            "caller_to_provider",
+                            prov_payload,
+                            prov_enc,
+                            prov_rate,
+                        )
+                    except Exception:
+                        logger.debug("Provider input capture failed (unconditional)", call_id=session.call_id, exc_info=True)
+                    await provider.send_audio(prov_payload)
+                except Exception:
+                    logger.debug("Provider continuous-input forward error (unconditional)", call_id=caller_channel_id, exc_info=True)
+                return
+
             # Post-TTS end protection: drop inbound briefly after gating clears to avoid agent echo re-capture
             try:
                 cfg = getattr(self.config, 'barge_in', None)
