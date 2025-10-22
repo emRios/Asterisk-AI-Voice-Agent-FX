@@ -1116,31 +1116,14 @@ class StreamingPlaybackManager:
                     guard_ok = True
 
                 if guard_ok:
-                    # Decode once so we can scrub DC bias and reuse for diagnostics
+                    # BYPASS ALL AUDIO PROCESSING - pass mulaw through unchanged
+                    # The DC block filter and other processing was corrupting audio
                     back_pcm = b""
                     try:
+                        # Only decode for diagnostics tap, don't use for actual audio
                         raw_pcm = mulaw_to_pcm16le(chunk)
-                        cleaned_pcm, _ = self._remove_dc_from_pcm16(
-                            call_id,
-                            raw_pcm,
-                            threshold=256,
-                            stage="stream-fastpath",
-                        )
-                        filtered_pcm = self._apply_dc_block(call_id, cleaned_pcm)
-                        # Apply attack envelope on first window and limiter before re-encoding
-                        try:
-                            info = self.active_streams.get(call_id, {})
-                            rate_fp = int(target_rate) if isinstance(target_rate, int) else int(self.sample_rate)
-                            filtered_pcm = self._apply_attack_envelope(call_id, filtered_pcm, rate_fp, info)
-                        except Exception:
-                            pass
-                        if self.limiter_enabled:
-                            try:
-                                filtered_pcm = self._apply_soft_limiter(filtered_pcm, self.limiter_headroom_ratio)
-                            except Exception:
-                                pass
-                        chunk = pcm16le_to_mulaw(filtered_pcm)
-                        back_pcm = filtered_pcm
+                        back_pcm = raw_pcm
+                        # chunk already contains the original mulaw - don't re-encode
                     except Exception:
                         back_pcm = b""
 
@@ -1646,58 +1629,12 @@ class StreamingPlaybackManager:
             return None
 
     def _apply_dc_block(self, call_id: str, pcm_bytes: bytes, r: float = 0.995) -> bytes:
-        """Apply first-order DC-block filter y[n] = x[n] - x[n-1] + r*y[n-1]."""
-        if not pcm_bytes:
-            return pcm_bytes
-        try:
-            import array
-
-            buf = array.array('h')
-            buf.frombytes(pcm_bytes)
-            if buf.itemsize != 2:
-                return pcm_bytes
-
-            prev_x, prev_y = self._dc_block_state.get(call_id, (0.0, 0.0))
-            for idx, sample in enumerate(buf):
-                x = float(sample)
-                y = x - prev_x + r * prev_y
-                prev_x, prev_y = x, y
-                if y > 32767.0:
-                    y = 32767.0
-                elif y < -32768.0:
-                    y = -32768.0
-                buf[idx] = int(y)
-
-            self._dc_block_state[call_id] = (prev_x, prev_y)
-            return buf.tobytes()
-        except Exception:
-            return pcm_bytes
+        """DISABLED - DC-block filter was corrupting audio samples."""
+        return pcm_bytes
 
     def _apply_soft_limiter(self, pcm_bytes: bytes, headroom_ratio: float = 0.8) -> bytes:
-        """Apply a simple soft limiter (tanh-based) to PCM16 to prevent clipping before μ-law encoding.
-        headroom_ratio defines the target ceiling as a fraction of full-scale (default 0.8).
-        """
-        if not pcm_bytes:
-            return pcm_bytes
-        try:
-            import array, math
-            ceiling = max(1, int(32767 * max(0.1, min(0.99, float(headroom_ratio)))))
-            buf = array.array('h')
-            buf.frombytes(pcm_bytes)
-            if buf.itemsize != 2:
-                return pcm_bytes
-            inv = 1.0 / float(ceiling)
-            for i in range(len(buf)):
-                x = int(buf[i])
-                y = int(round(ceiling * math.tanh(x * inv)))
-                if y > 32767:
-                    y = 32767
-                elif y < -32768:
-                    y = -32768
-                buf[i] = y
-            return buf.tobytes()
-        except Exception:
-            return pcm_bytes
+        """DISABLED - limiter was causing unnecessary audio processing."""
+        return pcm_bytes
 
     def _apply_attack_envelope(self, call_id: str, pcm_bytes: bytes, sample_rate: int, stream_info: Dict[str, Any]) -> bytes:
         """Apply a short linear attack envelope at the start of a streaming segment to avoid hot starts.
