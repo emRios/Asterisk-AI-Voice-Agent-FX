@@ -132,12 +132,12 @@ barge_in:
 # Streaming configuration (for downstream_mode=stream)
 streaming:
   sample_rate: 8000           # Output sample rate for streaming audio (telephony μ-law baseline)
-  jitter_buffer_ms: 520      # Target depth; 520ms keeps at least min_start + spare in buffer
+  jitter_buffer_ms: 700      # Larger buffer to reduce underflows during provider silence
   keepalive_interval_ms: 5000 # Keepalive interval for streaming connections
-  connection_timeout_ms: 10000 # Connection timeout for streaming
+  connection_timeout_ms: 120000 # Extended to tolerate long provider pauses in continuous mode
   fallback_timeout_ms: 8000   # No audio sent for this long → fall back to file playback
   chunk_size_ms: 20          # Wire pacing for AudioSocket: 20 ms frames (320 bytes PCM16 @ 8kHz)
-  min_start_ms: 300          # Warm-up buffer before first frame; 300ms aligns with proven μ-law baseline.
+  min_start_ms: 450          # Longer warm-up to stabilize buffer before first frame
   low_watermark_ms: 200      # Pause when depth < ~2/3 of min_start; 200ms keeps shallow buffer without starving.
   provider_grace_ms: 60      # Short tail grace so cleanup finishes quickly without dragging cadence.
   logging_level: "debug"      # Optional override for streaming logger verbosity

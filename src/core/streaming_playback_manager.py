@@ -292,6 +292,16 @@ class StreamingPlaybackManager:
             diag_enable_taps=bool(self.diag_enable_taps),
             diag_out_dir=str(self.diag_out_dir),
         )
+        try:
+            logger.info(
+                "Streaming mode",
+                continuous_stream=bool(self.continuous_stream),
+                normalizer_enabled=bool(self.normalizer_enabled),
+                normalizer_target_rms=int(self.normalizer_target_rms),
+                normalizer_max_gain_db=float(self.normalizer_max_gain_db),
+            )
+        except Exception:
+            pass
     
     @staticmethod
     def _canonicalize_encoding(value: Optional[str]) -> str:
@@ -702,6 +712,10 @@ class StreamingPlaybackManager:
                         _STREAMING_BYTES_TOTAL.labels(call_id).inc(len(chunk))
                         _STREAMING_JITTER_DEPTH.labels(call_id).set(jitter_buffer.qsize())
                         _STREAMING_LAST_CHUNK_AGE.labels(call_id).set(0.0)
+                        # Track per-call queued total as well as segment-local queued_bytes
+                        info = self.active_streams.get(call_id)
+                        if info is not None:
+                            info['queued_total_bytes'] = int(info.get('queued_total_bytes', 0) or 0) + len(chunk)
                         sess = await self.session_store.get_by_call_id(call_id)
                         if sess:
                             sess.streaming_bytes_sent += len(chunk)
@@ -1704,6 +1718,11 @@ class StreamingPlaybackManager:
             if gain <= 1.01:
                 # Avoid tiny changes to reduce CPU
                 return pcm_bytes
+            try:
+                gain_db = 20.0 * math.log10(max(1e-6, gain))
+                logger.debug("Normalizer applied", target_rms=target_rms, current_rms=int(rms), gain_db=round(gain_db, 2))
+            except Exception:
+                pass
             # Apply and clip
             for i, s in enumerate(buf):
                 y = float(s) * gain
@@ -1804,7 +1823,9 @@ class StreamingPlaybackManager:
                     try:
                         _STREAM_TX_BYTES.labels(call_id).inc(len(chunk))
                         if call_id in self.active_streams:
-                            self.active_streams[call_id]['tx_bytes'] = int(self.active_streams[call_id].get('tx_bytes', 0)) + len(chunk)
+                            info = self.active_streams[call_id]
+                            info['tx_bytes'] = int(info.get('tx_bytes', 0)) + len(chunk)
+                            info['tx_total_bytes'] = int(info.get('tx_total_bytes', 0) or 0) + len(chunk)
                     except Exception:
                         pass
                 return success
@@ -1919,7 +1940,9 @@ class StreamingPlaybackManager:
                     try:
                         _STREAM_TX_BYTES.labels(call_id).inc(len(chunk))
                         if call_id in self.active_streams:
-                            self.active_streams[call_id]['tx_bytes'] = int(self.active_streams[call_id].get('tx_bytes', 0)) + len(chunk)
+                            info = self.active_streams[call_id]
+                            info['tx_bytes'] = int(info.get('tx_bytes', 0)) + len(chunk)
+                            info['tx_total_bytes'] = int(info.get('tx_total_bytes', 0) or 0) + len(chunk)
                     except Exception:
                         pass
                 # First-frame observability
@@ -2194,7 +2217,11 @@ class StreamingPlaybackManager:
         try:
             info = self.active_streams.get(call_id)
             if info is not None:
+                # Per-segment bytes (last segment)
                 info['provider_bytes'] = int(provider_bytes)
+                # Call-total accumulation for provider bytes
+                prev_total = int(info.get('provider_total_bytes', 0) or 0)
+                info['provider_total_bytes'] = prev_total + int(provider_bytes)
         except Exception:
             pass
 
@@ -2328,21 +2355,26 @@ class StreamingPlaybackManager:
                                  stream_id=stream_id,
                                  time_since_last_chunk=time_since_last_chunk)
                     _STREAMING_KEEPALIVE_TIMEOUTS_TOTAL.labels(call_id).inc()
-                    try:
-                        if call_id in self.active_streams:
-                            self.active_streams[call_id]['end_reason'] = 'keepalive-timeout'
-                    except Exception:
-                        pass
-                    try:
-                        sess = await self.session_store.get_by_call_id(call_id)
-                        if sess:
-                            sess.streaming_keepalive_timeouts += 1
-                            sess.last_streaming_error = f"keepalive-timeout>{time_since_last_chunk:.2f}s"
-                            await self.session_store.upsert_call(sess)
-                    except Exception:
-                        pass
-                    await self._fallback_to_file_playback(call_id, stream_id)
-                    break
+                    # In continuous-stream mode, do NOT fallback or end the stream; continue pacing
+                    if not self.continuous_stream:
+                        try:
+                            if call_id in self.active_streams:
+                                self.active_streams[call_id]['end_reason'] = 'keepalive-timeout'
+                        except Exception:
+                            pass
+                        try:
+                            sess = await self.session_store.get_by_call_id(call_id)
+                            if sess:
+                                sess.streaming_keepalive_timeouts += 1
+                                sess.last_streaming_error = f"keepalive-timeout>{time_since_last_chunk:.2f}s"
+                                await self.session_store.upsert_call(sess)
+                        except Exception:
+                            pass
+                        await self._fallback_to_file_playback(call_id, stream_id)
+                        break
+                    else:
+                        # Continuous: just keep the pacer alive; no action required
+                        continue
                 
                 # Send keepalive (placeholder)
                 logger.debug("🎵 STREAMING KEEPALIVE - Sending keepalive",
@@ -2408,12 +2440,14 @@ class StreamingPlaybackManager:
             if not info:
                 return
             try:
-                rate = int(info.get('target_sample_rate') or self.sample_rate)
+                rate = int(info.get('target_sample_rate') or 0)
             except Exception:
+                rate = 0
+            if rate <= 0:
                 rate = int(self.sample_rate)
             total_attack_bytes = int(max(0, int(rate * (self.attack_ms / 1000.0)) * 2))
             info['attack_bytes_remaining'] = total_attack_bytes
-            logger.debug("Marked segment boundary; attack reset", call_id=call_id, attack_bytes=total_attack_bytes)
+            logger.debug("Marked segment boundary; attack reset", call_id=call_id, attack_bytes=total_attack_bytes, attack_ms=self.attack_ms, rate=rate)
         except Exception:
             logger.debug("Failed to mark segment boundary", call_id=call_id, exc_info=True)
 
