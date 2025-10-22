@@ -1296,21 +1296,29 @@ class DeepgramProvider(AIProviderInterface):
                             elif rms_alaw > rms_mulaw * 1.2:  # A-law is clearly better
                                 pcm = pcm_alaw
                                 law = "alaw"
-                                # Data is A-law - convert directly to μ-law WITHOUT going through PCM
-                                # to avoid double-companding distortion
+                                # Data is A-law - Deepgram is sending 16kHz but claiming 8kHz!
+                                # Need to downsample from 16kHz to 8kHz
                                 try:
-                                    # Direct A-law to μ-law conversion table
-                                    payload_ulaw = audioop.lin2ulaw(pcm_alaw, 2)
+                                    # Assume 16kHz input (Deepgram bug - they send 16kHz despite API saying 8kHz)
+                                    from src.audio.resampler import resample_audio
+                                    pcm_8k, _ = resample_audio(pcm_alaw, 16000, 8000, state=None)
+                                    payload_ulaw = audioop.lin2ulaw(pcm_8k, 2)
                                     logger.warning(
-                                        "⚠️ Converted A-law → μ-law directly (Deepgram sent A-law despite mulaw request)",
+                                        "⚠️ Converted A-law 16kHz → μ-law 8kHz (Deepgram sent 16kHz A-law despite 8kHz request)",
                                         call_id=self.call_id,
                                         reason="higher_rms",
+                                        input_samples=len(pcm_alaw)//2,
+                                        output_samples=len(pcm_8k)//2,
                                         mulaw_rms=rms_mulaw,
                                         alaw_rms=rms_alaw,
                                     )
                                 except Exception as e:
-                                    logger.error(f"A-law to μ-law conversion failed: {e}")
-                                    payload_ulaw = message
+                                    logger.error(f"A-law 16kHz→8kHz conversion failed: {e}", exc_info=True)
+                                    # Fallback: try without resampling
+                                    try:
+                                        payload_ulaw = audioop.lin2ulaw(pcm_alaw, 2)
+                                    except:
+                                        payload_ulaw = message
                             else:
                                 # Similar RMS - default to configured μ-law
                                 pcm = pcm_mulaw
