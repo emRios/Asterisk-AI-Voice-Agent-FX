@@ -936,8 +936,15 @@ class DeepgramProvider(AIProviderInterface):
                                 # Determine if settings were accepted
                                 requested_encoding = self._dg_output_encoding
                                 requested_rate = self._dg_output_rate
-                                settings_accepted = bool(ack_encoding and ack_rate)
-                                settings_match = (ack_encoding == requested_encoding and ack_rate == requested_rate)
+                                
+                                # Voice Agent API's SettingsApplied event doesn't include audio details
+                                # The presence of the event itself means settings were accepted
+                                settings_accepted = True  # SettingsApplied received = accepted
+                                
+                                # Check for explicit mismatch only if ACK has values
+                                settings_match = True
+                                if ack_encoding and ack_rate:
+                                    settings_match = (ack_encoding == requested_encoding and ack_rate == requested_rate)
                                 
                                 logger.info(
                                     "🔧 DEEPGRAM ACK SETTINGS",
@@ -961,13 +968,13 @@ class DeepgramProvider(AIProviderInterface):
                                     full_ack=event_data,
                                 )
                                 
-                                if not settings_accepted:
-                                    logger.warning(
-                                        "⚠️ DEEPGRAM REJECTED OUTPUT SETTINGS (empty ack_audio)",
+                                # Empty ACK is normal for Voice Agent API
+                                if not audio_ack or (not ack_encoding and not ack_rate):
+                                    logger.debug(
+                                        "Deepgram SettingsApplied without audio details (normal for Voice Agent API)",
                                         call_id=self.call_id,
                                         requested_encoding=requested_encoding,
                                         requested_rate=requested_rate,
-                                        will_fallback_to_defaults=True,
                                     )
                                 elif not settings_match:
                                     logger.warning(

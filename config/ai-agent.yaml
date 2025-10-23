@@ -114,7 +114,7 @@ downstream_mode: "stream"
 audiosocket:
   host: "0.0.0.0"          # Bind address (use 127.0.0.1 when engine and Asterisk share a host)
   port: 8090               # TCP port for AudioSocket connections
-  format: "slin"             # Wire format: PCM16 @ 8kHz (AudioSocket protocol TYPE 0x10)
+  format: "slin16"           # Wire format: PCM16 @ 16kHz (AudioSocket protocol TYPE 0x12)
 
 # Barge-in configuration
 barge_in:
@@ -131,7 +131,7 @@ barge_in:
 
 # Streaming configuration (for downstream_mode=stream)
 streaming:
-  sample_rate: 8000           # Output sample rate for streaming audio (telephony standard)
+  sample_rate: 16000          # Output sample rate for streaming audio (wideband HD)
   jitter_buffer_ms: 500         # Reduced for localhost (was 950ms) - AI Engine on same host
   keepalive_interval_ms: 5000 # Keepalive interval for streaming connections
   connection_timeout_ms: 120000 # Extended to tolerate long provider pauses in continuous mode
@@ -224,13 +224,13 @@ providers:
     tts_model: "aura-2-thalia-en"
     greeting: "Hello, how can I help you today?"
     instructions: "Voice assistant. Answer in 5-8 words. Be direct. Expand only if asked."
-    input_encoding: "mulaw"
-    input_sample_rate_hz: 8000
+    input_encoding: "linear16"
+    input_sample_rate_hz: 16000
     continuous_input: true        # Stream audio continuously for best responsiveness
                                   # TIP: Keep this true for real-time conversations
     allow_output_autodetect: false
-    output_encoding: "mulaw"
-    output_sample_rate_hz: 8000
+    output_encoding: "linear16"
+    output_sample_rate_hz: 16000
   openai:
     enabled: false
     api_key: "${OPENAI_API_KEY}"
