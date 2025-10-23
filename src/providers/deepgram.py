@@ -310,12 +310,12 @@ class DeepgramProvider(AIProviderInterface):
         # Always include explicit audio.output so provider emits the format we expect
         include_output_override = True
 
-        # Use Twilio's exact working configuration
+        # Build settings with configured audio formats (not hardcoded)
         settings = {
             "type": "Settings",
             "audio": {
-                "input": { "encoding": "mulaw", "sample_rate": 8000 },
-                "output": { "encoding": "mulaw", "sample_rate": 8000, "container": "none" }
+                "input": { "encoding": input_format, "sample_rate": int(input_sample_rate) },
+                "output": { "encoding": output_format, "sample_rate": int(output_sample_rate), "container": "none" }
             },
             "agent": {
                 "language": "en",  # Twilio uses "en" not "en-US"
