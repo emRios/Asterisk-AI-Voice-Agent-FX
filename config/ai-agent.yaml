@@ -114,7 +114,7 @@ downstream_mode: "stream"
 audiosocket:
   host: "0.0.0.0"          # Bind address (use 127.0.0.1 when engine and Asterisk share a host)
   port: 8090               # TCP port for AudioSocket connections
-  format: "ulaw"             # Wire format: PCM16 @ 8kHz (AudioSocket protocol TYPE 0x10)
+  format: "slin"             # Wire format: PCM16 @ 8kHz (AudioSocket protocol TYPE 0x10)
 
 # Barge-in configuration
 barge_in:
@@ -137,10 +137,10 @@ streaming:
   connection_timeout_ms: 120000 # Extended to tolerate long provider pauses in continuous mode
   fallback_timeout_ms: 8000   # No audio sent for this long → fall back to file playback
   chunk_size_ms: 20          # Wire pacing for AudioSocket: 20 ms frames (320 bytes PCM16 @ 8kHz)
-  min_start_ms: 700            # Longer warm-up to stabilize buffer before first frame
-  low_watermark_ms: 350        # Pause when depth drops below ~350 ms (keeps cushion)
+  min_start_ms: 120            # Longer warm-up to stabilize buffer before first frame
+  low_watermark_ms: 80         # Pause when depth drops below ~350 ms (keeps cushion)
   greeting_min_start_ms: 40     # Faster greeting playback start
-  provider_grace_ms: 60      # Short tail grace so cleanup finishes quickly without dragging cadence.
+  provider_grace_ms: 500      # Short tail grace so cleanup finishes quickly without dragging cadence.
   logging_level: "debug"      # Optional override for streaming logger verbosity
   egress_swap_mode: "auto"   # Auto: follow inbound slin16 swap probe for PCM16 byte order
   egress_force_mulaw: false
