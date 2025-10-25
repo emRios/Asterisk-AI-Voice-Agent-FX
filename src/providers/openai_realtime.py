@@ -295,7 +295,47 @@ class OpenAIRealtimeProvider(AIProviderInterface):
             logger.error("Failed to connect to OpenAI Realtime", call_id=call_id, exc_info=True)
             raise
 
-        # Send session configuration
+        # CRITICAL FIX: Wait for session.created before configuring (per OpenAI docs)
+        # "The server sends session.created as the first inbound message.
+        # session.update sent before session.created is ignored."
+        logger.debug("Waiting for session.created from OpenAI...", call_id=call_id)
+        try:
+            first_message = await asyncio.wait_for(
+                self.websocket.recv(),
+                timeout=5.0
+            )
+            first_event = json.loads(first_message)
+            
+            if first_event.get("type") == "session.created":
+                session_data = first_event.get("session", {})
+                logger.info(
+                    "✅ Received session.created - session ready",
+                    call_id=call_id,
+                    session_id=session_data.get("id"),
+                    model=session_data.get("model"),
+                )
+            else:
+                logger.warning(
+                    "Unexpected first event (expected session.created)",
+                    call_id=call_id,
+                    event_type=first_event.get("type")
+                )
+        except asyncio.TimeoutError:
+            logger.error(
+                "Timeout waiting for session.created",
+                call_id=call_id
+            )
+            raise RuntimeError("OpenAI did not send session.created within 5s")
+        except Exception as exc:
+            logger.error(
+                "Error receiving session.created",
+                call_id=call_id,
+                error=str(exc),
+                exc_info=True
+            )
+            raise
+
+        # NOW send session configuration (server is ready)
         await self._send_session_update()
         self._log_session_assumptions()
         
@@ -513,8 +553,9 @@ class OpenAIRealtimeProvider(AIProviderInterface):
             "output_audio_format": out_fmt,
             "voice": self.config.voice,
         }
-        # CRITICAL FIX #1: Configure server-side VAD to prevent echo detection
-        # Default: Use more conservative settings to avoid detecting agent's own voice as user speech
+        # CRITICAL FIX #2: Let OpenAI handle VAD with its optimized defaults
+        # Only override if explicitly configured in YAML
+        # OpenAI's defaults are tuned for their audio processing pipeline
         if getattr(self.config, "turn_detection", None):
             try:
                 td = self.config.turn_detection
@@ -524,16 +565,16 @@ class OpenAIRealtimeProvider(AIProviderInterface):
                     "threshold": td.threshold,
                     "prefix_padding_ms": td.prefix_padding_ms,
                 }
+                logger.info(
+                    "Using custom turn_detection config from YAML",
+                    call_id=self._call_id,
+                    threshold=td.threshold,
+                    silence_ms=td.silence_duration_ms,
+                )
             except Exception:
                 logger.debug("Failed to include turn_detection in session.update", call_id=self._call_id, exc_info=True)
-        else:
-            # Default VAD configuration: Less sensitive to reduce echo/feedback false positives
-            session["turn_detection"] = {
-                "type": "server_vad",
-                "threshold": 0.7,            # Higher = less sensitive (default 0.5)
-                "prefix_padding_ms": 300,    # Wait 300ms before considering speech started
-                "silence_duration_ms": 800,  # Need 800ms silence to consider speech ended (default 500ms)
-            }
+        # If not configured, DON'T SET IT - let OpenAI use optimized defaults
+        # This prevents us from interfering with OpenAI's audio processing
 
         if self.config.instructions:
             session["instructions"] = self.config.instructions
