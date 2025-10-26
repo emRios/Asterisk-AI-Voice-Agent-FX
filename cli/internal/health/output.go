@@ -31,25 +31,21 @@ func (r *HealthResult) OutputText(w io.Writer) {
 	// Run checks and display
 	for i, check := range r.Checks {
 		// Status icon and color
-		var statusIcon, statusText string
+		var statusIcon string
 		var colorFn func(a ...interface{}) string
 		
 		switch check.Status {
 		case StatusPass:
 			statusIcon = "✅"
-			statusText = "PASS"
 			colorFn = green
 		case StatusWarn:
 			statusIcon = "⚠️ "
-			statusText = "WARN"
 			colorFn = yellow
 		case StatusFail:
 			statusIcon = "❌"
-			statusText = "FAIL"
 			colorFn = red
 		case StatusInfo:
 			statusIcon = "ℹ️ "
-			statusText = "INFO"
 			colorFn = blue
 		}
 		
