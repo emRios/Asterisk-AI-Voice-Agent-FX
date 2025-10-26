@@ -120,6 +120,11 @@ func (r *Runner) Run() error {
 	infoColor.Println("Analyzing logs...")
 	analysis := r.analyzeBasic(logData)
 	
+	// Extract structured metrics
+	infoColor.Println("Extracting metrics...")
+	metrics := ExtractMetrics(logData)
+	analysis.Metrics = metrics
+	
 	// Apply symptom-specific analysis
 	if r.symptom != "" {
 		infoColor.Printf("Applying symptom analysis: %s\n", r.symptom)
@@ -268,7 +273,8 @@ type Analysis struct {
 	Errors            []string
 	Warnings          []string
 	AudioIssues       []string
-	Metrics           map[string]string
+	MetricsMap        map[string]string
+	Metrics           *CallMetrics
 	HasAudioSocket    bool
 	HasTranscription  bool
 	HasPlayback       bool
@@ -279,9 +285,9 @@ type Analysis struct {
 // analyzeBasic performs basic log analysis
 func (r *Runner) analyzeBasic(logData string) *Analysis {
 	analysis := &Analysis{
-		CallID:  r.callID,
-		Metrics: make(map[string]string),
-		Symptom: r.symptom,
+		CallID:     r.callID,
+		MetricsMap: make(map[string]string),
+		Symptom:    r.symptom,
 	}
 
 	lines := strings.Split(logData, "\n")

@@ -125,6 +125,11 @@ func (llm *LLMAnalyzer) buildPrompt(analysis *Analysis, logData string) string {
 		prompt.WriteString(fmt.Sprintf("Reported Symptom: %s\n\n", analysis.Symptom))
 	}
 	
+	// Extracted metrics (CRITICAL for diagnosis)
+	if analysis.Metrics != nil {
+		prompt.WriteString(analysis.Metrics.FormatForLLM())
+	}
+	
 	// Sample logs (truncated)
 	prompt.WriteString("Sample Log Lines:\n")
 	lines := strings.Split(logData, "\n")
@@ -140,11 +145,17 @@ func (llm *LLMAnalyzer) buildPrompt(analysis *Analysis, logData string) string {
 	prompt.WriteString("\n")
 	
 	prompt.WriteString("Please provide:\n")
-	prompt.WriteString("1. Root Cause: What is the most likely root cause?\n")
+	prompt.WriteString("1. Root Cause: What is the most likely root cause based on the metrics?\n")
+	prompt.WriteString("   - Focus on provider_bytes ratio (should be 1.0)\n")
+	prompt.WriteString("   - Check drift_pct (should be <10%)\n")
+	prompt.WriteString("   - Note underflow events\n")
+	prompt.WriteString("   - VAD aggressiveness level (0 = too sensitive)\n")
+	prompt.WriteString("   - Gate flutter (>50 closures = problem)\n")
+	prompt.WriteString("   - Format mismatches\n")
 	prompt.WriteString("2. Confidence: How confident are you? (High/Medium/Low)\n")
 	prompt.WriteString("3. Quick Fix: What's the immediate action to take?\n")
 	prompt.WriteString("4. Prevention: How to prevent this in the future?\n")
-	prompt.WriteString("\nKeep your response concise and actionable (under 300 words).")
+	prompt.WriteString("\nKeep your response concise and actionable (under 400 words).")
 	
 	return prompt.String()
 }
@@ -161,7 +172,7 @@ func (llm *LLMAnalyzer) callOpenAI(prompt string) (string, error) {
 				"content": prompt,
 			},
 		},
-		"max_tokens":  500,
+		"max_tokens":  800,
 		"temperature": 0.3,
 	}
 	
@@ -229,7 +240,7 @@ func (llm *LLMAnalyzer) callAnthropic(prompt string) (string, error) {
 				"content": prompt,
 			},
 		},
-		"max_tokens": 500,
+		"max_tokens": 800,
 	}
 	
 	jsonData, err := json.Marshal(requestBody)
