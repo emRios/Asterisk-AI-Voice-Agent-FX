@@ -148,8 +148,12 @@ func ExtractMetrics(logData string) *CallMetrics {
 				metrics.GateClosures++
 			}
 			
+			// Skip Deepgram target_encoding validation warnings (harmless - provider doesn't use that field)
 			if strings.Contains(line, "target_encoding") && strings.Contains(line, "error") {
-				metrics.ConfigErrors = append(metrics.ConfigErrors, "Missing target_encoding in provider config")
+				if !strings.Contains(line, "DeepgramProviderConfig") {
+					metrics.ConfigErrors = append(metrics.ConfigErrors, "Configuration error related to target_encoding")
+				}
+				// Deepgram target_encoding warning is benign - it's a Python validation artifact
 			}
 		}
 	}
