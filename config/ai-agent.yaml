@@ -109,7 +109,7 @@ active_pipeline: "default"
 #     - `stream`: streams agent audio in 20 ms frames in real time.
 #     - `file`: plays μ-law files via bridge; more tolerant but higher latency.
 audio_transport: "audiosocket"
-downstream_mode: "file"  # Using file mode for hybrid pipeline testing (AAVA-17)
+downstream_mode: "stream"  # Switch back to stream mode (file mode has bridge switching issues)
 
 # AudioSocket listener configuration (when audio_transport=audiosocket)
 audiosocket:

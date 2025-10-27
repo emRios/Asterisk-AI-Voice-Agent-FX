@@ -253,14 +253,8 @@ class ARIClient:
         return await self.send_command("POST", f"channels/{channel_id}/play", data={"media": media_uri})
 
 
-    async def create_bridge(self, bridge_type: str = "mixing,dtmf_events,proxy_media") -> Optional[str]:
-        """Create a new bridge for channel mixing.
-        
-        Args:
-            bridge_type: Bridge type specification. Default forces softmix to stay active
-                        even with 2 channels, preventing simple_bridge optimization that
-                        breaks audio routing after announcer playback (AAVA-22).
-        """
+    async def create_bridge(self, bridge_type: str = "mixing") -> Optional[str]:
+        """Create a new bridge for channel mixing."""
         try:
             response = await self.send_command(
                 "POST",
