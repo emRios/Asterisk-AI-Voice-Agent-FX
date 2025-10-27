@@ -521,12 +521,22 @@ class OpenAIRealtimeProvider(AIProviderInterface):
             out_fmt = "g711_ulaw"
         else:
             out_fmt = "pcm16"
+        
+        # Map provider_input_encoding to OpenAI's input_audio_format
+        # provider_input_encoding = what WE send TO OpenAI
+        input_enc = (getattr(self.config, "provider_input_encoding", None) or "linear16").lower()
+        if input_enc in ("ulaw", "mulaw", "g711_ulaw", "mu-law"):
+            in_fmt = "g711_ulaw"
+        elif input_enc in ("alaw", "g711_alaw"):
+            in_fmt = "g711_alaw"
+        else:
+            in_fmt = "pcm16"
         # Do not mutate local provider format state here; wait for session ACK/events
 
         session: Dict[str, Any] = {
             # Model is selected via URL; keep accepted keys here
             "modalities": output_modalities,
-            "input_audio_format": "pcm16",
+            "input_audio_format": in_fmt,
             "output_audio_format": out_fmt,
             "voice": self.config.voice,
         }
