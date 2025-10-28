@@ -529,6 +529,33 @@ def load_config(path: str = "config/ai-agent.yaml") -> AppConfig:
             # Non-fatal; Pydantic may still coerce correctly
             pass
 
+        # SECURITY: Inject API keys into provider configs for pipeline adapters
+        # API keys must ONLY come from environment variables, never YAML
+        try:
+            providers_block = config_data.get('providers', {}) or {}
+            
+            # Inject OPENAI_API_KEY
+            openai_block = providers_block.get('openai', {}) or {}
+            if isinstance(openai_block, dict):
+                openai_block['api_key'] = os.getenv('OPENAI_API_KEY')
+                providers_block['openai'] = openai_block
+            
+            # Inject DEEPGRAM_API_KEY
+            deepgram_block = providers_block.get('deepgram', {}) or {}
+            if isinstance(deepgram_block, dict):
+                deepgram_block['api_key'] = os.getenv('DEEPGRAM_API_KEY')
+                providers_block['deepgram'] = deepgram_block
+            
+            # Inject GOOGLE_API_KEY
+            google_block = providers_block.get('google', {}) or {}
+            if isinstance(google_block, dict):
+                google_block['api_key'] = os.getenv('GOOGLE_API_KEY')
+                providers_block['google'] = google_block
+            
+            config_data['providers'] = providers_block
+        except Exception:
+            pass
+
         # Barge-in configuration defaults + env overrides
         barge_cfg = config_data.get('barge_in', {}) or {}
         try:
