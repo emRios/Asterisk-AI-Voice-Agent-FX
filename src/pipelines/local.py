@@ -679,7 +679,8 @@ class LocalTTSAdapter(_LocalAdapterBase, TTSComponent):
         options: Dict[str, Any],
     ) -> AsyncIterator[bytes]:
         if not text:
-            return
+            return  # Exit early - yields nothing (async generator)
+            yield  # Unreachable but makes this an async generator
         runtime_options = options or {}
         session = await self._ensure_session(call_id, runtime_options)
 

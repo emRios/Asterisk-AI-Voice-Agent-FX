@@ -597,7 +597,8 @@ class OpenAITTSAdapter(TTSComponent):
         options: Dict[str, Any],
     ) -> AsyncIterator[bytes]:
         if not text:
-            return
+            return  # Exit early - yields nothing (async generator)
+            yield  # Unreachable but makes this an async generator
         await self._ensure_session()
         assert self._session
 

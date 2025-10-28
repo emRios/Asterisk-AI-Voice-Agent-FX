@@ -307,7 +307,8 @@ class DeepgramTTSAdapter(TTSComponent):
         options: Dict[str, Any],
     ) -> AsyncIterator[bytes]:
         if not text:
-            return
+            return  # Exit early - yields nothing (async generator)
+            yield  # Unreachable but makes this an async generator
         await self._ensure_session()
 
         merged = self._compose_options(options)
