@@ -86,61 +86,7 @@ class _LocalAdapterBase:
             await self.close_call(call_id)
         logger.debug("Local adapter stopped", component=self.component_key)
 
-    async def validate_connectivity(self, options: Dict[str, Any]) -> Dict[str, Any]:
-        """Validate Local AI server connectivity."""
-        merged = self._compose_options(options)
-        ws_url = merged.get("ws_url") or _DEFAULT_WS_URL
-        
-        # Test websocket connection
-        try:
-            websocket = await asyncio.wait_for(
-                websockets.connect(
-                    ws_url,
-                    ping_interval=None,
-                    ping_timeout=None,
-                    max_size=None,
-                ),
-                timeout=5.0,  # 5 second timeout for validation
-            )
-            # Connection successful, close it
-            await websocket.close()
-            
-            return {
-                "healthy": True,
-                "error": None,
-                "details": {
-                    "endpoint": ws_url,
-                    "mode": self._default_mode,
-                },
-            }
-        except asyncio.TimeoutError:
-            return {
-                "healthy": False,
-                "error": f"Connection timeout - Local AI server not responding at {ws_url}",
-                "details": {
-                    "endpoint": ws_url,
-                    "check": "timeout",
-                },
-            }
-        except ConnectionRefusedError:
-            return {
-                "healthy": False,
-                "error": f"Connection refused - Local AI server not running at {ws_url}",
-                "details": {
-                    "endpoint": ws_url,
-                    "check": "connection_refused",
-                },
-            }
-        except Exception as exc:
-            error_msg = str(exc)
-            return {
-                "healthy": False,
-                "error": f"Connection failed: {error_msg}",
-                "details": {
-                    "endpoint": ws_url,
-                    "exception": error_msg,
-                },
-            }
+    # validate_connectivity removed - uses smart generic base class implementation
 
     async def open_call(self, call_id: str, options: Dict[str, Any]) -> None:
         if self._closed:
