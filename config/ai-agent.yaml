@@ -31,7 +31,7 @@
 # Related: Linear AAVA-28
 # =============================================================================
 
-active_pipeline: local_hybrid
+active_pipeline: local_only
 asterisk:
   app_name: asterisk-ai-voice-agent
 audio_transport: externalmedia
@@ -259,10 +259,10 @@ providers:
     chunk_ms: ${LOCAL_WS_CHUNK_MS:=320}
     connect_timeout_sec: ${LOCAL_WS_CONNECT_TIMEOUT:=2.0}
     enabled: true
-    llm_model: models/llm/TinyLlama-1.1B-Chat-v1.0.Q4_K_M.gguf
+    llm_model: models/llm/phi-3-mini-4k-instruct.Q4_K_M.gguf
     max_tokens: 64
     response_timeout_sec: ${LOCAL_WS_RESPONSE_TIMEOUT:=5.0}
-    stt_model: models/stt/vosk-model-small-en-us-0.15
+    stt_model: models/stt/vosk-model-en-us-0.22
     temperature: 0.4
     tts_voice: models/tts/en_US-lessac-medium.onnx
     ws_url: ${LOCAL_WS_URL:-ws://127.0.0.1:8765}

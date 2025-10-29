@@ -33,9 +33,9 @@ Active contexts and call path (server):
 
 ## Feature Flags & Config
 
-- `audio_transport`: `audiosocket` (default) | `externalmedia` (fallback RTP path) | `legacy` (deprecated snoop path).
-- `downstream_mode`: `file` (default) | `stream` (enabled once Milestone 5 tasks complete; retains file fallback automatically).
-- `streaming.*` (Milestone 5): `min_start_ms`, `low_watermark_ms`, `fallback_timeout_ms`, `provider_grace_ms`, `chunk_size_ms`, `jitter_buffer_ms`.
+- `audio_transport`: `audiosocket` (preferred default) | `externalmedia` (RTP fallback) | `legacy` (deprecated snoop path).
+- `downstream_mode`: `stream` (preferred; automatic file fallback is built-in) | `file` (force file-based playback for debugging).
+- `streaming.*` (Milestone 5 shipped): `min_start_ms`, `low_watermark_ms`, `fallback_timeout_ms`, `provider_grace_ms`, `chunk_size_ms`, `jitter_buffer_ms`.
 - `pipelines` (Milestone 7): defines STT/LLM/TTS combinations; `active_pipeline` selects which pipeline new calls use.
 - `vad.use_provider_vad`: when `true`, rely on provider (e.g., OpenAI server VAD) and disable local WebRTC/Enhanced VAD.
 - `openai_realtime.provider_input_sample_rate_hz`: set to `24000` so ingested audio is upsampled to the Realtime API’s expected 24 kHz linear PCM before commit.
@@ -148,9 +148,9 @@ exten => s,1,NoOp(Local)
 - **Milestone 8**: Provide monitoring stack and dashboards; document `make monitor-up` workflow.
 - After these milestones, tag GA and update quick-start instructions.
 
-## Common Commands
+## Common Commands (Server)
 
-- Build & run locally (both services): `docker-compose up -d --build`
+- Rebuild & run (both services, fresh logs): `docker-compose up -d --build --force-recreate ai-engine local-ai-server`
 - Logs (engine): `docker-compose logs -f ai-engine`
 - Logs (local models): `docker-compose logs -f local-ai-server`
 - Containers: `docker-compose ps`
@@ -158,20 +158,26 @@ exten => s,1,NoOp(Local)
 
 ## Development Workflow
 
-1) Edit code on `develop`.
-2) `docker-compose restart ai-engine` for local code-only spikes (do not use on the server).
-3) **Before touching the server**: commit + push to `develop`. Never rely on `scp` or manual edits; the server must `git pull` the exact commit you just pushed before any `docker-compose up --build` run.
-4) Full rebuild only on dependency/image changes.
-5) Keep `.env` out of git; configure providers via env and YAML.
+Local (no containers):
+- Edit code on `develop`.
+- Run Python unit tests and linters only (e.g., `pytest`); do not run Docker locally.
+
+Server (containers + E2E):
+1) Commit + push to `develop`.
+2) On server, `git pull` the exact commit, then rebuild: `docker-compose up -d --build --force-recreate ai-engine local-ai-server`.
+3) Use `scripts/rca_collect.sh` for RCA evidence collection when running regressions.
+4) Keep `.env` out of git; configure providers via env and YAML on the server.
 
 ## Testing Workflow
 
-- Smoke test AudioSocket ingest:
+All containerized and end-to-end tests run on the server. Locally, run unit tests only.
+
+- Smoke test AudioSocket ingest (server):
   - Confirm: `AudioSocket server listening ...:8090` in engine logs.
   - Place a call into the AudioSocket + Stasis context, watch for:
     - `AudioSocket connection accepted` and `bound to channel` in logs.
     - Provider session started.
-  - Verify file‑based playback (ensure sound URIs without file extensions).
+  - Verify downstream streaming with automatic file fallback (ensure sound URIs without file extensions when file playback occurs).
 
 ## Observability & Troubleshooting
 
@@ -182,10 +188,12 @@ exten => s,1,NoOp(Local)
 
 ## IDE Hand-Off Notes
 
-- **Codex CLI**: Follow this file plus `call-framework.md` for deployment + regression steps.
+- **Codex CLI**: Follow this file plus golden baseline references under `docs/baselines/golden/` and the provider call-frameworks:
+  - Deepgram: `docs/regressions/deepgram-call-framework.md`
+  - OpenAI: `docs/regressions/openai-call-framework.md`
 - **Cursor**: `.cursor/rules/asterisk_ai_voice_agent.mdc` mirrors the same guardrails for code edits; keep it updated when workflows change.
 - **Windsurf**: `.windsurf/rules/asterisk_ai_voice_agent.md` references the roadmap; ensure milestone docs stay in sync so prompts remain accurate.
-- **Shared history**: Document every regression in `docs/regressions/` so all IDEs inherit the same context without log-diving.
+- **Shared history**: Document every regression in `docs/regressions/` and link to golden baselines so all IDEs inherit the same context without log-diving.
 
 ### GPT-5 Prompting Guidance
 
@@ -208,6 +216,30 @@ exten => s,1,NoOp(Local)
 
 Mirror any updates to this guidance in `.cursor/rules/asterisk_ai_voice_agent.mdc`, `.windsurf/rules/asterisk_ai_voice_agent.md`, and `Gemini.md`.
 
+### Change Safety & Review
+
+- Thoroughly review issues and perform focused research before applying fixes. Do not jump to conclusions; prefer holistic solutions that consider transport, providers, gating, and observability together.
+- Use golden baselines to validate behavior; record deltas with `scripts/rca_collect.sh`.
+
+## Provider/Pipeline Resolution Precedence
+
+- Provider name precedence: `AI_PROVIDER` (Asterisk channel var) > `contexts.*.provider` > `default_provider`.
+- Related per-call overrides read from channel vars: `AI_PROVIDER`, `AI_AUDIO_PROFILE`, `AI_CONTEXT`.
+
+## MCP Tools & Linear Tracking
+
+- Prefer MCP resources over web search. Discover available servers/resources via MCP and load when present.
+- Servers (active):
+  - `linear-mcp-server`: Create/update issues, add comments, link evidence; include issue IDs in commits and deployment/test posts.
+  - `mcp-playwright`: Validate dashboards (Grafana/Prometheus) and UI flows for regressions.
+  - `memory`: Persist critical decisions/regressions; retrieve during planning to avoid regressions.
+  - `perplexity-ask`: Perform constrained research and confirmations where docs are ambiguous.
+  - `sequential-thinking`: Plan multi-step solutions, revise as needed, and maintain context across steps.
+- Discovery pattern:
+  - List: `list_mcp_resources`, `list_mcp_resource_templates`
+  - Read: `read_mcp_resource(uri)`
+- Safety & approvals: Respect sandbox/approval modes; prefer patch-based changes; never commit secrets.
+
 ## Ports & Paths
 
 - AudioSocket: TCP 8090 (default; configurable via `AUDIOSOCKET_PORT`).
@@ -222,7 +254,7 @@ Assumptions: server `root@voiprnd.nemtclouddispatch.com`, repo at `/root/Asteris
 ssh root@voiprnd.nemtclouddispatch.com \
   'cd /root/Asterisk-AI-Voice-Agent && \
    git checkout develop && git pull && \
-   docker-compose up -d --build ai-engine local-ai-server && \
+   docker-compose up -d --build --force-recreate ai-engine local-ai-server && \
    docker-compose ps && \
    docker-compose logs -n 100 ai-engine'
 ```

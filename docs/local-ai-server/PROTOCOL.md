@@ -293,6 +293,48 @@ Duplicate/empty finals are suppressed; see `_handle_final_transcript()` for deta
 
 ---
 
+## Error Responses
+
+When the server encounters an error processing a request, it responds with an error message:
+
+```json
+{
+  "type": "error",
+  "error": "Error description",
+  "call_id": "1234-5678",
+  "request_id": "r1",
+  "details": {
+    "error_type": "timeout" | "invalid_request" | "processing_error",
+    "component": "stt" | "llm" | "tts",
+    "message": "Detailed error message"
+  }
+}
+```
+
+Common error types:
+
+- **timeout**: Component took too long (e.g., LLM inference timeout)
+- **invalid_request**: Malformed JSON or missing required fields
+- **processing_error**: Internal error during STT/LLM/TTS processing
+
+Example:
+
+```json
+{
+  "type": "error",
+  "error": "LLM inference timeout after 20.0 seconds",
+  "call_id": "abc-123",
+  "request_id": "llm-1",
+  "details": {
+    "error_type": "timeout",
+    "component": "llm",
+    "message": "Increase LOCAL_LLM_INFER_TIMEOUT_SEC or reduce max_tokens"
+  }
+}
+```
+
+---
+
 ## Common Issues and Resolutions
 
 - STT returns empty often
@@ -312,7 +354,44 @@ Duplicate/empty finals are suppressed; see `_handle_final_transcript()` for deta
 
 ---
 
+## Performance Characteristics
+
+### Models (Default Installation)
+
+- **STT**: Vosk `vosk-model-en-us-0.22` (16kHz native)
+  - Size: ~40MB
+  - Latency: 100-300ms (streaming with partials)
+  - Accuracy: Good for conversational speech
+
+- **LLM**: Phi-3-mini-4k `phi-3-mini-4k-instruct.Q4_K_M.gguf`
+  - Size: 2.3GB
+  - Warmup: ~110 seconds (first load)
+  - Inference: 2-5 seconds per response
+  - Context: 4096 tokens
+  - Quality: Good for conversational AI (better than TinyLlama, less than GPT-4)
+
+- **TTS**: Piper `en_US-lessac-medium.onnx` (22kHz native)
+  - Size: ~60MB
+  - Latency: 500-1000ms
+  - Output: μ-law @ 8kHz
+  - Quality: Natural, clear voice
+
+### Typical Latencies (End-to-End)
+
+- **STT only**: 100-300ms
+- **LLM inference**: 2-5 seconds (depends on response length)
+- **TTS synthesis**: 500-1000ms
+- **Full pipeline turn**: 3-7 seconds total
+
+### Concurrency
+
+- **Single server**: ~10-20 concurrent calls (CPU-bound)
+- **Bottleneck**: LLM inference (most CPU intensive)
+- **Scaling**: Deploy multiple containers with load balancer
+
+---
+
 ## Versioning and Compatibility
 
-- Protocol is stable for v3.0 GA track. Message types and fields correspond to the implementation in `local_ai_server/main.py`.
-- The engine’s local provider uses the same contract to support pipelines defined in `config/ai-agent.*.yaml`.
+- Protocol is stable for v4.0 GA track. Message types and fields correspond to the implementation in `local_ai_server/main.py`.
+- The engine's local provider uses the same contract to support pipelines defined in `config/ai-agent.*.yaml`.

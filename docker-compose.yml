@@ -52,8 +52,8 @@ services:
     restart: unless-stopped
     network_mode: "host"
     healthcheck:
-      test: ["CMD-SHELL", "python -c \"import socket; s=socket.socket(); s.settimeout(1); s.connect(('127.0.0.1',8765)); s.close()\""]
-      interval: 10s
+      test: ["CMD-SHELL", "python -c \"import asyncio, websockets, json; asyncio.run(websockets.connect('ws://127.0.0.1:8765', close_timeout=1))\""]
+      interval: 30s
       timeout: 5s
       retries: 180
       start_period: 60s

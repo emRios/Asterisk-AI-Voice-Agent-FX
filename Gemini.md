@@ -33,10 +33,13 @@ This playbook summarizes how Gemini should operate on the Asterisk AI Voice Agen
 
 ## Development Workflow
 
-1. Work on the `develop` branch locally.
-2. Use Makefile targets for builds/deploys (`make deploy`, `make deploy-force`, `make server-logs`, etc.).
-3. Before touching the server, **commit and push** your changes; the server must `git pull` the exact commit you just pushed prior to any `docker-compose up --build`.
-4. Never use `docker-compose restart` for code updates—always rebuild.
+Local (no containers):
+- Work on the `develop` branch and run Python unit tests/linters only (e.g., `pytest`). Do not run Docker locally.
+
+Server (containers + E2E):
+1. Commit and push to `develop`.
+2. On the server, `git pull` the exact commit, then rebuild: `docker-compose up -d --build --force-recreate ai-engine local-ai-server`.
+3. Use `scripts/rca_collect.sh` for RCA evidence capture during regressions.
 
 ### Deployment Environment
 
@@ -44,12 +47,12 @@ This playbook summarizes how Gemini should operate on the Asterisk AI Voice Agen
 - Repo: `/root/Asterisk-AI-Voice-Agent`
 - Shared media: `/mnt/asterisk_media`
 
-### Key Commands (local or server)
+### Key Commands (server)
 
-- `make deploy` / `make deploy-force`
-- `make server-logs`, `make server-clear-logs`
-- `make monitor-up` / `make monitor-down` (Milestone 8)
-- `docker-compose logs -f ai-engine`, `docker-compose logs -f local-ai-server`
+- `docker-compose up -d --build --force-recreate ai-engine local-ai-server`
+- `docker-compose logs -f ai-engine`
+- `docker-compose logs -f local-ai-server`
+- `scripts/rca_collect.sh` (RCA capture)
 
 ## GA Milestones — Gemini Focus
 
@@ -82,11 +85,13 @@ Mirror any edits to this section into `Agents.md`, `.cursor/rules/asterisk_ai_vo
 
 ## Regression & Troubleshooting Workflow
 
-1. Clear logs (`make server-clear-logs`).
-2. Tail `ai-engine`, `local-ai-server`, and Asterisk logs during calls.
-3. Pull remote `ai-engine` logs when needed: `timestamp=$(date +%Y%m%d-%H%M%S); ssh root@voiprnd.nemtclouddispatch.com "cd /root/Asterisk-AI-Voice-Agent && docker-compose logs ai-engine --since 30m --no-color" > logs/ai-engine-voiprnd-$timestamp.log`.
-4. Record call ID, streaming metrics, and tuning hints in `docs/regressions/*.md` and `call-framework.md`.
-5. For streaming issues, inspect buffer depth logs and fallback counters; adjust YAML settings accordingly.
+1. Tail `ai-engine`, `local-ai-server`, and Asterisk logs during server calls.
+2. Pull remote `ai-engine` logs when needed: `timestamp=$(date +%Y%m%d-%H%M%S); ssh root@voiprnd.nemtclouddispatch.com "cd /root/Asterisk-AI-Voice-Agent && docker-compose logs ai-engine --since 30m --no-color" > logs/ai-engine-voiprnd-$timestamp.log`.
+3. Record call ID, streaming metrics, and tuning hints in golden baseline and framework docs:
+   - `docs/baselines/golden/`
+   - `docs/regressions/deepgram-call-framework.md`
+   - `docs/regressions/openai-call-framework.md`
+4. For streaming issues, inspect buffer depth logs and fallback counters; adjust YAML settings accordingly.
 
 ## Hot Reload Expectations
 
@@ -97,7 +102,7 @@ Mirror any edits to this section into `Agents.md`, `.cursor/rules/asterisk_ai_vo
 
 - Optional services added in Milestone 8 expose dashboards at the configured HTTP port.
 - Ensure `/metrics` is reachable and that Grafana dashboards load streaming and latency panels.
-- Document sentiment/transcript hooks for future enhancements.
+- For dashboard UI verification, use `mcp-playwright` to exercise core panels.
 
 ## Logging & Metrics Etiquette
 
@@ -116,6 +121,25 @@ Mirror any edits to this section into `Agents.md`, `.cursor/rules/asterisk_ai_vo
 2. Reproduce call while tailing `ai-engine`, `local-ai-server`, and `/var/log/asterisk/full`.
 3. Build a timeline; identify streaming restarts, buffer drops, or provider disconnects.
 4. Apply fixes guided by milestone docs, then rerun regression.
+
+## Provider/Pipeline Resolution Precedence
+
+- Provider name precedence: `AI_PROVIDER` (Asterisk channel var) > `contexts.*.provider` > `default_provider`.
+- Per-call overrides read from: `AI_PROVIDER`, `AI_AUDIO_PROFILE`, `AI_CONTEXT`.
+
+## MCP Tools
+
+- Prefer MCP resources over web search; discover via `list_mcp_resources` / `list_mcp_resource_templates`, read via `read_mcp_resource`.
+- Active servers:
+  - `linear-mcp-server`: issue lifecycle (create/update/comment/search); include IDs in commits and deployment/test notes.
+  - `mcp-playwright`: dashboard UI validation (Grafana/Prometheus).
+  - `memory`: persist critical decisions/regressions for planning continuity.
+  - `perplexity-ask`: targeted research and confirmations.
+  - `sequential-thinking`: multi-step planning and revision for complex changes.
+
+## Change Safety & Review
+
+- Review and research thoroughly before fixes. Avoid narrow patches; consider transport, providers, gating, and telemetry holistically. Validate against golden baselines (`docs/baselines/golden/`).
 
 ---
 *Keep this file aligned with `Agents.md` and `.windsurf/rules/asterisk_ai_voice_agent.md`. Update it whenever milestone scope or workflow changes.*
