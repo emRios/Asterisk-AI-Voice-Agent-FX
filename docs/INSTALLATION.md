@@ -1,6 +1,33 @@
-# Asterisk AI Voice Agent - Installation Guide
+# Asterisk AI Voice Agent - Installation Guide (v4.0)
 
-This guide provides detailed instructions for setting up the Asterisk AI Voice Agent on your server.
+This guide provides detailed instructions for setting up the Asterisk AI Voice Agent v4.0 on your server.
+
+## Quick Start (5 Minutes)
+
+v4.0 features a **streamlined installer** with 3 production-ready configurations:
+
+```bash
+git clone https://github.com/hkjarral/Asterisk-AI-Voice-Agent.git
+cd Asterisk-AI-Voice-Agent
+./install.sh
+```
+
+The installer will:
+1. Guide you through **3 golden baseline choices**:
+   - **OpenAI Realtime** - Fastest (0.5-1.5s), requires OPENAI_API_KEY
+   - **Deepgram Voice Agent** - Enterprise (1-2s), requires DEEPGRAM_API_KEY + OPENAI_API_KEY
+   - **Local Hybrid** - Privacy-focused (3-7s), requires OPENAI_API_KEY + 8GB RAM
+2. Prompt for required API keys only
+3. Start Docker containers automatically
+4. Configure Asterisk integration
+
+**That's it!** Skip to [Section 5](#5-configure-asterisk-dialplan) for dialplan setup, then test your agent.
+
+---
+
+## Detailed Installation
+
+For manual installation, custom configurations, or troubleshooting, continue below.
 
 ## 1. Prerequisites
 

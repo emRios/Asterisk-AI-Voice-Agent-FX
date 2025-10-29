@@ -1,22 +1,43 @@
 ---
 trigger: always_on
-description: Architecture Details for Asterisk AI Voice Agent v3.0 project
+description: Architecture Details for Asterisk AI Voice Agent v4.0 project
 globs: src/**/*.py, *.py, docker-compose.yml, Dockerfile, config/ai-agent.yaml
 ---
 
-# Asterisk AI Voice Agent - Architecture Documentation
+# Asterisk AI Voice Agent - Architecture Documentation (v4.0)
 
 ## System Overview
 
-The Asterisk AI Voice Agent v3.0 is a **two-container, modular conversational AI system** that enables **real-time, two-way voice conversations** through Asterisk/FreePBX systems. The production stack runs an **AudioSocket-first upstream capture path**, maintains **ExternalMedia RTP** as a safety fallback, and now delivers downstream audio through a streaming transport that automatically falls back to file playback when the jitter buffer under-runs.
+The Asterisk AI Voice Agent v4.0 is a **production-ready, modular conversational AI system** that enables **real-time, two-way voice conversations** through Asterisk/FreePBX systems. It features a **modular pipeline architecture** that allows mixing and matching STT, LLM, and TTS providers, alongside support for **monolithic providers** like OpenAI Realtime and Deepgram Voice Agent.
 
-The GA program focuses on three pillars:
+### Key Architecture Components
 
-- **Streaming Quality** – adaptive jitter buffering, pacing, and provider hand-off so greetings and responses are clear out of the box (`docs/milestones/milestone-5-streaming-transport.md`).
-- **Provider Breadth** – first-class Deepgram and OpenAI Realtime integrations with codec-aware transport (`docs/milestones/milestone-6-openai-realtime.md`).
-- **Configurable Pipelines** – YAML-driven composition of STT/LLM/TTS components with safe hot reload (`docs/milestones/milestone-7-configurable-pipelines.md`).
+- **Dual Transport Support** – AudioSocket (TCP, recommended) and ExternalMedia RTP (UDP) for audio capture
+- **Adaptive Streaming** – Downstream audio with automatic jitter buffering and file playback fallback
+- **Modular Pipelines** – Independent STT, LLM, and TTS provider selection via YAML configuration
+- **Production Monitoring** – Prometheus + Grafana stack with 50+ metrics and 5 dashboards
+- **State Management** – Centralized SessionStore with type-safe call state tracking
 
-An optional **monitoring stack** (Prometheus + Grafana) ships as part of Milestone 8 so operators can visualise streaming health, latency, and provider performance before extending analytics (`docs/milestones/milestone-8-monitoring-stack.md`).
+### Golden Baselines (v4.0)
+
+Three validated configurations ship production-ready:
+
+1. **OpenAI Realtime** (`config/ai-agent.golden-openai.yaml`)
+   - Monolithic provider (STT+LLM+TTS integrated)
+   - Response time: 0.5-1.5 seconds
+   - Server-side VAD for optimal turn detection
+
+2. **Deepgram Voice Agent** (`config/ai-agent.golden-deepgram.yaml`)
+   - Monolithic provider with Think stage reasoning
+   - Response time: 1-2 seconds
+   - Enterprise-grade quality
+
+3. **Local Hybrid** (`config/ai-agent.golden-local-hybrid.yaml`)
+   - Pipeline: Vosk (STT) + OpenAI (LLM) + Piper (TTS)
+   - Response time: 3-7 seconds
+   - Privacy-focused (audio stays local)
+
+For deployment guidance, see [docs/PRODUCTION_DEPLOYMENT.md](PRODUCTION_DEPLOYMENT.md).
 
 ## Architecture Overview
 

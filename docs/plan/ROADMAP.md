@@ -137,3 +137,77 @@ This roadmap tracks the open-source enablement work for the Asterisk AI Voice Ag
   - Disabling the stack (`make monitor-down`) leaves core services unaffected and removes Prometheus/Grafana containers.
 
 Keep this roadmap updated after each milestone to help any collaborator—or future AI assistant—pick up where we left off.
+
+---
+
+## Future Roadmap (v4.1+)
+
+### Vision: Transport Orchestrator & Audio Profiles
+
+**Goal**: Make the engine provider-agnostic and format-agnostic with declarative audio profiles and automatic capability negotiation.
+
+**Key Concepts**:
+- **Single Internal Format**: Standardize on PCM16 internally; transcode once at edges
+- **Audio Profiles**: Declarative profiles (e.g., `telephony_ulaw_8k`, `wideband_pcm_16k`, `hifi_pcm_24k`)
+- **Capability Negotiation**: Auto-discover provider I/O formats and map to profiles
+- **Continuous Streaming**: Unified pacer per call, providers don't control pacing
+
+**Planned Work** (detailed in `docs/plan/ROADMAPv4.md`):
+1. **Transport Orchestrator** - Centralized audio routing and format management
+2. **Audio Profile System** - YAML-defined profiles with validation
+3. **Provider Capability Discovery** - Auto-detection of provider formats
+4. **Legacy Config Migration** - Backward-compatible upgrade path
+5. **Enhanced Monitoring** - Per-profile metrics and recommendations
+
+**Dependencies**:
+- v4.0 GA complete (3 golden baselines validated)
+- Testing & regression protocol established
+- Production monitoring stack operational
+
+**Target**: v4.1 release (Q1 2026)
+
+For detailed technical specifications, milestones, and implementation plan, see `docs/plan/ROADMAPv4.md`.
+
+---
+
+### v4.1 Feature Backlog
+
+**CLI Enhancements**:
+- `agent` binary builds (Makefile automation)
+- `agent config validate` - Pre-flight config validation
+- `agent test` - Automated test call execution
+
+**Additional Providers**:
+- Anthropic Claude integration
+- Google Gemini integration  
+- Azure Speech Services
+
+**Advanced Features**:
+- Call transfer and multi-leg support
+- WebRTC SIP client integration
+- High availability / clustering
+- Real-time dashboard (active calls)
+
+**Config Cleanup**:
+- Remove deprecated v3.0 settings
+- Automated config migration tool
+- Schema validation on startup
+
+**Performance**:
+- GPU acceleration for local-ai-server
+- Streaming latency optimizations
+- Memory usage profiling
+
+**Documentation**:
+- Video tutorials
+- Architecture deep-dives
+- Case studies from production deployments
+
+---
+
+## Release History
+
+- **v4.0.0** (October 2025) - Modular pipeline architecture, 3 golden baselines, production monitoring
+- **v3.0** - Internal development (never released)
+- **v2.0** - Internal development (never released)
+- **v1.0** - Initial concept (never released)
