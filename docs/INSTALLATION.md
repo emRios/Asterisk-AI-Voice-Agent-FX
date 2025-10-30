@@ -226,29 +226,19 @@ exten => s,1,NoOp(AI Agent - OpenAI Realtime)
 
 **Important:** Do NOT use `AudioSocket()` in the dialplan. The engine originates AudioSocket channels via ARI automatically.
 
-## 4. Troubleshooting
+**How It Works:**
+1. Call enters `Stasis(asterisk-ai-voice-agent)`
+2. Engine receives StasisStart event via ARI
+3. **For full agents** (OpenAI, Deepgram): Engine creates AudioSocket channel via ARI
+4. **For hybrid pipelines** (Local Hybrid): Engine creates ExternalMedia RTP channel via ARI
+5. Engine bridges transport channel with caller
+6. Two-way audio flows automatically
 
-- **Media path not found (Playback fails on sound:ai-generated/...)**:
-  - Ensure the media directory and symlink exist on the host:
+After adding the dialplan, reload Asterisk configuration:
 
-    ```bash
-    sudo mkdir -p /var/lib/asterisk/sounds
-    # Use real asterisk UID/GID if present; FreePBX often uses 995:995
-    AST_UID=$(id -u asterisk 2>/dev/null || echo 995)
-    AST_GID=$(id -g asterisk 2>/dev/null || echo 995)
-    sudo chown -R $AST_UID:$AST_GID /mnt/asterisk_media
-    sudo chmod 775 /mnt/asterisk_media /mnt/asterisk_media/ai-generated
-    sudo ln -sfn /mnt/asterisk_media/ai-generated /var/lib/asterisk/sounds/ai-generated
-    ls -ld /var/lib/asterisk/sounds/ai-generated
-    ```
-
-  - Optional for performance (Linux): mount tmpfs
-
-    ```bash
-    sudo mount -t tmpfs -o size=128m,mode=0775,uid=$AST_UID,gid=$AST_GID tmpfs /mnt/asterisk_media
-    ```
-
-  - Verify at runtime that `ai-engine` logs show files being written to `/mnt/asterisk_media/ai-generated` and calls can play `sound:ai-generated/<name>`.
+```bash
+asterisk -rx "dialplan reload"
+```
 
 ## 4. Troubleshooting
 
