@@ -125,6 +125,21 @@ _AUDIO_DC_OFFSET = Gauge(
     labelnames=("call_id", "stage"),
 )
 
+# Call metadata and duration tracking for dashboard
+_CALL_METADATA = Gauge(
+    "ai_agent_call_metadata",
+    "Call metadata including caller info, pipeline, provider, and context selection",
+    labelnames=("call_id", "caller_name", "caller_number", "pipeline", "provider", "context"),
+)
+_CALL_DURATION = Histogram(
+    "ai_agent_call_duration_seconds",
+    "Total call duration from start to end",
+    labelnames=("call_id", "pipeline", "provider"),
+    buckets=(10, 30, 60, 120, 180, 300, 600, 900, 1800, 3600),
+)
+# Track call start times for duration calculation
+_call_start_times = {}  # call_id -> timestamp
+
 
 class Engine:
     """The main application engine."""
@@ -973,6 +988,12 @@ class Engine:
             )
             session.enhanced_vad_enabled = bool(self.vad_manager)
             await self._save_session(session, new=True)
+            
+            # Record call start time for duration tracking
+            import time
+            _call_start_times[caller_channel_id] = time.time()
+            logger.debug("Recorded call start time", call_id=caller_channel_id)
+            
             # Export config metrics for this call
             try:
                 await self._export_config_metrics(caller_channel_id)
@@ -1458,6 +1479,31 @@ class Engine:
 
             call_id = session.call_id
             logger.info("Cleaning up call", call_id=call_id)
+            
+            # Record call duration if we have start time
+            try:
+                import time
+                if call_id in _call_start_times:
+                    duration = time.time() - _call_start_times[call_id]
+                    pipeline_name = getattr(session, 'pipeline_name', None) or "default"
+                    provider_name = getattr(session, 'provider_name', None) or "unknown"
+                    
+                    _CALL_DURATION.labels(
+                        call_id=call_id,
+                        pipeline=pipeline_name,
+                        provider=provider_name
+                    ).observe(duration)
+                    
+                    # Clean up start time
+                    del _call_start_times[call_id]
+                    
+                    logger.info("Recorded call duration", 
+                               call_id=call_id,
+                               duration_seconds=round(duration, 2),
+                               pipeline=pipeline_name,
+                               provider=provider_name)
+            except Exception as e:
+                logger.debug("Failed to record call duration", call_id=call_id, error=str(e))
 
             # Idempotent re-entrancy guard
             if getattr(session, "cleanup_completed", False):
@@ -5574,7 +5620,9 @@ class Engine:
             # Note: Context greeting/prompt injection now happens earlier in P1 _resolve_audio_profile()
             # to ensure config is set BEFORE provider session starts and reads it.
 
+            logger.info("DEBUG: About to call provider.start_session", call_id=call_id, provider=provider_name)
             await provider.start_session(call_id)
+            logger.info("DEBUG: provider.start_session completed", call_id=call_id, provider=provider_name)
             # If provider supports an explicit greeting (e.g., LocalProvider), trigger it now
             try:
                 if hasattr(provider, 'play_initial_greeting'):
@@ -5596,6 +5644,33 @@ class Engine:
                 except Exception:
                     pass
             logger.info("Provider session started", call_id=call_id, provider=provider_name)
+            
+            # Record call metadata for dashboard
+            try:
+                caller_name = getattr(session, 'caller_name', None) or "Unknown"
+                caller_number = getattr(session, 'caller_number', None) or "Unknown"
+                pipeline_name = getattr(session, 'pipeline_name', None) or "default"
+                context_name = getattr(session, 'context_name', None) or "default"
+                
+                # Set call metadata gauge (value=1 means active)
+                _CALL_METADATA.labels(
+                    call_id=call_id,
+                    caller_name=caller_name,
+                    caller_number=caller_number,
+                    pipeline=pipeline_name,
+                    provider=provider_name,
+                    context=context_name
+                ).set(1)
+                
+                logger.debug("Recorded call metadata", 
+                            call_id=call_id,
+                            caller_name=caller_name,
+                            pipeline=pipeline_name,
+                            provider=provider_name,
+                            context=context_name)
+            except Exception as e:
+                logger.debug("Failed to record call metadata", call_id=call_id, error=str(e))
+                
         except Exception as exc:
             logger.error("Failed to start provider session", call_id=call_id, error=str(exc), exc_info=True)
 

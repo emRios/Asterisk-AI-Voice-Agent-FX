@@ -1,6 +1,8 @@
 # AI Voice Agent Roadmap
 
-This roadmap tracks the open-source enablement work for the Asterisk AI Voice Agent. Each milestone includes scope, primary tasks, and quick verification steps that should take less than a minute after deployment.
+This roadmap tracks the development and evolution of the Asterisk AI Voice Agent. It combines the foundational work (Milestones 1-7), v4.0 GA production-readiness work (Transport Orchestrator & Audio Profiles), and future enhancements.
+
+Each milestone includes scope, implementation details, and verification criteria.
 
 ## Milestone 1 — SessionStore-Only State (✅ Completed)
 
@@ -109,7 +111,137 @@ This roadmap tracks the open-source enablement work for the Asterisk AI Voice Ag
   - Custom pipeline regressions succeed using YAML only.
   - Changing OpenAI/Deepgram endpoints or voice/model via YAML takes effect on next call.
 
-## Milestone 8 — Monitoring, Feedback & Guided Setup (Planned)
+## Milestone 8 — Transport Stabilization (✅ Completed Oct 25, 2025)
+
+- **Goal**: Eliminate audio garble and pacing issues by enforcing AudioSocket invariants and proper format handling. Details in `docs/milestones/milestone-8-transport-stabilization.md`.
+- **Tag**: `v1.0-p0-transport-stable`
+- **What We Shipped**:
+  - Fixed critical AudioSocket format override bug (commit `1a049ce`) preventing caller codec from overriding YAML wire format settings.
+  - Enforced little-endian PCM16 on AudioSocket wire; removed all egress byte-swap logic.
+  - Added pacer idle cutoff (1200ms) to prevent underflows and long tails.
+  - Set `chunk_size_ms: auto` with 20ms default; reframe provider chunks to pacer cadence.
+  - One-shot TransportCard logging at call start showing wire/provider formats.
+- **Verification (2025-10-25, Call 1761424308.2043)**:
+  - Clean two-way conversation end-to-end; user confirmed "Audio pipeline is working really well."
+  - Zero underflows observed; wall_seconds ≈ content duration (no long tails).
+  - SNR: 64.6-68.2 dB (excellent); provider bytes ratio 1.0 (perfect alignment).
+  - TransportCard present in logs; no egress swap messages anywhere.
+- **Acceptance**:
+  - Golden metrics match baseline within 10% tolerance.
+  - No garbled greeting; underflows ≈ 0; correct AudioSocket format per YAML.
+
+## Milestone 9 — Audio Gating & Echo Prevention (✅ Completed Oct 26, 2025)
+
+- **Goal**: Enable production-ready OpenAI Realtime provider with echo prevention and natural conversation flow. Corresponds to ROADMAPv4 P0.5 milestone.
+- **What We Shipped**:
+  - Audio Gating Manager (`src/core/audio_gating_manager.py`) with VAD-based interrupt detection.
+  - Provider-specific gating (opt-in per provider) integrated with OpenAI Realtime.
+  - Critical VAD configuration: `webrtc_aggressiveness: 1` (balanced mode) to prevent false echo detection.
+  - 24kHz PCM16 input/output format for OpenAI; server-side VAD integration.
+  - Golden baseline configuration documented in `OPENAI_REALTIME_GOLDEN_BASELINE.md`.
+- **Verification (2025-10-26, Call 1761449250.2163)**:
+  - Duration: 45.9s, SNR: 64.7 dB; zero self-interruption events.
+  - Buffered: 0 chunks (vs 50 with aggressiveness: 0); gate closures: 1 time (vs 50+).
+  - Natural conversation flow validated; user feedback: "much better results" ✅
+- **Acceptance**:
+  - Clean audio with no self-interruption; OpenAI's server VAD handles turn-taking naturally.
+  - Gate stays open properly when agent speaking (correct behavior).
+
+## Milestone 10 — Transport Orchestrator & Audio Profiles (✅ Completed Oct 26, 2025)
+
+- **Goal**: Provider-agnostic operation with per-call audio profile selection and automatic capability negotiation. Implementation of ROADMAPv4 P1 milestone.
+- **Dependencies**: Milestones 8-9 complete; golden baselines established.
+- **What We Shipped**:
+  - `TransportOrchestrator` class (`src/core/transport_orchestrator.py`) for dynamic profile resolution.
+  - Audio profiles system in YAML: `telephony_ulaw_8k`, `openai_realtime_24k`, `wideband_pcm_16k`, `telephony_responsive`.
+  - Per-call channel variable overrides (all optional; fallback to YAML):
+    - `AI_PROVIDER` — which provider (deepgram, openai_realtime, local_hybrid)
+    - `AI_AUDIO_PROFILE` — which transport profile
+    - `AI_CONTEXT` — semantic context mapping to YAML `contexts.*` for prompt/greeting/profile
+  - Provider capability negotiation with ACK parsing (Deepgram `SettingsApplied`, OpenAI `session.updated`).
+  - Legacy config synthesis for backward compatibility; zero-change upgrade path.
+- **Verification (2025-10-26)**:
+  - Deepgram validation (Call 1761504353.2179): SNR 66.8 dB, `telephony_responsive` profile applied correctly.
+  - OpenAI Realtime validation (Call 1761505357.2187): SNR 64.77 dB, `openai_realtime_24k` profile, perfect gating.
+  - Dynamic profile switching via `AI_AUDIO_PROFILE` confirmed working without YAML edits.
+- **Acceptance**:
+  - Switching `AI_AUDIO_PROFILE` changes transport plan; call remains stable.
+  - Provider ACK empty → remediation logged; call continues with fallback.
+  - Multi-provider parity (Deepgram + OpenAI) demonstrated.
+
+## Milestone 11 — Post-Call Diagnostics & Troubleshooting (✅ Completed Oct 26, 2025)
+
+- **Goal**: Automated post-call RCA with AI-powered diagnosis matching manual analysis quality. ROADMAPv4 P2.1 deliverable.
+- **What We Shipped**:
+  - `agent troubleshoot` CLI command for instant post-call analysis.
+  - RCA-level metrics extraction from Docker logs (provider bytes, drift, underflows, VAD, transport alignment).
+  - Golden baseline comparison (OpenAI Realtime, Deepgram, streaming performance).
+  - Format/sampling alignment detection (config vs runtime validation; catches AudioSocket format mismatches).
+  - AI-powered diagnosis with context-aware prompts (OpenAI/Anthropic); filters benign warnings.
+  - Quality scoring: 0-100 with EXCELLENT/FAIR/POOR/CRITICAL verdicts.
+  - Greeting segment awareness (excludes timing artifacts from quality scoring).
+- **Usage Examples**:
+
+  ```bash
+  ./bin/agent troubleshoot --last              # Analyze most recent call
+  ./bin/agent troubleshoot --call 1761523231.2199
+  ./bin/agent troubleshoot --last --provider anthropic
+  ./bin/agent troubleshoot --last --no-llm     # Skip AI diagnosis
+  ```
+
+- **Verification (2025-10-26)**:
+  - Call 2199 alignment test: Manual RCA "GOOD - SNR 67.3 dB" matched `agent troubleshoot` "EXCELLENT - 100/100" ✅
+  - Format detection validated; catches slin vs ulaw mismatches, frame size alignment errors.
+- **Acceptance**:
+  - Accurate call detection (filters AudioSocket infrastructure channels).
+  - RCA-level metrics depth matches manual analysis; AI diagnosis provides actionable fixes.
+
+## Milestone 12 — Setup & Validation Tools (✅ Completed Oct 26, 2025)
+
+- **Goal**: Complete operator workflow from zero to production; minimize time to first call. ROADMAPv4 P2.2 milestone.
+- **What We Shipped**:
+  - `agent init` — Interactive setup wizard with provider selection, credential management, template support (local|cloud|hybrid|openai-agent|deepgram-agent).
+  - `agent doctor` — 11-point environment validation (Docker, ARI, AudioSocket, config, provider keys, logs, network, media directory).
+  - `agent demo` — Audio pipeline validation without making real calls; validates before production.
+  - `agent troubleshoot` — Post-call RCA (from Milestone 11).
+  - Health checks with exit codes for CI/CD integration; JSON output for programmatic use.
+- **Verification (2025-10-26)**:
+  - `agent doctor` output: `✅ PASS: 9/11 checks — System is healthy and ready for calls!`
+  - All tools validated on production server; work without user configuration changes.
+- **Acceptance**:
+  - `agent init` completes setup in < 5 minutes.
+  - `agent doctor` validates environment before first call; clear error messages with remediation.
+  - `agent demo` tests pipeline without real calls.
+- **Impact**:
+  - New operator to first call: **<30 minutes** (vs hours previously).
+  - Self-service debugging without developer intervention.
+
+## Milestone 13 — Config Cleanup & Migration (✅ Completed Oct 26, 2025)
+
+- **Goal**: Simplify configuration, reduce operator footguns, and establish clear separation between production and diagnostic settings. ROADMAPv4 P2.3 milestone.
+- **What We Shipped**:
+  - Migration script: `scripts/migrate_config_v4.py` with dry-run and apply modes.
+  - Moved 8 diagnostic settings to environment variables (`DIAG_*` prefix, `LOG_*` settings).
+  - Deprecated 9 legacy settings with migration path and warnings.
+  - Config version 4 schema validation; backward compatible with deprecation warnings.
+  - 21% cleaner config (374 → 294 lines); 49% smaller file (16K → 8.1K).
+- **Settings Moved to Environment Variables**:
+  - `DIAG_EGRESS_SWAP_MODE`, `DIAG_ENABLE_TAPS`, `DIAG_TAP_PRE_SECS`, `DIAG_TAP_POST_SECS`
+  - `DIAG_TAP_OUTPUT_DIR`, `STREAMING_LOG_LEVEL`
+  - Safer production defaults (diagnostics opt-in only).
+- **Verification (2025-10-26)**:
+  - Migration script tested on production config; container rebuilt successfully.
+  - Health checks pass (`agent doctor: 9/11 PASS`); no deprecation warnings with env vars.
+- **Acceptance**:
+  - Deprecated knobs removed from YAML schema; warnings logged if env var override set.
+  - Config version field validated on load; migration instructions clear.
+- **Impact**:
+  - Clearer separation: production vs diagnostic settings in separate files.
+  - Easier maintenance; diagnostic settings in one place (`.env`).
+
+---
+
+## Milestone 14 — Monitoring, Feedback & Guided Setup (Planned)
 
 - **Goal**: Ship an opt-in monitoring + analytics experience that is turnkey, captures per-call transcripts/metrics, and surfaces actionable YAML tuning guidance. Implementation details live in `docs/milestones/milestone-8-monitoring-stack.md`.
 - **Dependencies**: Milestones 5–7 in place so streaming telemetry, pipeline metadata, and configuration hot-reload already work.
@@ -140,65 +272,60 @@ Keep this roadmap updated after each milestone to help any collaborator—or fut
 
 ---
 
-## Future Roadmap (v4.1+)
+## Future Roadmap
 
-### Vision: Transport Orchestrator & Audio Profiles
+### Milestone 15 — Quality, Multi-Provider Demos, and Hi-Fi Audio (Planned)
 
-**Goal**: Make the engine provider-agnostic and format-agnostic with declarative audio profiles and automatic capability negotiation.
-
-**Key Concepts**:
-- **Single Internal Format**: Standardize on PCM16 internally; transcode once at edges
-- **Audio Profiles**: Declarative profiles (e.g., `telephony_ulaw_8k`, `wideband_pcm_16k`, `hifi_pcm_24k`)
-- **Capability Negotiation**: Auto-discover provider I/O formats and map to profiles
-- **Continuous Streaming**: Unified pacer per call, providers don't control pacing
-
-**Planned Work** (detailed in `docs/plan/ROADMAPv4.md`):
-1. **Transport Orchestrator** - Centralized audio routing and format management
-2. **Audio Profile System** - YAML-defined profiles with validation
-3. **Provider Capability Discovery** - Auto-detection of provider formats
-4. **Legacy Config Migration** - Backward-compatible upgrade path
-5. **Enhanced Monitoring** - Per-profile metrics and recommendations
-
-**Dependencies**:
-- v4.0 GA complete (3 golden baselines validated)
-- Testing & regression protocol established
-- Production monitoring stack operational
-
-**Target**: v4.1 release (Q1 2026)
-
-For detailed technical specifications, milestones, and implementation plan, see `docs/plan/ROADMAPv4.md`.
+- **Goal**: Improve resampling quality for hi-fi profiles and demonstrate multi-provider parity. ROADMAPv4 P3 milestone.
+- **Dependencies**: Milestones 8-13 complete; golden baselines validated.
+- **What We Plan to Ship**:
+  - Higher-quality resamplers (speexdsp/soxr) for `hifi_pcm_24k` profile to improve frequency response.
+  - Multi-provider demonstration configs showing Deepgram + OpenAI combinations.
+  - Extended metrics for cadence reframe efficiency and pacer drift control.
+  - Side-by-side audio quality comparisons at 24kHz sampling rate.
+- **Timeline**: 2-4 days
+- **Acceptance**:
+  - Side-by-side playback comparisons show improved frequency response at 24kHz vs audioop resampling.
+  - Drift remains ≈ 0%; pacer efficiency metrics stable.
+  - Published demo configs for common provider combinations (deepgram-stt + openai-llm + deepgram-tts).
 
 ---
 
 ### v4.1 Feature Backlog
 
 **CLI Enhancements**:
+
 - `agent` binary builds (Makefile automation)
 - `agent config validate` - Pre-flight config validation
 - `agent test` - Automated test call execution
 
 **Additional Providers**:
+
 - Anthropic Claude integration
 - Google Gemini integration  
 - Azure Speech Services
 
 **Advanced Features**:
+
 - Call transfer and multi-leg support
 - WebRTC SIP client integration
 - High availability / clustering
 - Real-time dashboard (active calls)
 
 **Config Cleanup**:
+
 - Remove deprecated v3.0 settings
 - Automated config migration tool
 - Schema validation on startup
 
 **Performance**:
+
 - GPU acceleration for local-ai-server
 - Streaming latency optimizations
 - Memory usage profiling
 
 **Documentation**:
+
 - Video tutorials
 - Architecture deep-dives
 - Case studies from production deployments
@@ -207,7 +334,56 @@ For detailed technical specifications, milestones, and implementation plan, see 
 
 ## Release History
 
-- **v4.0.0** (October 2025) - Modular pipeline architecture, 3 golden baselines, production monitoring
-- **v3.0** - Internal development (never released)
+### v4.0.0 (October 2025) - Production-Ready GA Release
+
+**Milestones Delivered**: 1-13 (September-October 2025)
+
+**Foundation (Milestones 1-7)**:
+- SessionStore-only state management
+- Provider switching CLI and hot reload
+- Model auto-fetch for local AI
+- Conversation coordinator with metrics
+- Streaming transport production readiness (AudioSocket)
+- OpenAI Realtime voice agent integration
+- Configurable pipelines with hot reload
+
+**Production Readiness (Milestones 8-13)**:
+- Transport stabilization (fixed AudioSocket format override bug)
+- Audio gating & echo prevention (VAD-based, zero self-interruption)
+- Transport orchestrator & audio profiles (provider-agnostic architecture)
+- Post-call diagnostics (`agent troubleshoot` with AI-powered RCA)
+- Setup & validation tools (`agent init/doctor/demo`)
+- Config cleanup & migration (49% smaller configs)
+
+**3 Golden Baselines Validated**:
+- **Deepgram Voice Agent**: SNR 66.8 dB, telephony_responsive profile
+- **OpenAI Realtime**: SNR 64.7 dB, zero self-interruption, natural conversation flow
+- **Local Hybrid**: Vosk + OpenAI + Piper (functional with modern hardware)
+
+**Technical Achievements**:
+- Zero underflows, perfect pacing (drift ≈0%)
+- Per-call context system with channel variables (`AI_PROVIDER`, `AI_AUDIO_PROFILE`, `AI_CONTEXT`)
+- Both AudioSocket and ExternalMedia RTP transports validated
+- New operator to first call: **<30 minutes** (vs hours previously)
+
+---
+
+### Pre-Release Development
+
+- **v3.0** - Released Sep 16, 2025
 - **v2.0** - Internal development (never released)
 - **v1.0** - Initial concept (never released)
+
+---
+
+## Technical References
+
+For detailed implementation plans and specifications:
+
+- **docs/milestones/**: Detailed milestone implementation plans and technical specifications
+- **OPENAI_REALTIME_GOLDEN_BASELINE.md**: OpenAI Realtime production configuration and validation
+
+---
+
+**Last Updated**: October 31, 2025  
+**Roadmap Version**: 2.0 (Merged from ROADMAP.md + ROADMAPv4.md)
