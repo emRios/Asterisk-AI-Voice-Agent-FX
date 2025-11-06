@@ -4,7 +4,7 @@ asterisk:
 audio_transport: externalmedia
 audiosocket:
   format: slin
-  host: 0.0.0.0
+  host: "127.0.0.1"
   port: 8090
 barge_in:
   enabled: true
@@ -182,7 +182,7 @@ external_media:
   codec: ulaw
   direction: both
   port_range: 18080:18099
-  rtp_host: 0.0.0.0
+  rtp_host: "127.0.0.1"
   rtp_port: 18080
 llm:
   initial_greeting: Hello, how can I help you today?

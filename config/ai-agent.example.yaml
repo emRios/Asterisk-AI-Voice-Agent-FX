@@ -73,13 +73,13 @@ downstream_mode: "stream"        # stream | file
 
 # AudioSocket listener (when audio_transport=audiosocket)
 audiosocket:
-  host: "0.0.0.0"
+  host: "127.0.0.1"
   port: 8090
   format: "ulaw"            # ulaw | slin16 (8 kHz)
 
 # ExternalMedia RTP (when audio_transport=externalmedia)
 external_media:
-  rtp_host: "0.0.0.0"
+  rtp_host: "127.0.0.1"
   rtp_port: 18080
   port_range: "18080:18099"
   codec: "ulaw"
