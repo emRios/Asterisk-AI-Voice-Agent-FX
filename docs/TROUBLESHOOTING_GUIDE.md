@@ -127,6 +127,18 @@ Automatically analyzes your most recent call with:
 - Analyzes calls from last 24 hours
 - No file logging required (LOG_TO_FILE not needed)
 - Requires `ai_engine` container to be running
+- Works with both console and JSON log formats
+
+**Log Format Recommendation:**
+For best troubleshooting results, use JSON format in `.env`:
+```bash
+LOG_FORMAT=json  # Recommended for structured analysis
+```
+
+Console format works too, but JSON provides:
+- More reliable parsing (no ANSI color codes)
+- Structured data for better analysis
+- Easier field extraction
 
 **List recent calls:**
 ```bash

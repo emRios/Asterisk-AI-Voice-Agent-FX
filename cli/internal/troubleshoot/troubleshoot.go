@@ -225,12 +225,17 @@ func (r *Runner) getRecentCalls(limit int) ([]Call, error) {
 		return nil, fmt.Errorf("failed to read logs: %w", err)
 	}
 
+	// Strip ANSI color codes from log output (console format uses colors)
+	// JSON format doesn't have ANSI codes, so this is safe for both
+	ansiStripPattern := regexp.MustCompile(`\x1b\[[0-9;]*m`)
+	cleanOutput := ansiStripPattern.ReplaceAllString(string(output), "")
+
 	callMap := make(map[string]*Call)
 	audioSocketChannels := make(map[string]bool)
 	
 	// First pass: identify AudioSocket channels (internal infrastructure)
 	audioSocketPattern := regexp.MustCompile(`"audiosocket_channel_id":\s*"([0-9]+\.[0-9]+)"`)
-	lines := strings.Split(string(output), "\n")
+	lines := strings.Split(cleanOutput, "\n")
 	
 	if r.verbose {
 		fmt.Printf("[DEBUG] Read %d lines from Docker logs\n", len(lines))
@@ -249,7 +254,7 @@ func (r *Runner) getRecentCalls(limit int) ([]Call, error) {
 	// Second pass: collect call IDs, excluding AudioSocket channels
 	patterns := []*regexp.Regexp{
 		regexp.MustCompile(`"call_id":\s*"([0-9]+\.[0-9]+)"`),           // JSON: "call_id": "1761518880.2191"
-		regexp.MustCompile(`call_id[=:][\s]*"?([0-9]+\.[0-9]+)"?`),      // call_id=1761518880.2191 or call_id: "..."
+		regexp.MustCompile(`(?:call_id|channel_id)[=:][\s]*"?([0-9]+\.[0-9]+)"?`), // call_id= or channel_id=
 		regexp.MustCompile(`"caller_channel_id":\s*"([0-9]+\.[0-9]+)"`), // Explicit caller channel
 	}
 	
