@@ -1,5 +1,7 @@
 # --- Stage 1: Builder (Dependencies) ---
-FROM python:3.11 as builder
+# Pin to specific digest for reproducible builds and supply chain security
+# python:3.11 as of 2025-11-06
+FROM python:3.11@sha256:e8ab764baee5109566456913b42d7d4ad97c13385e4002973c896e1dd5f01146 as builder
 
 WORKDIR /usr/src/app
 
@@ -14,7 +16,8 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # --- Stage 2: Final Runtime Image ---
-FROM python:3.11
+# Pin to same digest as builder for consistency
+FROM python:3.11@sha256:e8ab764baee5109566456913b42d7d4ad97c13385e4002973c896e1dd5f01146
 
 # Install sox (audio), curl (downloads), unzip (model extraction)
 RUN apt-get update \
