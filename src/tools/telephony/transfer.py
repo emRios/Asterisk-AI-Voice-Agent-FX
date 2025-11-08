@@ -9,6 +9,7 @@ from src.tools.base import Tool, ToolDefinition, ToolParameter, ToolCategory
 from src.tools.context import ToolExecutionContext
 import structlog
 import asyncio
+import time
 
 logger = structlog.get_logger(__name__)
 
@@ -134,18 +135,14 @@ class TransferCallTool(Tool):
                 extension: "2765",
                 name: "Live Agent",
                 dial_string: "PJSIP/2765",
-                context: "from-internal"
+                context: "agent-outbound",
+                action_type: "transfer",
+                mode: "warm",
+                queue: "support_queue",  # Optional fallback queue
+                ... all other config fields
             }
             or None if not found
         """
-        # Load extensions config
-        # DEBUG: Check what config looks like
-        logger.info(f"DEBUG: context.config type: {type(context.config)}", call_id=context.call_id)
-        logger.info(f"DEBUG: context.config is None: {context.config is None}", call_id=context.call_id)
-        if context.config:
-            has_tools = 'tools' in context.config if isinstance(context.config, dict) else hasattr(context.config, 'tools')
-            logger.info(f"DEBUG: config has 'tools': {has_tools}", call_id=context.call_id)
-        
         extensions_config = context.get_config_value('tools.extensions.internal', {})
         logger.info(f"DEBUG: extensions_config result: {extensions_config}", call_id=context.call_id)
         
@@ -160,7 +157,13 @@ class TransferCallTool(Tool):
                 'extension': target,
                 'name': ext_config.get('name', target),
                 'dial_string': ext_config.get('dial_string', f"PJSIP/{target}"),
-                'context': ext_config.get('context', 'from-internal')
+                'context': ext_config.get('context', 'agent-outbound'),
+                'action_type': ext_config.get('action_type', 'transfer'),
+                'mode': ext_config.get('mode', 'warm'),
+                'timeout': ext_config.get('timeout', 30),
+                'queue': ext_config.get('queue'),  # Fallback queue
+                'pass_caller_info': ext_config.get('pass_caller_info', False),
+                **ext_config  # Include all other fields
             }
         
         # Try department name/alias lookup
@@ -172,7 +175,13 @@ class TransferCallTool(Tool):
                     'extension': ext_num,
                     'name': ext_config.get('name', ext_num),
                     'dial_string': ext_config.get('dial_string', f"PJSIP/{ext_num}"),
-                    'context': ext_config.get('context', 'from-internal')
+                    'context': ext_config.get('context', 'agent-outbound'),
+                    'action_type': ext_config.get('action_type', 'transfer'),
+                    'mode': ext_config.get('mode', 'warm'),
+                    'timeout': ext_config.get('timeout', 30),
+                    'queue': ext_config.get('queue'),
+                    'pass_caller_info': ext_config.get('pass_caller_info', False),
+                    **ext_config
                 }
             
             # Check aliases
@@ -182,7 +191,13 @@ class TransferCallTool(Tool):
                     'extension': ext_num,
                     'name': ext_config.get('name', ext_num),
                     'dial_string': ext_config.get('dial_string', f"PJSIP/{ext_num}"),
-                    'context': ext_config.get('context', 'from-internal')
+                    'context': ext_config.get('context', 'agent-outbound'),
+                    'action_type': ext_config.get('action_type', 'transfer'),
+                    'mode': ext_config.get('mode', 'warm'),
+                    'timeout': ext_config.get('timeout', 30),
+                    'queue': ext_config.get('queue'),
+                    'pass_caller_info': ext_config.get('pass_caller_info', False),
+                    **ext_config
                 }
         
         logger.warning(f"Target '{target}' not found in extensions config")
@@ -196,7 +211,7 @@ class TransferCallTool(Tool):
         context: ToolExecutionContext
     ) -> Dict[str, Any]:
         """
-        Execute warm transfer.
+        Execute warm transfer using generic agent-outbound context.
         
         Args:
             extension: Target extension number
@@ -210,51 +225,76 @@ class TransferCallTool(Tool):
         logger.info(f"Starting warm transfer to {extension}", call_id=context.call_id)
         
         session = await context.get_session()
-        caller_channel_id = context.caller_channel_id
-        bridge_id = context.bridge_id
+        if not session:
+            return {
+                "status": "error",
+                "message": "Session not found"
+            }
         
         # 1. Start hold music on caller
-        logger.debug(f"Starting hold music on {caller_channel_id}")
-        await self._start_moh(caller_channel_id, context)
+        logger.debug(f"Starting hold music on {context.caller_channel_id}")
+        await self._start_moh(context.caller_channel_id, context)
         
-        # 2. Originate call to target and auto-bridge (via dialplan)
-        target_channel = await self._originate_call(
-            dial_string=dial_string,
-            context_name=extension_info['context'],
-            bridge_id=bridge_id,  # Auto-add to bridge when answered
-            timeout=30,
+        # 2. Build transfer context to pass to target
+        transfer_context = self._build_transfer_context(session, extension_info, context)
+        
+        # 3. Queue the action in session
+        action = {
+            'type': 'transfer',
+            'mode': 'warm',
+            'target': extension,
+            'target_name': extension_info['name'],
+            'dial_string': dial_string,
+            'action_type': extension_info.get('action_type', 'transfer'),
+            'context': extension_info.get('context', 'agent-outbound'),
+            'timeout': extension_info.get('timeout', 30),
+            'started_at': time.time(),
+            'channel_id': None  # Will be filled when channel is originated
+        }
+        
+        session.current_action = action
+        session.transfer_context = transfer_context
+        await context.session_store.upsert_call(session)
+        
+        # 4. Originate via generic agent-outbound context
+        result = await self._originate_to_agent_outbound(
+            target=extension,
+            action_type=extension_info.get('action_type', 'transfer'),
+            context_name=extension_info.get('context', 'agent-outbound'),
+            session=session,
+            transfer_context=transfer_context,
+            timeout=extension_info.get('timeout', 30),
             ari_client=context.ari_client
         )
         
-        if not target_channel:
-            # Target didn't answer
-            await self._stop_moh(caller_channel_id, context)
-            return {
-                "status": "failed",
-                "message": f"{extension_info['name']} is not available right now. Would you like to leave a message?",
-                "extension": extension
-            }
+        if not result:
+            # Originate failed - check for fallback queue
+            await self._stop_moh(context.caller_channel_id, context)
+            session.current_action = None
+            await context.session_store.upsert_call(session)
+            
+            fallback_queue = extension_info.get('queue')
+            if fallback_queue:
+                return {
+                    "status": "queue_fallback",
+                    "message": f"{extension_info['name']} is on another call. Would you like me to place you in the queue?",
+                    "extension": extension,
+                    "queue": fallback_queue
+                }
+            else:
+                return {
+                    "status": "failed",
+                    "message": f"{extension_info['name']} is on another call. Would you like to leave a message?",
+                    "extension": extension
+                }
         
-        target_channel_id = target_channel['id']
-        logger.info(f"Target answered and bridged: {target_channel_id}")
+        logger.info(f"✅ Warm transfer initiated to {extension}", call_id=context.call_id)
         
-        # 3. Stop hold music
-        await self._stop_moh(caller_channel_id, context)
-        
-        # 4. Update session to track transfer
-        await context.update_session(
-            transfer_active=True,
-            transfer_target=extension,
-            transfer_channel_id=target_channel_id,
-            transfer_mode="warm"
-        )
-        
-        logger.info(f"✅ Warm transfer completed to {extension}", call_id=context.call_id)
-        
-        # AI will now announce transfer and can exit gracefully
+        # Dialplan will handle answer detection and Stasis entry
+        # Engine will stop MOH and bridge when channel enters Stasis
         return {
             "status": "success",
-            "message": f"Connecting you to {extension_info['name']} now.",
+            "message": f"Connecting you to {extension_info['name']} now. Please hold.",
             "extension": extension,
             "transfer_mode": "warm",
             "target_name": extension_info['name']
@@ -307,6 +347,111 @@ class TransferCallTool(Tool):
                 "extension": extension
             }
     
+    def _build_transfer_context(
+        self,
+        session,
+        extension_info: Dict[str, Any],
+        context: ToolExecutionContext
+    ) -> Dict[str, Any]:
+        """
+        Build transfer context to pass to target.
+        
+        Returns dict with caller information for warm transfers.
+        """
+        transfer_ctx = {
+            'caller_id': session.call_id,
+            'caller_channel': session.caller_channel_id,
+            'bridge_id': session.bridge_id
+        }
+        
+        # Add caller info if configured
+        if extension_info.get('pass_caller_info', False):
+            transfer_ctx.update({
+                'caller_name': session.caller_name or 'Unknown',
+                'caller_number': session.caller_number or 'Unknown',
+                'call_purpose': session.last_transcript or 'General inquiry'
+            })
+        
+        return transfer_ctx
+    
+    async def _originate_to_agent_outbound(
+        self,
+        target: str,
+        action_type: str,
+        context_name: str,
+        session,
+        transfer_context: Dict[str, Any],
+        timeout: int,
+        ari_client
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Originate call via generic agent-outbound context.
+        
+        The dialplan will:
+        1. Dial the target
+        2. On answer, enter Stasis with action type
+        3. Engine handles bridging
+        
+        Args:
+            target: Extension to dial
+            action_type: Action type (transfer, voicemail, queue, etc.)
+            context_name: Dialplan context
+            session: Call session
+            transfer_context: Context to pass
+            timeout: Origination timeout
+            ari_client: ARI client
+        
+        Returns:
+            Channel dict if originated, None if failed
+        """
+        local_endpoint = f"Local/{target}@{context_name}"
+        
+        logger.info(f"Originating via {context_name}",
+                   endpoint=local_endpoint,
+                   action_type=action_type,
+                   target=target)
+        
+        try:
+            result = await ari_client.send_command(
+                method="POST",
+                resource="channels",
+                data={
+                    "endpoint": local_endpoint,
+                    "timeout": timeout,
+                    "variables": {
+                        "AGENT_ACTION": action_type,
+                        "AGENT_CALL_ID": session.call_id,
+                        "AGENT_BRIDGE_ID": session.bridge_id,
+                        "AGENT_TARGET": target,
+                        "CALLER_NAME": transfer_context.get('caller_name', ''),
+                        "CALLER_NUMBER": transfer_context.get('caller_number', ''),
+                        "CALL_PURPOSE": transfer_context.get('call_purpose', '')
+                    }
+                }
+            )
+            
+            if result and 'status' in result:
+                logger.error(f"Failed to originate: {result}")
+                return None
+            
+            if result and 'id' in result:
+                channel_id = result['id']
+                logger.info(f"Channel originated: {channel_id}")
+                
+                # Update session with channel ID
+                if session.current_action:
+                    session.current_action['channel_id'] = channel_id
+                    await ari_client.session_store.upsert_call(session)
+                
+                return result
+            
+            logger.error(f"Unexpected originate result: {result}")
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error originating: {e}", exc_info=True)
+            return None
+    
     async def _start_moh(self, channel_id: str, context: ToolExecutionContext):
         """Start music on hold for channel."""
         moh_class = context.get_config_value('tools.transfer_call.hold_music_class', 'default')
@@ -332,140 +477,5 @@ class TransferCallTool(Tool):
         except Exception as e:
             logger.warning(f"Failed to stop MOH: {e}")
     
-    async def _originate_call(
-        self,
-        dial_string: str,
-        context_name: str,
-        bridge_id: str,
-        timeout: int,
-        ari_client: Any
-    ) -> Optional[Dict[str, Any]]:
-        """
-        Originate a call to target extension.
-        
-        Args:
-            dial_string: Full dial string (e.g., "PJSIP/2765")
-            context_name: Asterisk context for origination
-            timeout: Timeout in seconds
-            ari_client: ARI client instance
-        
-        Returns:
-            Channel dict if successful, None if failed/timeout
-        """
-        # Extract extension number from dial_string (e.g., "PJSIP/2765" -> "2765")
-        extension = dial_string.split('/')[-1] if '/' in dial_string else dial_string
-        
-        # Use Local channel to route through dialplan (gets voicemail, forwarding, etc.)
-        # Format: Local/{extension}@{context}
-        local_endpoint = f"Local/{extension}@{context_name}"
-        
-        logger.info(f"Originating via dialplan: {local_endpoint}", extension=extension, context=context_name)
-        
-        try:
-            # Originate Local channel through dialplan
-            # ARI requires either 'app' OR 'extension/context/priority'
-            # We use extension='s' (standard start extension) to avoid entering Stasis
-            result = await ari_client.send_command(
-                method="POST",
-                resource="channels",
-                data={
-                    "endpoint": local_endpoint,
-                    "timeout": timeout
-                },
-                params={
-                    "extension": "s",  # Standard start extension (exists in most contexts)
-                    "context": context_name,
-                    "priority": "1"
-                }
-            )
-            
-            # On success, send_command returns channel data directly (no status wrapper)
-            # On error, it returns {"status": xxx, "reason": "..."}
-            if result and 'status' in result:
-                # Error case
-                logger.error(f"Failed to originate call: {result}")
-                return None
-            elif result and 'id' in result:
-                # Success case - result IS the channel data
-                channel_data = result
-                
-                # IMPORTANT: Use the actual channel ID that Asterisk created
-                # For Local channels, Asterisk creates its own ID like "Local/2765@from-internal-00000123;1"
-                channel_id = channel_data['id']
-                logger.info(f"Local channel created: {channel_id}")
-                
-                # Wait for channel to be answered (with timeout)
-                answered = await self._wait_for_answer(channel_id, timeout, ari_client)
-                
-                if answered:
-                    # Add to bridge now that it's answered
-                    logger.info(f"Adding answered channel {channel_id} to bridge {bridge_id}")
-                    await ari_client.add_channel_to_bridge(bridge_id, channel_id)
-                    return channel_data
-                else:
-                    logger.warning(f"Target channel {channel_id} did not answer within {timeout}s")
-                    # Hangup the channel
-                    await ari_client.hangup_channel(channel_id)
-                    return None
-            else:
-                logger.error(f"Unexpected result from originate: {result}")
-                return None
-                
-        except Exception as e:
-            logger.error(f"Error originating call: {e}", exc_info=True)
-            return None
-    
-    async def _wait_for_answer(
-        self,
-        channel_id: str,
-        timeout: int,
-        ari_client: Any
-    ) -> bool:
-        """
-        Wait for channel to be answered.
-        
-        Args:
-            channel_id: Channel ID to monitor
-            timeout: Max wait time in seconds
-            ari_client: ARI client instance
-        
-        Returns:
-            True if answered, False if timeout/failed
-        """
-        start_time = asyncio.get_event_loop().time()
-        
-        while (asyncio.get_event_loop().time() - start_time) < timeout:
-            try:
-                # Check channel state
-                result = await ari_client.send_command(
-                    method="GET",
-                    resource=f"channels/{channel_id}"
-                )
-                
-                # On success, result IS the channel data (no status wrapper)
-                # On error, result has 'status' key
-                if result and 'status' in result:
-                    # Error case (404 = channel gone, etc.)
-                    logger.debug(f"Channel {channel_id} query failed: {result}")
-                    return False
-                elif result and 'state' in result:
-                    # Success case - result IS the channel data
-                    state = result.get('state')
-                    
-                    if state == 'Up':
-                        logger.info(f"Channel {channel_id} answered")
-                        return True
-                    elif state in ['Busy', 'Invalid']:
-                        logger.info(f"Channel {channel_id} failed: {state}")
-                        return False
-                    # If state is 'Ring' or 'Down', keep waiting
-                
-                # Wait a bit before checking again
-                await asyncio.sleep(0.5)
-                
-            except Exception as e:
-                logger.error(f"Error checking channel state: {e}")
-                return False
-        
-        logger.warning(f"Timeout waiting for {channel_id} to answer")
-        return False
+    # Note: Old _originate_call and _wait_for_answer methods removed
+    # New approach uses generic agent-outbound context with event-driven answer detection

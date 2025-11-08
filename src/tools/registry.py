@@ -152,6 +152,18 @@ class ToolRegistry:
         except ImportError as e:
             logger.warning(f"Could not import TransferCallTool: {e}")
         
+        try:
+            from src.tools.telephony.cancel_transfer import CancelTransferTool
+            self.register(CancelTransferTool)
+        except ImportError as e:
+            logger.warning(f"Could not import CancelTransferTool: {e}")
+        
+        try:
+            from src.tools.telephony.hangup import HangupCallTool
+            self.register(HangupCallTool)
+        except ImportError as e:
+            logger.warning(f"Could not import HangupCallTool: {e}")
+        
         # Future tools will be registered here:
         # from src.tools.telephony.voicemail import SendToVoicemailTool
         # from src.tools.business.email import SendEmailSummaryTool

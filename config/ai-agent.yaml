@@ -451,9 +451,13 @@ vad:
   webrtc_end_silence_frames: 50
   webrtc_start_frames: 3
 
-# Tool calling configuration (v4.1)
+# Tool calling configuration (v4.2 - Agent Outbound)
 tools:
   enabled: true
+  
+  # Default settings for agent actions
+  default_action_context: "agent-outbound"
+  default_action_timeout: 30
   
   # Extension directory - internal extensions for transfers
   extensions:
@@ -464,10 +468,32 @@ tools:
         aliases: ["agent", "representative", "human", "real person", "live person", "someone", "support", "sales", "operator", "help desk"]
         transfer: true
         dial_string: "PJSIP/2765"
-        context: "from-internal"
+        context: "agent-outbound"      # Generic agent-outbound context
+        action_type: "transfer"         # Warm transfer to human
+        mode: "warm"                    # Announce caller info first
+        timeout: 30
+        pass_caller_info: true          # Pass caller name/number/purpose
+        # queue: "support_queue"        # Optional: fallback queue if busy
   
   # Transfer call tool settings
   transfer_call:
-    mode: "warm"  # warm = AI stays on bridge; blind = immediate redirect
-    timeout: 30   # Origination timeout in seconds
-    hold_music_class: "default"  # Music on hold class name
+    enabled: true
+    default_mode: "warm"                # warm | blind
+    hold_music_class: "default"
+    announce_caller: true
+    caller_context_fields:
+      - "caller_name"
+      - "caller_number"
+      - "call_purpose"
+  
+  # Cancel transfer settings
+  cancel_transfer:
+    enabled: true
+    allow_during_ring: true
+    allow_after_answer: false
+  
+  # Hangup settings (for full agents)
+  hangup_call:
+    enabled: true
+    require_confirmation: false
+    farewell_message: "Thank you for calling. Goodbye!"

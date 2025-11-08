@@ -770,12 +770,24 @@ class Engine:
         channel = event.get('channel', {})
         channel_id = channel.get('id')
         channel_name = channel.get('name', '')
+        args = event.get('args', [])
         
         logger.info("🎯 HYBRID ARI - Channel analysis", 
                    channel_id=channel_id,
                    channel_name=channel_name,
+                   args=args,
                    is_caller=self._is_caller_channel(channel),
                    is_local=self._is_local_channel(channel))
+        
+        # Check if this is an agent action (transfer, voicemail, queue, etc.)
+        if args and len(args) > 0:
+            action_type = args[0]
+            logger.info(f"🔀 AGENT ACTION - Stasis entry with action: {action_type}",
+                       channel_id=channel_id,
+                       action_type=action_type,
+                       args=args)
+            await self._handle_agent_action_stasis(channel_id, channel, args)
+            return
         
         if self._is_caller_channel(channel):
             # This is the caller channel entering Stasis - MAIN FLOW
@@ -1347,6 +1359,165 @@ class Engine:
                 exc_info=True,
             )
             await self.ari_client.hangup_channel(audiosocket_channel_id)
+
+    async def _handle_agent_action_stasis(self, channel_id: str, channel: dict, args: list):
+        """
+        Handle agent action channels entering Stasis (from agent-outbound dialplan).
+        
+        Args:
+            channel_id: Channel that entered Stasis
+            channel: Channel dict
+            args: Stasis args [action_type, caller_id, target, ...]
+        """
+        if len(args) < 2:
+            logger.error("🔀 AGENT ACTION - Insufficient args", 
+                        channel_id=channel_id, args=args)
+            await self.ari_client.hangup_channel(channel_id)
+            return
+        
+        action_type = args[0]
+        caller_id = args[1]
+        
+        logger.info("🔀 AGENT ACTION - Processing action",
+                   action_type=action_type,
+                   caller_id=caller_id,
+                   channel_id=channel_id)
+        
+        # Route to specific handler based on action type
+        handlers = {
+            'transfer': self._handle_transfer_answered,
+            'transfer-failed': self._handle_transfer_failed,
+            'voicemail-complete': self._handle_voicemail_complete,
+            'queue-answered': self._handle_queue_answered,
+            'queue-failed': self._handle_queue_failed,
+        }
+        
+        handler = handlers.get(action_type)
+        if handler:
+            await handler(channel_id, args)
+        else:
+            logger.warning(f"🔀 AGENT ACTION - Unknown action type: {action_type}",
+                          channel_id=channel_id, args=args)
+            await self.ari_client.hangup_channel(channel_id)
+    
+    async def _handle_transfer_answered(self, channel_id: str, args: list):
+        """
+        Handle successful transfer (target answered).
+        Args: ['transfer', caller_id, target_extension]
+        """
+        caller_id = args[1]
+        target = args[2] if len(args) > 2 else 'unknown'
+        
+        logger.info("🔀 TRANSFER ANSWERED",
+                   channel_id=channel_id,
+                   caller_id=caller_id,
+                   target=target)
+        
+        # Find session
+        session = await self.session_store.get_by_call_id(caller_id)
+        if not session:
+            logger.error("🔀 TRANSFER - Session not found",
+                        caller_id=caller_id)
+            await self.ari_client.hangup_channel(channel_id)
+            return
+        
+        # Stop MOH on caller
+        try:
+            await self.ari_client.send_command(
+                method="DELETE",
+                resource=f"channels/{session.caller_channel_id}/moh"
+            )
+            logger.info("🔀 TRANSFER - MOH stopped")
+        except Exception as e:
+            logger.warning(f"Failed to stop MOH: {e}")
+        
+        # Bridge transfer channel with caller
+        try:
+            await self.ari_client.add_channel_to_bridge(
+                session.bridge_id,
+                channel_id
+            )
+            logger.info("✅ TRANSFER COMPLETE - Channel bridged",
+                       channel_id=channel_id,
+                       bridge_id=session.bridge_id,
+                       target=target)
+            
+            # Clear current action
+            if session.current_action:
+                session.current_action['answered'] = True
+            await self.session_store.upsert_call(session)
+            
+        except Exception as e:
+            logger.error(f"🔀 TRANSFER - Failed to bridge: {e}",
+                        channel_id=channel_id)
+            await self.ari_client.hangup_channel(channel_id)
+    
+    async def _handle_transfer_failed(self, channel_id: str, args: list):
+        """
+        Handle failed transfer (target didn't answer).
+        Args: ['transfer-failed', caller_id, target, dial_status]
+        """
+        caller_id = args[1]
+        target = args[2] if len(args) > 2 else 'unknown'
+        status = args[3] if len(args) > 3 else 'UNKNOWN'
+        
+        logger.info("🔀 TRANSFER FAILED",
+                   channel_id=channel_id,
+                   caller_id=caller_id,
+                   target=target,
+                   status=status)
+        
+        # Find session and stop MOH
+        session = await self.session_store.get_by_call_id(caller_id)
+        if session:
+            try:
+                await self.ari_client.send_command(
+                    method="DELETE",
+                    resource=f"channels/{session.caller_channel_id}/moh"
+                )
+            except:
+                pass
+            
+            # Clear current action
+            session.current_action = None
+            await self.session_store.upsert_call(session)
+        
+        # Hangup the Local channel
+        await self.ari_client.hangup_channel(channel_id)
+    
+    async def _handle_voicemail_complete(self, channel_id: str, args: list):
+        """Handle voicemail completion."""
+        caller_id = args[1]
+        vmbox = args[2] if len(args) > 2 else 'unknown'
+        
+        logger.info("📧 VOICEMAIL COMPLETE", vmbox=vmbox)
+        await self.ari_client.hangup_channel(channel_id)
+    
+    async def _handle_queue_answered(self, channel_id: str, args: list):
+        """Handle queue agent answered."""
+        caller_id = args[1]
+        queue_name = args[2] if len(args) > 2 else 'unknown'
+        
+        logger.info("📞 QUEUE ANSWERED", queue=queue_name)
+        
+        # Similar to transfer_answered - bridge the channel
+        session = await self.session_store.get_by_call_id(caller_id)
+        if session:
+            try:
+                await self.ari_client.add_channel_to_bridge(
+                    session.bridge_id,
+                    channel_id
+                )
+                logger.info("✅ QUEUE AGENT BRIDGED")
+            except Exception as e:
+                logger.error(f"Failed to bridge queue agent: {e}")
+                await self.ari_client.hangup_channel(channel_id)
+    
+    async def _handle_queue_failed(self, channel_id: str, args: list):
+        """Handle queue failure."""
+        caller_id = args[1]
+        logger.info("📞 QUEUE FAILED")
+        await self.ari_client.hangup_channel(channel_id)
 
     async def _originate_audiosocket_channel_hybrid(self, caller_channel_id: str):
         """Originate an AudioSocket channel using the native channel interface."""
