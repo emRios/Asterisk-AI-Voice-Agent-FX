@@ -259,6 +259,7 @@ class TransferCallTool(Tool):
         # 4. Originate via generic agent-outbound context
         result = await self._originate_to_agent_outbound(
             target=extension,
+            dial_string=dial_string,
             action_type=extension_info.get('action_type', 'transfer'),
             context_name=extension_info.get('context', 'agent-outbound'),
             session=session,
@@ -377,6 +378,7 @@ class TransferCallTool(Tool):
     async def _originate_to_agent_outbound(
         self,
         target: str,
+        dial_string: str,
         action_type: str,
         context_name: str,
         session,
@@ -415,6 +417,7 @@ class TransferCallTool(Tool):
                    endpoint=local_endpoint,
                    action_type=action_type,
                    target=target,
+                   dial_string=dial_string,
                    caller_id=caller_id)
         
         try:
@@ -430,6 +433,7 @@ class TransferCallTool(Tool):
                         "AGENT_CALL_ID": session.call_id,
                         "AGENT_BRIDGE_ID": session.bridge_id,
                         "AGENT_TARGET": target,
+                        "AGENT_DIAL_STRING": dial_string,  # Pass dial_string from YAML to dialplan
                         "CALLER_NAME": transfer_context.get('caller_name', ''),
                         "CALLER_NUMBER": transfer_context.get('caller_number', ''),
                         "CALL_PURPOSE": transfer_context.get('call_purpose', '')
