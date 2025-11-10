@@ -1156,6 +1156,16 @@ class OpenAIRealtimeProvider(AIProviderInterface):
             if self._in_audio_burst:
                 self._in_audio_burst = False
             
+            # Re-enable VAD AFTER greeting audio completes (not after response generation)
+            if self._current_response_id == self._greeting_response_id and not self._greeting_completed:
+                self._greeting_completed = True
+                logger.info(
+                    "✅ Greeting audio completed - re-enabling turn_detection",
+                    call_id=self._call_id
+                )
+                # Re-enable turn_detection now that greeting audio is done
+                await self._re_enable_vad()
+            
             await self._emit_audio_done()
             return
 
@@ -1199,28 +1209,32 @@ class OpenAIRealtimeProvider(AIProviderInterface):
             elif event_type == "response.cancelled":
                 logger.info("OpenAI response cancelled (barge-in)", call_id=self._call_id, response_id=self._current_response_id)
             
-            # Mark greeting as completed if this was the greeting response
-            if self._current_response_id == self._greeting_response_id and event_type in ("response.completed", "response.done"):
-                self._greeting_completed = True
-                logger.info(
-                    "✅ Greeting completed - re-enabling turn_detection",
-                    call_id=self._call_id
-                )
-                # Re-enable turn_detection now that greeting is done
-                await self._re_enable_vad()
+            # Greeting VAD re-enable now handled in response.audio.done (after audio completes)
+            # This was the bug - we were re-enabling VAD when response generation completed,
+            # but audio hadn't started playing yet, causing greeting to be interrupted
             
-            # Check if this was the farewell response - trigger hangup regardless of audio
+            # Check if this was the farewell response
             # CRITICAL: Check farewell_response_id is not None to prevent None == None false positive
             if (self._farewell_response_id is not None and 
                 self._current_response_id == self._farewell_response_id and 
                 event_type in ("response.completed", "response.done")):
-                logger.info(
-                    "🔚 Farewell response completed - triggering hangup",
-                    call_id=self._call_id,
-                    response_id=self._current_response_id,
-                    had_audio=had_audio_burst
-                )
+                
+                # If farewell has no audio, warn but still proceed with hangup
+                if not had_audio_burst:
+                    logger.warning(
+                        "⚠️  Farewell response completed WITHOUT audio - OpenAI did not generate speech",
+                        call_id=self._call_id,
+                        response_id=self._current_response_id
+                    )
+                else:
+                    logger.info(
+                        "🔚 Farewell response completed with audio - triggering hangup",
+                        call_id=self._call_id,
+                        response_id=self._current_response_id
+                    )
+                
                 # Emit HangupReady event to trigger hangup in engine
+                # Engine will wait 1.0s to ensure any audio completes playing
                 try:
                     if self.on_event:
                         await self.on_event({
