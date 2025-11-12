@@ -62,7 +62,7 @@ python3 scripts/test_externalmedia_deployment.py
 
 Test coverage is enforced via GitHub Actions (`.github/workflows/ci.yml`):
 
-- **Minimum Coverage**: 40%
+- **Minimum Coverage**: 30% (enforced), 40% (target)
 - **Target Coverage by Module**: `src/tools/` 80%+, `src/core/` 60%+, `src/providers/` 35%+
 - **Coverage Reports**: HTML, XML, and JSON reports uploaded as GitHub Actions artifacts
 
@@ -76,11 +76,12 @@ Test coverage is enforced via GitHub Actions (`.github/workflows/ci.yml`):
 | `src/engine.py` | ~15% | 30% | 🟢 |
 | `src/providers/` | ~20% | 35% | 🟢 |
 
-**Overall Target**: 40%+ (enforced in CI)
+**Overall**: 30%+ enforced, 40%+ target
 
 ## Test Quality Standards
 
 New code must meet these standards:
+
 - **Unit tests**: >80% coverage for new functions/classes
 - **Integration tests**: For multi-component workflows
 - **Mocking**: Use fixtures from `conftest.py`
