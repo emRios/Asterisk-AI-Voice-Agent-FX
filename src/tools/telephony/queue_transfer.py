@@ -131,7 +131,6 @@ class TransferToQueueTool(Tool):
             session = await context.get_session()
             session.transfer_state = "in_queue"
             session.transfer_target = queue_name
-            session.transfer_time = context.current_time_iso()
             await context.update_session(session)
             
             # 6. Format response message
