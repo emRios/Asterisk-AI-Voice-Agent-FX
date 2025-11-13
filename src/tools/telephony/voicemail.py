@@ -92,11 +92,14 @@ class VoicemailTool(Tool):
             )
             
             # Use continue to leave Stasis and enter dialplan
-            await context.ari_client.continue_in_dialplan(
-                channel_id=context.caller_channel_id,
-                context=asterisk_context,
-                extension=asterisk_extension,
-                priority=1
+            await context.ari_client.send_command(
+                method="POST",
+                resource=f"channels/{context.caller_channel_id}/continue",
+                params={
+                    "context": asterisk_context,
+                    "extension": asterisk_extension,
+                    "priority": 1
+                }
             )
             
             logger.info(
