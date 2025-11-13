@@ -160,11 +160,11 @@ def inject_provider_api_keys(config_data: Dict[str, Any]) -> None:
             deepgram_block['api_key'] = os.getenv('DEEPGRAM_API_KEY')
             providers_block['deepgram'] = deepgram_block
         
-        # Inject GOOGLE_API_KEY
-        google_block = providers_block.get('google', {}) or {}
-        if isinstance(google_block, dict):
-            google_block['api_key'] = os.getenv('GOOGLE_API_KEY')
-            providers_block['google'] = google_block
+        # Inject GOOGLE_API_KEY (for google_live provider)
+        google_live_block = providers_block.get('google_live', {}) or {}
+        if isinstance(google_live_block, dict):
+            google_live_block['api_key'] = os.getenv('GOOGLE_API_KEY')
+            providers_block['google_live'] = google_live_block
         
         config_data['providers'] = providers_block
     except Exception:
