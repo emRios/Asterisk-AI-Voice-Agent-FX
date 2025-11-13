@@ -333,8 +333,8 @@ class GoogleLiveProvider(AIProviderInterface):
             # Resample from 8kHz to 16kHz
             pcm16_16k = resample_audio(
                 pcm16_8k,
-                from_rate=sample_rate,
-                to_rate=_GEMINI_INPUT_RATE,
+                source_rate=sample_rate,
+                target_rate=_GEMINI_INPUT_RATE,
             )
 
             # Add to buffer
@@ -489,7 +489,7 @@ class GoogleLiveProvider(AIProviderInterface):
         )
 
         # Play greeting if configured
-        if self.config.initial_greeting:
+        if self.config.greeting:
             await self._send_greeting()
 
     async def _send_greeting(self) -> None:
@@ -556,8 +556,8 @@ class GoogleLiveProvider(AIProviderInterface):
             # Resample from 24kHz to 8kHz for AudioSocket
             pcm16_8k = resample_audio(
                 pcm16_24k,
-                from_rate=_GEMINI_OUTPUT_RATE,
-                to_rate=8000,
+                source_rate=_GEMINI_OUTPUT_RATE,
+                target_rate=8000,
             )
 
             # Convert to target format (µ-law or PCM16)
