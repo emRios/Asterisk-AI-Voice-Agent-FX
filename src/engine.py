@@ -5966,8 +5966,28 @@ class Engine:
             # Note: Context greeting/prompt injection now happens earlier in P1 _resolve_audio_profile()
             # to ensure config is set BEFORE provider session starts and reads it.
             
-            # Inject tool execution context into provider if it supports tools (Deepgram)
-            if hasattr(provider, 'tool_adapter'):
+            # Build context dict for providers that need it (Google Live, OpenAI Realtime)
+            provider_context = {}
+            try:
+                if session.context_name:
+                    context_config = self.transport_orchestrator.get_context_config(session.context_name)
+                    if context_config:
+                        # Include tools if defined in context
+                        if hasattr(context_config, 'tools') and context_config.tools:
+                            provider_context['tools'] = context_config.tools
+                            logger.debug(
+                                "Added tools to provider context",
+                                call_id=call_id,
+                                tools=context_config.tools,
+                            )
+                        # Include prompt for reference (though config.instructions should already be set)
+                        if hasattr(context_config, 'prompt') and context_config.prompt:
+                            provider_context['prompt'] = context_config.prompt
+            except Exception as e:
+                logger.warning(f"Failed to build provider context: {e}", call_id=call_id)
+            
+            # Inject tool execution context into provider if it supports tools (Deepgram, Google Live)
+            if hasattr(provider, 'tool_adapter') or hasattr(provider, '_tool_adapter'):
                 try:
                     provider._caller_channel_id = session.caller_channel_id
                     provider._bridge_id = session.bridge_id
@@ -5983,7 +6003,7 @@ class Engine:
                     logger.warning(f"Failed to inject tool context: {e}", call_id=call_id)
 
             logger.info("DEBUG: About to call provider.start_session", call_id=call_id, provider=provider_name)
-            await provider.start_session(call_id)
+            await provider.start_session(call_id, context=provider_context if provider_context else None)
             logger.info("DEBUG: provider.start_session completed", call_id=call_id, provider=provider_name)
             # If provider supports an explicit greeting (e.g., LocalProvider), trigger it now
             try:

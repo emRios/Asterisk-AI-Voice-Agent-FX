@@ -274,7 +274,7 @@ class GoogleLiveProvider(AIProviderInterface):
         # Build tools config if tools are available
         tools = []
         if context and context.get("tools"):
-            self._tool_adapter = GoogleToolAdapter()
+            self._tool_adapter = GoogleToolAdapter(tool_registry)
             tools = self._tool_adapter.format_tools(context["tools"])
 
         # Setup message
@@ -675,10 +675,23 @@ class GoogleLiveProvider(AIProviderInterface):
                     tool_call_id=call_id,
                 )
 
+                # Build tool execution context
+                from src.tools.context import ToolExecutionContext
+                tool_context = ToolExecutionContext(
+                    call_id=self._call_id,
+                    caller_channel_id=getattr(self, '_caller_channel_id', None),
+                    bridge_id=getattr(self, '_bridge_id', None),
+                    session_store=getattr(self, '_session_store', None),
+                    ari_client=getattr(self, '_ari_client', None),
+                    config=getattr(self, '_full_config', None),
+                    provider_name="google_live",
+                )
+
                 # Execute tool
                 result = await self._tool_adapter.execute_tool(
                     func_name,
                     func_args,
+                    tool_context,
                 )
 
                 # Send tool response
