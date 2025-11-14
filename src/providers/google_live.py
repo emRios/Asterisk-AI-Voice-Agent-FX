@@ -541,12 +541,10 @@ class GoogleLiveProvider(AIProviderInterface):
             await self._handle_server_content(data)
         elif message_type == "toolCall":
             await self._handle_tool_call(data)
-        elif message_type == "inputTranscription":
-            await self._handle_input_transcription(data)
-        elif message_type == "outputTranscription":
-            await self._handle_output_transcription(data)
         elif message_type == "goAway":
             await self._handle_go_away(data)
+        # Note: inputTranscription and outputTranscription are NOT separate message types
+        # They are fields within serverContent and are handled in _handle_server_content()
 
     async def _handle_setup_complete(self, data: Dict[str, Any]) -> None:
         """Handle setupComplete message."""
@@ -589,6 +587,34 @@ class GoogleLiveProvider(AIProviderInterface):
         """Handle serverContent message (audio, text, etc.)."""
         content = data.get("serverContent", {})
         
+        # Handle input transcription (user speech) - per official API docs
+        # inputTranscription is a field within serverContent, not a separate message type
+        input_transcription = content.get("inputTranscription")
+        if input_transcription:
+            text = input_transcription.get("text", "")
+            if text:
+                logger.info(
+                    "Google Live input transcription (user speech)",
+                    call_id=self._call_id,
+                    text_preview=text[:100],
+                )
+                # Track user speech for conversation history
+                await self._track_conversation_message("user", text)
+        
+        # Handle output transcription (AI speech) - per official API docs
+        # outputTranscription is a field within serverContent, not a separate message type
+        output_transcription = content.get("outputTranscription")
+        if output_transcription:
+            text = output_transcription.get("text", "")
+            if text:
+                logger.debug(
+                    "Google Live output transcription (AI speech)",
+                    call_id=self._call_id,
+                    text_preview=text[:100],
+                )
+                # Note: We already track from modelTurn.parts[], so this is redundant
+                # but confirms the transcription is working
+        
         # Check if model turn is complete
         turn_complete = content.get("turnComplete", False)
         
@@ -604,7 +630,7 @@ class GoogleLiveProvider(AIProviderInterface):
             if "text" in part:
                 text = part["text"]
                 logger.debug(
-                    "Google Live text response",
+                    "Google Live text response from modelTurn",
                     call_id=self._call_id,
                     text_preview=text[:100],
                 )
@@ -805,43 +831,6 @@ class GoogleLiveProvider(AIProviderInterface):
                 exc_info=True,
             )
 
-    async def _handle_input_transcription(self, data: Dict[str, Any]) -> None:
-        """Handle input transcription (user speech recognized)."""
-        transcription = data.get("inputTranscription", {}).get("text", "")
-        
-        if transcription:
-            logger.info(
-                "Google Live input transcription",
-                call_id=self._call_id,
-                transcription=transcription[:100],
-            )
-            
-            # Save to conversation history (like OpenAI Realtime)
-            await self._track_conversation_message("user", transcription)
-            
-            # Emit transcript event for monitoring
-            if self.on_event:
-                await self.on_event(
-                    {
-                        "type": "Transcript",
-                        "call_id": self._call_id,
-                    "text": transcription,
-                    "is_final": True,
-                    "source": "user",
-                },
-            )
-
-    async def _handle_output_transcription(self, data: Dict[str, Any]) -> None:
-        """Handle output transcription (agent speech transcribed)."""
-        transcription = data.get("outputTranscription", {}).get("text", "")
-        
-        if transcription:
-            logger.debug(
-                "Google Live output transcription",
-                call_id=self._call_id,
-                transcription=transcription[:100],
-            )
-    
     async def _track_conversation_message(self, role: str, text: str) -> None:
         """
         Track conversation message to session history for transcripts.
