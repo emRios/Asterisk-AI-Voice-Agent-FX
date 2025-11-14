@@ -1849,6 +1849,7 @@ class Engine:
                 # Auto-trigger email summary if configured and session has conversation history
                 email_tool_config = self.config.tools.get('send_email_summary', {})
                 if email_tool_config.get('enabled', False):
+                    from src.tools.registry import tool_registry
                     email_tool = tool_registry.get('send_email_summary')
                     if email_tool:
                         # Verify session still exists (race condition with multiple cleanup calls)
