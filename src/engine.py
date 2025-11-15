@@ -2461,14 +2461,31 @@ class Engine:
                         continuous_input = bool(getattr(pcfg, 'continuous_input', False))
             except Exception:
                 continuous_input = False
+            
             if continuous_input and provider and hasattr(provider, 'send_audio'):
-                # Forward immediately, independent of audio_capture_enabled/VAD
+                # CRITICAL FIX: Google Live needs gating, but OpenAI/Deepgram don't
+                # - Google Live: Bidirectional audio, NO server-side echo cancellation → NEEDS gating
+                # - OpenAI Realtime: Server-side AEC → gating harmful
+                # - Deepgram: Text-based output → no echo risk
+                needs_gating = provider_name == "google_live"
+                
+                if needs_gating and not session.audio_capture_enabled:
+                    # During TTS playback for Google Live - skip forwarding to prevent echo
+                    logger.debug(
+                        "🔇 GATING ACTIVE - Skipping frame for Google Live (TTS playing)",
+                        call_id=caller_channel_id,
+                        audio_capture_enabled=session.audio_capture_enabled,
+                    )
+                    return
+                
+                # Forward to provider
                 logger.info(
                     "📤 CONTINUOUS INPUT - Forwarding frame to provider",
                     call_id=caller_channel_id,
                     provider=provider_name,
                     frame_bytes=len(audio_bytes),
                     pcm_bytes=len(pcm_bytes),
+                    gating_active=needs_gating and not session.audio_capture_enabled,
                 )
                 try:
                     self._update_audio_diagnostics(session, "provider_in", pcm_bytes, "slin16", pcm_rate)
