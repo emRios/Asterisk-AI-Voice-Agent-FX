@@ -210,7 +210,7 @@ contexts:
   
   demo_google_live:
     greeting: "Hi {caller_name}, I'm Ava. Ask me anything about the Asterisk AI Voice Agent!"
-    profile: wideband_pcm_16k  # Use wideband profile (slin16@16kHz) matching ExternalMedia
+    profile: telephony_ulaw_8k  # Use telephony profile (ulaw@8kHz) matching Golden Baseline
     prompt: |
       You are Ava (Asterisk Voice Agent) demonstrating Google Gemini Live API.
       
@@ -325,13 +325,13 @@ external_media:
   port_range: 18080:18099
   
   # Asterisk-side configuration (RTP payload)
-  codec: slin16  # Codec Asterisk sends/receives: ulaw, alaw, slin, slin16
+  codec: ulaw  # Codec Asterisk sends/receives: ulaw, alaw, slin, slin16
   direction: both  # RTP direction: both, sendonly, recvonly
   
   # Engine-side configuration (internal processing)
   # Defines how RTP server delivers audio to engine/providers
-  format: slin16  # Engine internal format: slin (8kHz), slin16 (16kHz), ulaw (8kHz)
-  sample_rate: 16000  # Optional: auto-inferred from format if not set
+  format: slin  # Engine internal format: slin (8kHz), slin16 (16kHz), ulaw (8kHz)
+  sample_rate: 8000  # Optional: auto-inferred from format if not set
 llm:
   initial_greeting: Hello, how can I help you today?
   prompt: Voice assistant. Answer in 5-8 words. Be direct. Expand only if asked.
