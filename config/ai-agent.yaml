@@ -325,7 +325,7 @@ external_media:
   port_range: 18080:18099
   
   # Asterisk-side configuration (RTP payload)
-  codec: ulaw  # Codec Asterisk sends/receives: ulaw, alaw, slin, slin16
+  codec: slin16  # Codec Asterisk sends/receives: ulaw, alaw, slin, slin16
   direction: both  # RTP direction: both, sendonly, recvonly
   
   # Engine-side configuration (internal processing)
