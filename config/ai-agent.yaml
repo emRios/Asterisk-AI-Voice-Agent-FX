@@ -653,6 +653,7 @@ providers:
       type: server_vad
     voice: alloy
   google_live:
+    continuous_input: true
     api_key: ${GOOGLE_API_KEY}
     enabled: true
     greeting: ${GOOGLE_LIVE_GREETING:-Hi! I'm powered by Google Gemini Live API. Try interrupting me!}
