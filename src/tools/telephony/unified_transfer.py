@@ -22,9 +22,25 @@ class UnifiedTransferTool(Tool):
     - Ring Groups: Ring groups via FreePBX ext-group context
     """
     
+    def __init__(self, config: Dict[str, Any]):
+        """Initialize with config to get available destinations."""
+        super().__init__(config)
+        self._config = config
+    
     @property
     def definition(self) -> ToolDefinition:
-        """Return tool definition."""
+        """Return tool definition with dynamic destination enum."""
+        # Get configured destinations
+        transfer_config = self._config.get("tools", {}).get("transfer", {})
+        destinations = list(transfer_config.get("destinations", {}).keys())
+        
+        # Build description with available destinations
+        if destinations:
+            dest_list = "', '".join(destinations)
+            description = f"Destination name to transfer to. Available: '{dest_list}'"
+        else:
+            description = "Destination name to transfer to"
+        
         return ToolDefinition(
             name="transfer",
             description="Transfer the caller to another destination (extension, queue, or ring group)",
@@ -35,8 +51,9 @@ class UnifiedTransferTool(Tool):
                 ToolParameter(
                     name="destination",
                     type="string",
-                    description="Destination name to transfer to (e.g., 'sales_agent', 'sales_queue', 'sales_team')",
-                    required=True
+                    description=description,
+                    required=True,
+                    enum=destinations if destinations else None  # Restrict to configured destinations
                 )
             ]
         )
