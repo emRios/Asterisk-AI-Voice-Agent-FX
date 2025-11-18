@@ -7,12 +7,15 @@
 ![Asterisk](https://img.shields.io/badge/asterisk-18+-orange.svg)
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/hkjarral/Asterisk-AI-Voice-Agent)
 
-The most powerful, flexible open-source AI voice agent for Asterisk/FreePBX. Featuring a **modular pipeline architecture** that lets you mix and match STT, LLM, and TTS providers, plus **3 production-ready golden baselines** validated for enterprise deployment.
+The most powerful, flexible open-source AI voice agent for Asterisk/FreePBX. Featuring a **modular pipeline architecture** that lets you mix and match STT, LLM, and TTS providers, plus **4 production-ready golden baselines** validated for enterprise deployment.
 
 ## 🎉 What's New in v4.2
 
+* **🤖 Google Live API**: Gemini 2.0 Flash integration with multimodal capabilities
 * **🚀 Streamlined Onboarding**: Interactive `agent quickstart` wizard for first-time users
 * **🔧 Enhanced Setup**: ARI validation, API key verification, and dialplan generation
+* **📞 Unified Transfer Tool**: Single tool for extensions, queues, and ring groups
+* **📬 Voicemail Integration**: Leave voicemail tool with configurable extension routing
 * **🩺 Config Validation**: `agent config validate` with auto-fix capabilities
 * **📝 Dialplan Helper**: `agent dialplan` generates provider-specific snippets
 * **⚡ Improved install.sh**: Offers CLI installation and automated setup
@@ -37,7 +40,7 @@ The most powerful, flexible open-source AI voice agent for Asterisk/FreePBX. Fea
 
 ## ✨ Features
 
-### 3 Golden Baseline Configurations
+### 4 Golden Baseline Configurations
 
 1. **OpenAI Realtime** (Recommended for Quick Start)
    * Modern cloud AI with natural conversations
@@ -49,7 +52,12 @@ The most powerful, flexible open-source AI voice agent for Asterisk/FreePBX. Fea
    * Response time: <3 seconds
    * Best for: Deepgram ecosystem, advanced features
 
-3. **Local Hybrid** (Privacy-Focused)
+3. **Google Live API** (Multimodal AI)
+   * Gemini 2.0 Flash with multimodal capabilities
+   * Response time: <2 seconds
+   * Best for: Google ecosystem, advanced AI features
+
+4. **Local Hybrid** (Privacy-Focused)
    * Local STT/TTS + Cloud LLM (OpenAI)
    * Audio stays on-premises, only text to cloud
    * Response time: 3-7 seconds
@@ -88,23 +96,70 @@ Each configuration uses the same Ava persona with full project knowledge. Compar
 **NEW in v4.2**: Google Live API integration with Gemini 2.0 Flash!
 **NEW in v4.1**: Try asking the agent to "transfer me to support" or "email me a transcript"!
 
-## 🛠️ AI-Powered Actions (v4.1+)
+## 🛠️ AI-Powered Actions (v4.2+)
 
-Your AI agent can now perform real-world actions:
+Your AI agent can perform real-world telephony actions through tool calling:
 
-### Call Transfers
+### Unified Call Transfers
+
+Single tool handles all transfer types:
 
 ```
-Caller: "I need to speak with technical support"
-Agent: "I'll transfer you to technical support right away."
-[Warm transfer to extension 6001 with bidirectional audio]
+Caller: "Transfer me to the sales team"
+Agent: "I'll connect you to our sales team right away."
+[Transfer to sales queue with queue music]
+
+Caller: "I need technical support"
+Agent: "Let me transfer you to technical support."
+[Direct transfer to support agent extension]
+
+Caller: "Connect me to customer service"
+Agent: "I'll transfer you to our customer service ring group."
+[Transfer to ring group, multiple agents ring]
 ```
 
-### Email Transcripts
+**Transfer Destinations:**
+- **Extensions**: Direct SIP/PJSIP endpoint transfers
+- **Queues**: ACD queue transfers with position announcements
+- **Ring Groups**: Multiple agents ring simultaneously
 
+### Call Control
+
+**Cancel Transfer** (during ring):
+```
+Agent: "Let me transfer you to support..."
+Caller: "Actually, cancel that"
+Agent: "No problem, I've cancelled the transfer. How can I help?"
+```
+
+**Hangup Call** (with farewell):
+```
+Caller: "That's all I needed, thanks!"
+Agent: "Thank you for calling. Goodbye!"
+[Call ends gracefully]
+```
+
+### Voicemail
+
+```
+Caller: "Can I leave a voicemail for John?"
+Agent: "Of course! I'll transfer you to John's voicemail."
+[Routes to voicemail box, caller records message]
+```
+
+### Email Integration
+
+**Automatic Call Summaries**:
+After every call, admins receive:
+- Full conversation transcript
+- Call duration and metadata
+- Caller information
+- Professional HTML formatting
+
+**Caller-Requested Transcripts**:
 ```
 Caller: "Can you email me a transcript of this call?"
-Agent: "I'd be happy to send you a transcript. What email address should I use?"
+Agent: "I'd be happy to! What email address should I use?"
 Caller: "john dot smith at gmail dot com"
 Agent: "That's john.smith@gmail.com - is that correct?"
 Caller: "Yes"
@@ -112,13 +167,16 @@ Agent: "Perfect! I'll send the transcript there shortly."
 [Email sent with full conversation transcript]
 ```
 
-### Automatic Summaries
+### Available Tools
 
-After every call, admins automatically receive:
-- Full conversation transcript
-- Call duration and metadata
-- Caller information
-- Professional HTML formatting
+| Tool | Description | Status |
+|------|-------------|--------|
+| `transfer` | Transfer to extensions, queues, or ring groups | ✅ |
+| `cancel_transfer` | Cancel in-progress transfer (during ring) | ✅ |
+| `hangup_call` | End call gracefully with farewell message | ✅ |
+| `leave_voicemail` | Route caller to voicemail extension | ✅ |
+| `send_email_summary` | Auto-send call summaries to admins | ✅ |
+| `request_transcript` | Caller-initiated email transcripts | ✅ |
 
 **Setup**: See [Tool Calling Guide](docs/TOOL_CALLING_GUIDE.md) for configuration.
 
