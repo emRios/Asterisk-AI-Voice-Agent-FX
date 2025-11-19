@@ -11,6 +11,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Additional provider integrations
 - Enhanced monitoring features
 
+## [4.3.0] - 2025-11-19
+
+### Added
+- **Holistic Tool Support for Pipelines (AAVA-85)**: Complete tool execution system across all pipeline types
+  - Enabled all 6 tools (hangup, transfer, email, transcript, voicemail) for `local_hybrid` pipeline
+  - Session history persistence for tool context
+  - Explicit ARI hangup implementation
+- **Comprehensive Documentation Structure**: Complete reorganization of project documentation
+  - New `docs/contributing/` structure for developer documentation
+  - Provider setup guides: `Provider-Deepgram-Setup.md`, `Provider-OpenAI-Setup.md`, `Provider-Google-Setup.md`
+  - Developer guides: quickstart, architecture overview, architecture deep dive, common pitfalls
+  - Technical references for all provider implementations
+- **Community Integration**: Discord server integration (https://discord.gg/CAVACtaY)
+- **Milestone 18**: Hybrid Pipelines Tool Implementation documentation
+
+### Fixed
+- **OpenAI Realtime Tool Schema Regression**: Corrected tool schema format for chat completions
+- **Tool Execution Flow**: Resolved AttributeError and execution blocking issues
+- **Playback Race Conditions**: Fixed audio cutoff during tool execution
+- **Hangup Method**: Corrected method name (`hangup_channel()` vs `delete_channel()`)
+- **Pydantic Compatibility**: Fixed v1/v2 compatibility (`model_dump` → `dict`)
+- **Milestone Numbering**: Corrected duplicate milestone-8, renumbered monitoring stack to milestone-14
+
+### Changed
+- **Documentation Structure**: Reorganized docs into User, Provider, Operations, Developer, and Project sections
+- **Merged Documentation**: Combined Deepgram API reference into implementation guide (single comprehensive doc)
+- **Consolidated Guides**: CLI tools → `cli/README.md`, Queue setup → FreePBX Integration Guide
+- **Renamed Files**: Clearer naming for pipeline implementations and architecture docs
+- **Link Format**: All documentation links now use relative paths (GitHub-clickable)
+
+### Removed
+- **Obsolete Documentation**: 8 outdated docs removed (2,763 lines)
+  - `call-framework.md`, `AudioSocket-Provider-Alignment.md`, `CLI_TOOLS_GUIDE.md`
+  - `LOCAL_AI_SERVER_LOGGING_OPTIMIZATION.md`, `ASTERISK_QUEUE_SETUP.md`
+  - `ExternalMedia_Deployment_Guide.md`, `deepgram-agent-api.md`
+- **Broken References**: Replaced `linear-issues-community-features.md` with Discord server
+
 ## [4.2.1] - 2025-11-18
 
 ### Added
