@@ -5158,6 +5158,12 @@ class Engine:
                                     if result.get("will_hangup"):
                                         farewell = result.get("message")
                                         if farewell:
+                                            # Add farewell to conversation history for email
+                                            conversation_history.append({"role": "assistant", "content": farewell})
+                                            session.conversation_history = list(conversation_history)
+                                            await self.session_store.upsert_call(session)
+                                            logger.info("Farewell added to conversation history", call_id=call_id)
+                                            
                                             # Speak farewell
                                             try:
                                                 # Re-use TTS synthesis for farewell
@@ -5166,8 +5172,11 @@ class Engine:
                                                     fw_bytes.extend(chunk)
                                                 if fw_bytes:
                                                     pid = await self.playback_manager.play_audio(call_id, bytes(fw_bytes), "pipeline-farewell")
-                                                    # Wait for farewell to finish (rough estimate or 2s)
-                                                    await asyncio.sleep(2.0)
+                                                    # Calculate actual duration: mulaw 8kHz = 8000 bytes/sec
+                                                    duration_sec = len(fw_bytes) / 8000.0
+                                                    # Wait for farewell + small buffer to ensure completion
+                                                    await asyncio.sleep(duration_sec + 0.5)
+                                                    logger.info("Farewell playback completed", duration_sec=duration_sec, call_id=call_id)
                                             except Exception as e:
                                                 logger.error("Farewell TTS failed", error=str(e))
                                         
