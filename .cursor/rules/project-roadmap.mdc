@@ -1,0 +1,34 @@
+---
+description: Guardrails for maintaining the AI Voice Agent project roadmap
+globs: docs/ROADMAP.md
+alwaysApply: true
+---
+
+# Roadmap Maintenance Rules
+
+## Canonical Scope
+- Treat `docs/ROADMAP.md` as the authoritative roadmap for transport/pipeline phases, complemented by milestone files under `docs/milestones/`.
+- Keep the roadmap aligned with the current architecture assumptions: AudioSocket-first capture, downstream streaming with automatic file fallback, provider parity, and metrics coverage.
+- Document every regression or milestone movement so Cursor, Windsurf, and other IDE prompts stay consistent.
+
+## Milestone Structure
+- Preserve milestone headings in the format `## Milestone <number> — <title>` with a trailing status marker (`✅ Completed`, `Planned`, etc.).
+- Each milestone must list: a short goal statement, the shipped tasks (using `- ✅` for completed work), and verification or acceptance bullets that describe the under-a-minute checks used after deploys.
+- Preserve dated regression notes for Deepgram, OpenAI, and other providers; when newer regression data exists, add new dated notes rather than rewriting history.
+
+## When Updating Progress
+- Reflect progress by moving tasks between sections or toggling status markers; never delete historical milestones.
+- Mirror provider or regression insights in `docs/regressions/*` and link to golden baselines under `docs/baselines/golden/` after editing the roadmap.
+- Ensure new tasks call out AudioSocket upstream handling, downstream streaming (with file fallback), SessionStore/metrics impacts, and deployment/server-runbook expectations when relevant.
+
+## Quick Regression Checklist
+- Keep the smoke steps consistent (place call, verify logs, run health check, archive findings with `scripts/rca_collect.sh`).
+- If the checklist changes, update wording here and ensure `docs/regressions/*` and golden baselines reflect the same steps.
+
+## Future Work Hooks
+- When adding or updating milestones, ensure they cover transport behavior, provider parity, streaming TTS, barge-in, jitter buffers, keepalives, telemetry, monitoring, tooling (CLI/agent), and operator workflows as appropriate.
+
+## Prompting Notes
+- Keep roadmap edits precise and aligned with `docs/ROADMAP.md`, `docs/Architecture.md`, and regression docs to prevent conflicting milestones.
+- Use XML-style wrappers when issuing roadmap instructions (e.g., `<roadmap_update>` blocks) and set reasoning effort appropriately (`high` for milestone restructuring, `medium` for incremental status tweaks).
+- Include optional `<self_reflection>` prompts for major planning changes and cap exploration with tool budgets or `<persistence>` tags so GPT-5 documents assumptions instead of re-querying users.

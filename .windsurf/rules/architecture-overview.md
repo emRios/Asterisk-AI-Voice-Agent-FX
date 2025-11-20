@@ -1,0 +1,42 @@
+---
+trigger: always_on
+description: Architecture guardrails for the Asterisk AI Voice Agent v4.x
+globs: docs/Architecture.md
+---
+
+# Architecture Guardrails
+
+## Canonical References
+- Treat `docs/Architecture.md` as the primary source for architectural decisions; keep Cursor/Windsurf prompts in sync with it.
+- Load `docs/Architecture.md`, `docs/ROADMAP.md`, together when planning features—architecture, roadmap, and regression history move in lockstep. For regressions, reference golden baselines under `docs/baselines/golden/`.
+
+## System Shape (Must Preserve)
+- Two-container deployment (`ai-engine`, `local-ai-server`) with Asterisk integration via ARI + ExternalMedia/AudioSocket; avoid introducing direct provider networking from Asterisk.
+- Upstream audio flows through ExternalMedia RTP or AudioSocket-first capture; downstream audio uses the streaming transport with automatic file fallback via `/mnt/asterisk_media/ai-generated`.
+- Maintain Hybrid ARI control: `_handle_caller_stasis_start_hybrid()` answers, bridges, and originates media forks; new features should hook into this lifecycle rather than bypassing it.
+
+## State & Coordination
+- Continue migrating toward `SessionStore`, `PlaybackManager`, and `ConversationCoordinator`; new stateful code must interact through these abstractions instead of legacy dicts.
+- Respect gating/barge-in rules managed by the coordinator—never flip capture flags or playback tokens directly; use the provided helper methods.
+
+## Provider & Pipeline Expectations
+- Provider integrations (local, Deepgram, others) consume audio via `send_audio` streams and emit events processed by `on_provider_event`; keep handlers typed and SessionStore-aware.
+- Preserve the STT → LLM → TTS pipeline ordering and buffering strategy: VAD-driven capture with fallback chunk uploads, playback gating during responses, cleanup on `PlaybackFinished`.
+- Ensure new providers or features log to Prometheus metrics (`/metrics`) and `/health` in the same pattern (capture state, barge-in, latency gauges).
+
+## Deployment & Performance Constraints
+- Assume UDP RTP ingress on port 18080 (configurable); verify any changes propagate to dialplan docs and configs.
+- Keep file playback latency under the 2 s P95 target; coordinate with roadmap tasks before altering chunk sizes, jitter buffers, or timeouts.
+- When introducing streaming features, gate behind existing config flags (`audio_transport`, `downstream_mode`, `streaming.*`) and document fallbacks to file playback.
+
+## Testing & Documentation Hygiene
+- For architectural changes, update `docs/Architecture.md` first, then mirror the relevant points in roadmap/rules files.
+- Run (or outline) the quick regression checklist: AudioSocket listener bind, call smoke, provider events, health reset, documentation archive.
+- Document new regressions or architectural shifts in `docs/regressions/` and reference golden baselines under `docs/baselines/golden/` instead of `call-framework.md`.
+
+Maintain these guardrails so all IDE contexts reinforce the same architecture while we phase in AudioSocket-first capture and future streaming TTS.
+
+## Prompting Notes
+- Keep architectural prompts precise and non-conflicting with other rule files; reference `docs/Architecture.md`, `docs/ROADMAP.md`, and milestone docs before issuing new directives.
+- When crafting instructions, wrap guidance in XML-style snippets (e.g., `<architecture_rules>…</architecture_rules>`) and specify reasoning effort (`medium` for typical edits, `high` when redesigning flows).
+- Encourage short `<self_reflection>` prompts for major architectural changes so the agent outlines its plan before modifying core files, and cap exploration/tool usage where appropriate.

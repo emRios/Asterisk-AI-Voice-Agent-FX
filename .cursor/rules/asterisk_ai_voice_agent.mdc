@@ -1,0 +1,85 @@
+---
+description: Development rules and guidelines for the Asterisk AI Voice Agent v4.x project
+globs: src/**/*.py, *.py, docker-compose.yml, Dockerfile, config/ai-agent.yaml
+alwaysApply: true
+---
+
+# Asterisk AI Voice Agent v4.x — Cursor Rules
+
+> For high-level planning, onboarding, and “what to build next”, defer to the AVA project manager persona defined in `AVA.mdc`. Use this file to constrain *how* code and configs are changed.
+
+## GA Scope & Architecture
+- Two-container stack (`ai-engine`, `local-ai-server`) with AudioSocket-first capture and downstream streaming transport; file playback remains an automatic fallback. Keep ExternalMedia/RTP as a contingency path and during transition.
+- Hybrid ARI flow (`_handle_caller_stasis_start_hybrid`) remains authoritative for call lifecycle; extend handlers rather than bypassing bridge/originate logic.
+- SessionStore + ConversationCoordinator + PlaybackManager manage state, gating, and metrics; prefer these interfaces over legacy dictionaries when adding logic.
+
+## Workflow Essentials
+- For **public contributors**:
+  - It is acceptable to run Docker locally following `README.md` and `docs/INSTALLATION.md` (e.g., `./install.sh`, `docker compose up`, and `agent init/doctor/demo` from `docs/CLI_TOOLS_GUIDE.md`).
+  - Prefer small, well-scoped branches from `develop` and keep changes aligned with the documented architecture.
+- For **maintainers using the shared lab server**:
+  - Develop on `develop`, push, then on `/root/Asterisk-AI-Voice-Agent` run `git pull && docker-compose up -d --build --force-recreate ai-engine local-ai-server`.
+- Use `scripts/rca_collect.sh` for RCA evidence during regressions.
+- When `vad.use_provider_vad` is enabled, do not reintroduce local WebRTC/Enhanced VAD paths—leave speech detection to the provider and document the config change.
+- Upsample caller audio to 24 kHz (`openai_realtime.provider_input_sample_rate_hz=24000`) before committing to OpenAI Realtime; session formats should advertise `pcm_s16le_24000`.
+- Makefile targets (`make deploy`, `make server-logs`, `make test-local`, etc.) are recommended but optional; if invoking docker-compose directly, always include `--build` for code changes and consider `--no-cache` when behaviour looks stale.
+- Never rely on `docker-compose restart` for new code, and do not bypass git by copying files into containers.
+
+## Streaming Transport Guardrails
+- Treat `config/ai-agent.yaml` as the source of truth for streaming defaults: `streaming.min_start_ms`, `low_watermark_ms`, `fallback_timeout_ms`, `provider_grace_ms`, `jitter_buffer_ms`, and `barge_in.post_tts_end_protection_ms`.
+- `StreamingPlaybackManager` must continue pacing provider frames in 20 ms slices; maintain the jitter buffer warm-up and low-watermark behaviour to avoid restart loops.
+- Preserve post-TTS protection and gating tokens so the agent never consumes its own playback; any capture tweaks must respect the guard window and ConversationCoordinator hooks.
+
+## Pipelines & Providers
+- Register new adapters through `src/pipelines/orchestrator.py` and expose them in the YAML schema; align examples in `examples/pipelines/*.yaml` and document changes in milestone files.
+- Providers must emit metrics/events compatible with existing Prometheus gauges (latency, barge-in, streaming health) and update `/health` readiness fields.
+- When adjusting Deepgram or OpenAI settings, keep AudioSocket at μ-law/8 kHz, ensure downstream fallback is functional, and capture findings in `docs/regressions/`.
+- Local provider specifics: idle-finalize STT after ~1.2 s of silence, keep LLM calls off the event loop, and rely on the engine’s ingest/transcript queues plus transcript aggregation (≥ 3 words or ≥ 12 chars) so slow TinyLlama runs never block AudioSocket or trigger premature replies.
+
+## Testing & Observability
+- Before regressions: place an AudioSocket call on server, verify streaming logs (`AudioSocket connection accepted`, buffer depth, fallback counters), then scrape `/metrics` to archive latency histograms.
+- Remote ai-engine logs: run `timestamp=$(date +%Y%m%d-%H%M%S); ssh root@mypbx.server.com "cd /root/Asterisk-AI-Voice-Agent && docker-compose logs ai-engine --since 30m --no-color" > logs/ai-engine-$timestamp.log` from the repo to capture the latest container output for RCA.
+- Log call IDs and tuning notes in `docs/regressions/*` and link comparisons to golden baselines under `docs/baselines/golden/`; sync significant changes into `docs/Architecture.md` and `docs/ROADMAP.md`.
+
+## Documentation Hygiene
+- Architectural shifts must land in `docs/Architecture.md` first, followed by roadmap and milestone updates; rule files (`Agents.md`, `Gemini.md`, Windsurf, Cursor) stay in lockstep.
+- Replace references to `call-framework.md` with:
+  - Golden baselines: `docs/baselines/golden/`
+  - Deepgram: `docs/regressions/deepgram-call-framework.md`
+  - OpenAI: `docs/regressions/openai-call-framework.md`
+- Keep terminology consistent: AudioSocket-first, streaming defaults via YAML, Milestones 5–8 GA scope, `/metrics` snapshots before container restarts.
+
+## GPT-5 Prompting Guidance
+- **Precision & consistency**: Align instructions across all IDE rule files; avoid conflicting mandates when editing prompts or workflows.
+- **Structured prompts**: Wrap guidance in XML-style blocks, e.g.
+
+  ```xml
+  <code_editing_rules>
+    <guiding_principles>
+      - maintain AudioSocket-first streaming with file fallback
+    </guiding_principles>
+    <reasoning_effort level="medium"/>
+  </code_editing_rules>
+  ```
+
+- **Reasoning effort**: Request `high` only for complex streaming/pipeline work; choose medium or low for routine edits to prevent over-analysis.
+- **Tone calibration**: Use collaborative language; avoid all-caps or ultimatums that cause GPT-5 to overcorrect.
+- **Planning & self-reflection**: Prompt the model with `<self_reflection>` when tackling new features so it sketches a brief plan before coding.
+- **Eagerness control**: Bound exploration with tool budgets or `<persistence>` directives, clarifying when to assume reasonable defaults versus re-asking.
+
+Keep this file synchronized with `Agents.md`, `Gemini.md`, and `.windsurf/rules/asterisk_ai_voice_agent.md` whenever guidance changes.
+
+## Provider/Pipeline Resolution Precedence
+
+- Provider precedence: `AI_PROVIDER` (Asterisk channel var) > `contexts.*.provider` > `default_provider`.
+- Per-call overrides read from: `AI_PROVIDER`, `AI_AUDIO_PROFILE`, `AI_CONTEXT`.
+
+## MCP Tools
+
+- Active servers: `linear-mcp-server`, `mcp-playwright`, `memory`, `perplexity-ask`, `sequential-thinking`.
+- Prefer MCP resources over web search; discover via `list_mcp_resources` / `list_mcp_resource_templates`, read via `read_mcp_resource`.
+- Use `mcp-playwright` for dashboard UI validations (Grafana/Prometheus).
+
+## Change Safety & Review
+
+- Review and research thoroughly before fixes; validate against golden baselines in `docs/baselines/golden/` and capture RCA with `scripts/rca_collect.sh`.
