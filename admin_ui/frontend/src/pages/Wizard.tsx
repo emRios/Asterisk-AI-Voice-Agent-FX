@@ -230,7 +230,9 @@ const Wizard = () => {
                     }
                 }
 
-                if (config.provider === 'local_hybrid' || config.provider === 'local') {
+                // Only verify Local AI health for local_hybrid on step 3
+                // For "local" (Full), server is started in step 5 after model download
+                if (config.provider === 'local_hybrid') {
                     await verifyLocalAIHealth();
                 }
 
