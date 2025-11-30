@@ -957,34 +957,44 @@ const Wizard = () => {
                                         <button
                                             onClick={async () => {
                                                 setLoading(true);
+                                                setError(null);
+                                                // Mark as started immediately to show logs panel
+                                                setLocalAIStatus(prev => ({ ...prev, serverStarted: true, serverLogs: ['Starting container...'] }));
+                                                
                                                 try {
                                                     const res = await axios.post('/api/wizard/local/start-server');
-                                                    if (res.data.success) {
-                                                        setLocalAIStatus(prev => ({ ...prev, serverStarted: true }));
-                                                        // Start polling logs
-                                                        const pollLogs = async () => {
-                                                            try {
-                                                                const logRes = await axios.get('/api/wizard/local/server-logs');
-                                                                setLocalAIStatus(prev => ({
-                                                                    ...prev,
-                                                                    serverLogs: logRes.data.logs || [],
-                                                                    serverReady: logRes.data.ready
-                                                                }));
-                                                                if (!logRes.data.ready) {
-                                                                    setTimeout(pollLogs, 2000);
-                                                                }
-                                                            } catch {
-                                                                setTimeout(pollLogs, 3000);
-                                                            }
-                                                        };
-                                                        setTimeout(pollLogs, 2000);
-                                                    } else {
+                                                    if (!res.data.success) {
                                                         setError(res.data.message);
+                                                        setLocalAIStatus(prev => ({ ...prev, serverStarted: false }));
+                                                        setLoading(false);
+                                                        return;
                                                     }
                                                 } catch (err: any) {
                                                     setError('Failed to start server: ' + err.message);
+                                                    setLocalAIStatus(prev => ({ ...prev, serverStarted: false }));
+                                                    setLoading(false);
+                                                    return;
                                                 }
+                                                
                                                 setLoading(false);
+                                                
+                                                // Start polling logs
+                                                const pollLogs = async () => {
+                                                    try {
+                                                        const logRes = await axios.get('/api/wizard/local/server-logs');
+                                                        setLocalAIStatus(prev => ({
+                                                            ...prev,
+                                                            serverLogs: logRes.data.logs || [],
+                                                            serverReady: logRes.data.ready
+                                                        }));
+                                                        if (!logRes.data.ready) {
+                                                            setTimeout(pollLogs, 2000);
+                                                        }
+                                                    } catch {
+                                                        setTimeout(pollLogs, 3000);
+                                                    }
+                                                };
+                                                pollLogs();
                                             }}
                                             disabled={loading}
                                             className="w-full px-4 py-2 rounded-md bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 flex items-center justify-center"
