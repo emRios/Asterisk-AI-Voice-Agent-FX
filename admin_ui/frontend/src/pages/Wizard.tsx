@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { AlertCircle, ArrowRight, Loader2, Cloud, Server, Shield, Zap, SkipForward, CheckCircle, Terminal, Copy, HardDrive, Play } from 'lucide-react';
+import { AlertCircle, AlertTriangle, ArrowRight, Loader2, Cloud, Server, Shield, Zap, SkipForward, CheckCircle, Terminal, Copy, HardDrive, Play } from 'lucide-react';
 import axios from 'axios';
 
 interface SetupConfig {
@@ -65,6 +65,7 @@ const Wizard = () => {
         ramGb: number;
         gpuDetected: boolean;
         modelsReady: boolean;
+        existingModels: { stt: string[]; llm: string[]; tts: string[] };
         downloading: boolean;
         downloadOutput: string[];
         downloadCompleted: boolean;
@@ -78,6 +79,7 @@ const Wizard = () => {
         ramGb: 0,
         gpuDetected: false,
         modelsReady: false,
+        existingModels: { stt: [], llm: [], tts: [] },
         downloading: false,
         downloadOutput: [],
         downloadCompleted: false,
@@ -441,15 +443,58 @@ const Wizard = () => {
                         {(config.provider === 'openai_realtime' || config.provider === 'local_hybrid') && (
                             <div className="space-y-4">
                                 {config.provider === 'local_hybrid' && (
-                                    <div className="bg-blue-50/50 dark:bg-blue-900/10 p-4 rounded-md border border-blue-100 dark:border-blue-900/20 text-sm text-blue-800 dark:text-blue-300">
-                                        <p className="font-semibold mb-1 flex items-center gap-2">
-                                            <Server className="w-4 h-4" />
-                                            Local Server Required
-                                        </p>
-                                        <p>
-                                            The Local Hybrid mode requires the <code>local-ai-server</code> container to be running.
-                                            The wizard will attempt to start it, but ensure you have built the image.
-                                        </p>
+                                    <div className="space-y-3">
+                                        <div className="bg-blue-50/50 dark:bg-blue-900/10 p-4 rounded-md border border-blue-100 dark:border-blue-900/20 text-sm text-blue-800 dark:text-blue-300">
+                                            <p className="font-semibold mb-1 flex items-center gap-2">
+                                                <Server className="w-4 h-4" />
+                                                Local Server Required
+                                            </p>
+                                            <p>
+                                                The Local Hybrid mode requires the <code>local-ai-server</code> container to be running.
+                                                The wizard will attempt to start it, but ensure you have built the image.
+                                            </p>
+                                        </div>
+                                        
+                                        {/* Check for existing models button */}
+                                        <div className="flex items-center gap-2">
+                                            <button
+                                                onClick={async () => {
+                                                    try {
+                                                        const res = await axios.get('/api/wizard/local/models-status');
+                                                        setLocalAIStatus(prev => ({
+                                                            ...prev,
+                                                            existingModels: {
+                                                                stt: res.data.stt_models || [],
+                                                                llm: res.data.llm_models || [],
+                                                                tts: res.data.tts_models || []
+                                                            },
+                                                            modelsReady: res.data.ready
+                                                        }));
+                                                    } catch (err) {}
+                                                }}
+                                                className="text-xs px-2 py-1 rounded bg-secondary text-secondary-foreground hover:bg-secondary/80"
+                                            >
+                                                Check Existing Models
+                                            </button>
+                                        </div>
+                                        
+                                        {/* Warning if models already exist */}
+                                        {localAIStatus.modelsReady && (
+                                            <div className="p-3 bg-yellow-50 dark:bg-yellow-900/20 rounded border border-yellow-200 dark:border-yellow-800 text-sm">
+                                                <p className="font-medium text-yellow-800 dark:text-yellow-300 flex items-center">
+                                                    <AlertTriangle className="w-4 h-4 mr-2" />
+                                                    Existing Models Detected
+                                                </p>
+                                                <ul className="text-xs text-yellow-600 dark:text-yellow-500 mt-1 ml-6 list-disc">
+                                                    {localAIStatus.existingModels.stt.length > 0 && <li>STT: {localAIStatus.existingModels.stt.join(', ')}</li>}
+                                                    {localAIStatus.existingModels.llm.length > 0 && <li>LLM: {localAIStatus.existingModels.llm.join(', ')}</li>}
+                                                    {localAIStatus.existingModels.tts.length > 0 && <li>TTS: {localAIStatus.existingModels.tts.join(', ')}</li>}
+                                                </ul>
+                                                <p className="text-yellow-700 dark:text-yellow-400 mt-1 text-xs">
+                                                    ⚠️ Re-running model setup will overwrite these.
+                                                </p>
+                                            </div>
+                                        )}
                                     </div>
                                 )}
                                 <div className="space-y-2">
@@ -544,14 +589,24 @@ const Wizard = () => {
                                             onClick={async () => {
                                                 setLoading(true);
                                                 try {
-                                                    const res = await axios.get('/api/wizard/local/detect-tier');
+                                                    // Detect tier and check existing models in parallel
+                                                    const [tierRes, modelsRes] = await Promise.all([
+                                                        axios.get('/api/wizard/local/detect-tier'),
+                                                        axios.get('/api/wizard/local/models-status')
+                                                    ]);
                                                     setLocalAIStatus(prev => ({
                                                         ...prev,
-                                                        tier: res.data.tier,
-                                                        tierInfo: res.data.tier_info,
-                                                        cpuCores: res.data.cpu_cores,
-                                                        ramGb: res.data.ram_gb,
-                                                        gpuDetected: res.data.gpu_detected
+                                                        tier: tierRes.data.tier,
+                                                        tierInfo: tierRes.data.tier_info,
+                                                        cpuCores: tierRes.data.cpu_cores,
+                                                        ramGb: tierRes.data.ram_gb,
+                                                        gpuDetected: tierRes.data.gpu_detected,
+                                                        existingModels: {
+                                                            stt: modelsRes.data.stt_models || [],
+                                                            llm: modelsRes.data.llm_models || [],
+                                                            tts: modelsRes.data.tts_models || []
+                                                        },
+                                                        modelsReady: modelsRes.data.ready
                                                     }));
                                                 } catch (err: any) {
                                                     setError('Failed to detect system: ' + err.message);
@@ -593,6 +648,33 @@ const Wizard = () => {
                                                     Download: {localAIStatus.tierInfo?.download_size}
                                                 </p>
                                             </div>
+                                            
+                                            {/* Warning if models already exist */}
+                                            {localAIStatus.modelsReady && (
+                                                <div className="p-3 bg-yellow-50 dark:bg-yellow-900/20 rounded border border-yellow-200 dark:border-yellow-800">
+                                                    <p className="font-medium text-yellow-800 dark:text-yellow-300 flex items-center">
+                                                        <AlertTriangle className="w-4 h-4 mr-2" />
+                                                        Existing Models Detected
+                                                    </p>
+                                                    <p className="text-yellow-700 dark:text-yellow-400 mt-1 text-xs">
+                                                        Models are already downloaded on this system:
+                                                    </p>
+                                                    <ul className="text-xs text-yellow-600 dark:text-yellow-500 mt-1 ml-4 list-disc">
+                                                        {localAIStatus.existingModels.stt.length > 0 && (
+                                                            <li>STT: {localAIStatus.existingModels.stt.join(', ')}</li>
+                                                        )}
+                                                        {localAIStatus.existingModels.llm.length > 0 && (
+                                                            <li>LLM: {localAIStatus.existingModels.llm.join(', ')}</li>
+                                                        )}
+                                                        {localAIStatus.existingModels.tts.length > 0 && (
+                                                            <li>TTS: {localAIStatus.existingModels.tts.join(', ')}</li>
+                                                        )}
+                                                    </ul>
+                                                    <p className="text-yellow-700 dark:text-yellow-400 mt-2 text-xs font-medium">
+                                                        ⚠️ Downloading new models will overwrite existing ones.
+                                                    </p>
+                                                </div>
+                                            )}
                                         </div>
                                     )}
                                 </div>
