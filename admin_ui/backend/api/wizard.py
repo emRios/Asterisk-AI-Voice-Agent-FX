@@ -110,6 +110,189 @@ async def start_engine():
         print(f"DEBUG: Exception: {type(e).__name__}: {e}")
         return {"success": False, "action": "error", "message": str(e)}
 
+# ============== Local AI Server Setup ==============
+
+@router.get("/local/detect-tier")
+async def detect_local_tier():
+    """Detect system tier for local AI models based on CPU/RAM/GPU."""
+    import subprocess
+    from settings import PROJECT_ROOT
+    
+    try:
+        # Get system info
+        import psutil
+        cpu_count = psutil.cpu_count()
+        ram_gb = psutil.virtual_memory().total // (1024**3)
+        
+        # Check for GPU
+        gpu_detected = False
+        try:
+            result = subprocess.run(["nvidia-smi"], capture_output=True, timeout=5)
+            if result.returncode == 0:
+                gpu_detected = True
+        except:
+            pass
+        
+        # Determine tier
+        if gpu_detected:
+            if ram_gb >= 32 and cpu_count >= 8:
+                tier = "HEAVY_GPU"
+            elif ram_gb >= 16 and cpu_count >= 4:
+                tier = "MEDIUM_GPU"
+            else:
+                tier = "LIGHT_CPU"
+        else:
+            if ram_gb >= 32 and cpu_count >= 16:
+                tier = "HEAVY_CPU"
+            elif ram_gb >= 16 and cpu_count >= 8:
+                tier = "MEDIUM_CPU"
+            elif ram_gb >= 8 and cpu_count >= 4:
+                tier = "LIGHT_CPU"
+            else:
+                tier = "LIGHT_CPU"
+        
+        # Tier descriptions
+        tier_info = {
+            "LIGHT_CPU": {
+                "models": "TinyLlama 1.1B + Vosk Small + Piper Medium",
+                "performance": "25-40 seconds per turn",
+                "download_size": "~1.5 GB"
+            },
+            "MEDIUM_CPU": {
+                "models": "Phi-3-mini 3.8B + Vosk 0.22 + Piper Medium",
+                "performance": "20-30 seconds per turn",
+                "download_size": "~3.5 GB"
+            },
+            "HEAVY_CPU": {
+                "models": "Phi-3-mini 3.8B + Vosk 0.22 + Piper Medium",
+                "performance": "25-35 seconds per turn",
+                "download_size": "~3.5 GB"
+            },
+            "MEDIUM_GPU": {
+                "models": "Phi-3-mini 3.8B + Vosk 0.22 + Piper Medium (GPU)",
+                "performance": "8-12 seconds per turn",
+                "download_size": "~3.5 GB"
+            },
+            "HEAVY_GPU": {
+                "models": "Llama-2 13B + Vosk 0.22 + Piper High (GPU)",
+                "performance": "10-15 seconds per turn",
+                "download_size": "~10 GB"
+            }
+        }
+        
+        return {
+            "cpu_cores": cpu_count,
+            "ram_gb": ram_gb,
+            "gpu_detected": gpu_detected,
+            "tier": tier,
+            "tier_info": tier_info.get(tier, {})
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@router.post("/local/download-models")
+async def download_local_models(tier: str = "auto"):
+    """Start model download in background. Returns immediately."""
+    import subprocess
+    from settings import PROJECT_ROOT
+    
+    try:
+        # Run model_setup.sh with --assume-yes
+        cmd = ["bash", "scripts/model_setup.sh", "--assume-yes"]
+        if tier != "auto":
+            cmd.extend(["--tier", tier])
+        
+        # Start in background
+        process = subprocess.Popen(
+            cmd,
+            cwd=PROJECT_ROOT,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True
+        )
+        
+        # Store PID for status checking
+        return {
+            "status": "started",
+            "pid": process.pid,
+            "message": "Model download started. This may take several minutes."
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+@router.get("/local/models-status")
+async def check_models_status():
+    """Check if required models are downloaded."""
+    from settings import PROJECT_ROOT
+    import os
+    
+    models_dir = os.path.join(PROJECT_ROOT, "models")
+    
+    # Check for model files
+    stt_models = []
+    llm_models = []
+    tts_models = []
+    
+    stt_dir = os.path.join(models_dir, "stt")
+    llm_dir = os.path.join(models_dir, "llm")
+    tts_dir = os.path.join(models_dir, "tts")
+    
+    if os.path.exists(stt_dir):
+        for item in os.listdir(stt_dir):
+            if item.startswith("vosk-model"):
+                stt_models.append(item)
+    
+    if os.path.exists(llm_dir):
+        for item in os.listdir(llm_dir):
+            if item.endswith(".gguf"):
+                llm_models.append(item)
+    
+    if os.path.exists(tts_dir):
+        for item in os.listdir(tts_dir):
+            if item.endswith(".onnx"):
+                tts_models.append(item)
+    
+    ready = len(stt_models) > 0 and len(llm_models) > 0 and len(tts_models) > 0
+    
+    return {
+        "ready": ready,
+        "stt_models": stt_models,
+        "llm_models": llm_models,
+        "tts_models": tts_models
+    }
+
+
+@router.post("/local/start-server")
+async def start_local_ai_server():
+    """Start the local-ai-server container."""
+    import subprocess
+    from settings import PROJECT_ROOT
+    
+    try:
+        result = subprocess.run(
+            ["docker-compose", "up", "-d", "local-ai-server"],
+            cwd=PROJECT_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=120
+        )
+        
+        if result.returncode == 0:
+            return {
+                "success": True,
+                "message": "Local AI Server started successfully"
+            }
+        else:
+            return {
+                "success": False,
+                "message": f"Failed to start: {result.stderr or result.stdout}"
+            }
+    except Exception as e:
+        return {"success": False, "message": str(e)}
+
+
 class ApiKeyValidation(BaseModel):
     provider: str
     api_key: str

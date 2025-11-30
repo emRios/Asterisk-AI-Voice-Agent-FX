@@ -56,6 +56,27 @@ const Wizard = () => {
         checked: boolean;
     }>({ running: false, exists: false, checked: false });
     const [startingEngine, setStartingEngine] = useState(false);
+    
+    // Local AI Server state
+    const [localAIStatus, setLocalAIStatus] = useState<{
+        tier: string;
+        tierInfo: any;
+        cpuCores: number;
+        ramGb: number;
+        gpuDetected: boolean;
+        modelsReady: boolean;
+        downloading: boolean;
+        serverStarted: boolean;
+    }>({
+        tier: '',
+        tierInfo: {},
+        cpuCores: 0,
+        ramGb: 0,
+        gpuDetected: false,
+        modelsReady: false,
+        downloading: false,
+        serverStarted: false
+    });
 
     const handleSkip = () => {
         setShowSkipConfirm(true);
@@ -496,19 +517,159 @@ const Wizard = () => {
                         )}
 
                         {config.provider === 'local' && (
-                            <div className="bg-green-50/50 dark:bg-green-900/10 p-4 rounded-md border border-green-100 dark:border-green-900/20 text-sm text-green-800 dark:text-green-300">
-                                <p className="font-semibold mb-2 flex items-center gap-2">
-                                    <HardDrive className="w-4 h-4" />
-                                    No API Keys Required
-                                </p>
-                                <p className="mb-2">
-                                    Local (Full) mode runs entirely on your infrastructure using the <code>local-ai-server</code>.
-                                    All audio processing (STT, LLM, TTS) happens locally.
-                                </p>
-                                <p className="text-xs text-green-600 dark:text-green-400">
-                                    <strong>Note:</strong> Ensure the <code>local-ai-server</code> container is running and models are downloaded.
-                                    First startup may take 2-3 minutes while models are loaded.
-                                </p>
+                            <div className="space-y-4">
+                                <div className="bg-green-50/50 dark:bg-green-900/10 p-4 rounded-md border border-green-100 dark:border-green-900/20">
+                                    <p className="font-semibold mb-2 flex items-center gap-2 text-green-800 dark:text-green-300">
+                                        <HardDrive className="w-4 h-4" />
+                                        Local AI Server Setup
+                                    </p>
+                                    <p className="text-sm text-green-700 dark:text-green-400 mb-3">
+                                        Local (Full) mode runs entirely on your infrastructure. No API keys required.
+                                    </p>
+                                </div>
+
+                                {/* System Detection */}
+                                <div className="bg-muted p-4 rounded-lg">
+                                    <div className="flex justify-between items-center mb-3">
+                                        <h4 className="font-medium">System Detection</h4>
+                                        <button
+                                            onClick={async () => {
+                                                setLoading(true);
+                                                try {
+                                                    const res = await axios.get('/api/wizard/local/detect-tier');
+                                                    setLocalAIStatus(prev => ({
+                                                        ...prev,
+                                                        tier: res.data.tier,
+                                                        tierInfo: res.data.tier_info,
+                                                        cpuCores: res.data.cpu_cores,
+                                                        ramGb: res.data.ram_gb,
+                                                        gpuDetected: res.data.gpu_detected
+                                                    }));
+                                                } catch (err: any) {
+                                                    setError('Failed to detect system: ' + err.message);
+                                                }
+                                                setLoading(false);
+                                            }}
+                                            disabled={loading}
+                                            className="px-3 py-1 text-sm rounded-md bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
+                                        >
+                                            {loading ? 'Detecting...' : 'Detect System'}
+                                        </button>
+                                    </div>
+                                    
+                                    {localAIStatus.tier && (
+                                        <div className="space-y-2 text-sm">
+                                            <div className="grid grid-cols-3 gap-2">
+                                                <div className="p-2 bg-background rounded">
+                                                    <span className="text-muted-foreground">CPU Cores:</span>
+                                                    <span className="ml-2 font-medium">{localAIStatus.cpuCores}</span>
+                                                </div>
+                                                <div className="p-2 bg-background rounded">
+                                                    <span className="text-muted-foreground">RAM:</span>
+                                                    <span className="ml-2 font-medium">{localAIStatus.ramGb} GB</span>
+                                                </div>
+                                                <div className="p-2 bg-background rounded">
+                                                    <span className="text-muted-foreground">GPU:</span>
+                                                    <span className="ml-2 font-medium">{localAIStatus.gpuDetected ? 'Yes' : 'No'}</span>
+                                                </div>
+                                            </div>
+                                            <div className="p-3 bg-blue-50 dark:bg-blue-900/20 rounded border border-blue-200 dark:border-blue-800">
+                                                <p className="font-medium text-blue-800 dark:text-blue-300">
+                                                    Recommended Tier: {localAIStatus.tier}
+                                                </p>
+                                                <p className="text-blue-700 dark:text-blue-400 mt-1">
+                                                    {localAIStatus.tierInfo?.models}
+                                                </p>
+                                                <p className="text-xs text-blue-600 dark:text-blue-500 mt-1">
+                                                    Performance: {localAIStatus.tierInfo?.performance} | 
+                                                    Download: {localAIStatus.tierInfo?.download_size}
+                                                </p>
+                                            </div>
+                                        </div>
+                                    )}
+                                </div>
+
+                                {/* Model Download */}
+                                {localAIStatus.tier && (
+                                    <div className="bg-muted p-4 rounded-lg">
+                                        <div className="flex justify-between items-center mb-3">
+                                            <h4 className="font-medium">Download Models</h4>
+                                            <button
+                                                onClick={async () => {
+                                                    setLocalAIStatus(prev => ({ ...prev, downloading: true }));
+                                                    try {
+                                                        await axios.post('/api/wizard/local/download-models', null, {
+                                                            params: { tier: localAIStatus.tier }
+                                                        });
+                                                        // Poll for completion
+                                                        const checkStatus = async () => {
+                                                            const res = await axios.get('/api/wizard/local/models-status');
+                                                            if (res.data.ready) {
+                                                                setLocalAIStatus(prev => ({ ...prev, modelsReady: true, downloading: false }));
+                                                            } else {
+                                                                setTimeout(checkStatus, 3000);
+                                                            }
+                                                        };
+                                                        setTimeout(checkStatus, 5000);
+                                                    } catch (err: any) {
+                                                        setError('Failed to start download: ' + err.message);
+                                                        setLocalAIStatus(prev => ({ ...prev, downloading: false }));
+                                                    }
+                                                }}
+                                                disabled={localAIStatus.downloading || localAIStatus.modelsReady}
+                                                className="px-3 py-1 text-sm rounded-md bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
+                                            >
+                                                {localAIStatus.downloading ? 'Downloading...' : localAIStatus.modelsReady ? 'Models Ready' : 'Download Models'}
+                                            </button>
+                                        </div>
+                                        {localAIStatus.downloading && (
+                                            <p className="text-sm text-muted-foreground">
+                                                Downloading models... This may take several minutes depending on your connection.
+                                            </p>
+                                        )}
+                                        {localAIStatus.modelsReady && (
+                                            <p className="text-sm text-green-600 dark:text-green-400 flex items-center">
+                                                <CheckCircle className="w-4 h-4 mr-2" />
+                                                Models downloaded successfully!
+                                            </p>
+                                        )}
+                                    </div>
+                                )}
+
+                                {/* Start Local AI Server */}
+                                {localAIStatus.modelsReady && (
+                                    <div className="bg-muted p-4 rounded-lg">
+                                        <div className="flex justify-between items-center">
+                                            <h4 className="font-medium">Start Local AI Server</h4>
+                                            <button
+                                                onClick={async () => {
+                                                    setLoading(true);
+                                                    try {
+                                                        const res = await axios.post('/api/wizard/local/start-server');
+                                                        if (res.data.success) {
+                                                            setLocalAIStatus(prev => ({ ...prev, serverStarted: true }));
+                                                        } else {
+                                                            setError(res.data.message);
+                                                        }
+                                                    } catch (err: any) {
+                                                        setError('Failed to start server: ' + err.message);
+                                                    }
+                                                    setLoading(false);
+                                                }}
+                                                disabled={loading || localAIStatus.serverStarted}
+                                                className="px-3 py-1 text-sm rounded-md bg-green-600 text-white hover:bg-green-700 disabled:opacity-50"
+                                            >
+                                                {localAIStatus.serverStarted ? 'Server Running' : 'Start Server'}
+                                            </button>
+                                        </div>
+                                        {localAIStatus.serverStarted && (
+                                            <p className="text-sm text-green-600 dark:text-green-400 mt-2 flex items-center">
+                                                <CheckCircle className="w-4 h-4 mr-2" />
+                                                Local AI Server is running!
+                                            </p>
+                                        )}
+                                    </div>
+                                )}
                             </div>
                         )}
 
