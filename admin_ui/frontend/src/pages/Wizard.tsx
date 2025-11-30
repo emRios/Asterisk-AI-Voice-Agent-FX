@@ -66,7 +66,11 @@ const Wizard = () => {
         gpuDetected: boolean;
         modelsReady: boolean;
         downloading: boolean;
+        downloadOutput: string[];
+        downloadCompleted: boolean;
         serverStarted: boolean;
+        serverLogs: string[];
+        serverReady: boolean;
     }>({
         tier: '',
         tierInfo: {},
@@ -75,7 +79,11 @@ const Wizard = () => {
         gpuDetected: false,
         modelsReady: false,
         downloading: false,
-        serverStarted: false
+        downloadOutput: [],
+        downloadCompleted: false,
+        serverStarted: false,
+        serverLogs: [],
+        serverReady: false
     });
 
     const handleSkip = () => {
@@ -596,76 +604,73 @@ const Wizard = () => {
                                             <h4 className="font-medium">Download Models</h4>
                                             <button
                                                 onClick={async () => {
-                                                    setLocalAIStatus(prev => ({ ...prev, downloading: true }));
+                                                    setLocalAIStatus(prev => ({ ...prev, downloading: true, downloadOutput: [] }));
                                                     try {
                                                         await axios.post('/api/wizard/local/download-models', null, {
                                                             params: { tier: localAIStatus.tier }
                                                         });
-                                                        // Poll for completion
-                                                        const checkStatus = async () => {
-                                                            const res = await axios.get('/api/wizard/local/models-status');
-                                                            if (res.data.ready) {
-                                                                setLocalAIStatus(prev => ({ ...prev, modelsReady: true, downloading: false }));
-                                                            } else {
-                                                                setTimeout(checkStatus, 3000);
+                                                        // Poll for progress
+                                                        const pollProgress = async () => {
+                                                            try {
+                                                                const res = await axios.get('/api/wizard/local/download-progress');
+                                                                setLocalAIStatus(prev => ({
+                                                                    ...prev,
+                                                                    downloadOutput: res.data.output || []
+                                                                }));
+                                                                
+                                                                if (res.data.completed) {
+                                                                    setLocalAIStatus(prev => ({
+                                                                        ...prev,
+                                                                        downloading: false,
+                                                                        downloadCompleted: true,
+                                                                        modelsReady: true
+                                                                    }));
+                                                                } else if (res.data.error) {
+                                                                    setError('Download failed: ' + res.data.error);
+                                                                    setLocalAIStatus(prev => ({ ...prev, downloading: false }));
+                                                                } else if (res.data.running) {
+                                                                    setTimeout(pollProgress, 2000);
+                                                                }
+                                                            } catch (err) {
+                                                                setTimeout(pollProgress, 3000);
                                                             }
                                                         };
-                                                        setTimeout(checkStatus, 5000);
+                                                        setTimeout(pollProgress, 1000);
                                                     } catch (err: any) {
                                                         setError('Failed to start download: ' + err.message);
                                                         setLocalAIStatus(prev => ({ ...prev, downloading: false }));
                                                     }
                                                 }}
-                                                disabled={localAIStatus.downloading || localAIStatus.modelsReady}
+                                                disabled={localAIStatus.downloading || localAIStatus.downloadCompleted}
                                                 className="px-3 py-1 text-sm rounded-md bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
                                             >
-                                                {localAIStatus.downloading ? 'Downloading...' : localAIStatus.modelsReady ? 'Models Ready' : 'Download Models'}
+                                                {localAIStatus.downloading ? 'Downloading...' : localAIStatus.downloadCompleted ? 'Download Complete' : 'Download Models'}
                                             </button>
                                         </div>
+                                        
+                                        {/* Download Progress Output */}
                                         {localAIStatus.downloading && (
-                                            <p className="text-sm text-muted-foreground">
-                                                Downloading models... This may take several minutes depending on your connection.
-                                            </p>
+                                            <div className="mt-3">
+                                                <div className="flex items-center gap-2 mb-2">
+                                                    <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-primary"></div>
+                                                    <span className="text-sm text-muted-foreground">Downloading models...</span>
+                                                </div>
+                                                <div className="bg-black/90 rounded p-3 max-h-48 overflow-y-auto font-mono text-xs text-green-400">
+                                                    {localAIStatus.downloadOutput.length > 0 ? (
+                                                        localAIStatus.downloadOutput.map((line, i) => (
+                                                            <div key={i} className="whitespace-pre-wrap">{line}</div>
+                                                        ))
+                                                    ) : (
+                                                        <div className="text-gray-500">Starting download...</div>
+                                                    )}
+                                                </div>
+                                            </div>
                                         )}
-                                        {localAIStatus.modelsReady && (
-                                            <p className="text-sm text-green-600 dark:text-green-400 flex items-center">
+                                        
+                                        {localAIStatus.downloadCompleted && (
+                                            <p className="text-sm text-green-600 dark:text-green-400 flex items-center mt-2">
                                                 <CheckCircle className="w-4 h-4 mr-2" />
-                                                Models downloaded successfully!
-                                            </p>
-                                        )}
-                                    </div>
-                                )}
-
-                                {/* Start Local AI Server */}
-                                {localAIStatus.modelsReady && (
-                                    <div className="bg-muted p-4 rounded-lg">
-                                        <div className="flex justify-between items-center">
-                                            <h4 className="font-medium">Start Local AI Server</h4>
-                                            <button
-                                                onClick={async () => {
-                                                    setLoading(true);
-                                                    try {
-                                                        const res = await axios.post('/api/wizard/local/start-server');
-                                                        if (res.data.success) {
-                                                            setLocalAIStatus(prev => ({ ...prev, serverStarted: true }));
-                                                        } else {
-                                                            setError(res.data.message);
-                                                        }
-                                                    } catch (err: any) {
-                                                        setError('Failed to start server: ' + err.message);
-                                                    }
-                                                    setLoading(false);
-                                                }}
-                                                disabled={loading || localAIStatus.serverStarted}
-                                                className="px-3 py-1 text-sm rounded-md bg-green-600 text-white hover:bg-green-700 disabled:opacity-50"
-                                            >
-                                                {localAIStatus.serverStarted ? 'Server Running' : 'Start Server'}
-                                            </button>
-                                        </div>
-                                        {localAIStatus.serverStarted && (
-                                            <p className="text-sm text-green-600 dark:text-green-400 mt-2 flex items-center">
-                                                <CheckCircle className="w-4 h-4 mr-2" />
-                                                Local AI Server is running!
+                                                Models downloaded successfully! Click Next to start the Local AI Server.
                                             </p>
                                         )}
                                     </div>
@@ -821,8 +826,139 @@ const Wizard = () => {
                             Your AI Agent is configured and ready.
                         </p>
 
-                        {/* AI Engine Status - Show start button if not running */}
-                        {engineStatus.checked && !engineStatus.running && (
+                        {/* Local AI Server Setup - Only for Local provider */}
+                        {config.provider === 'local' && (
+                            <div className="space-y-4 text-left">
+                                {/* Downloaded Models */}
+                                <div className="bg-green-50 dark:bg-green-900/20 p-4 rounded-lg border border-green-200 dark:border-green-800">
+                                    <h3 className="font-semibold mb-2 flex items-center text-green-800 dark:text-green-300">
+                                        <HardDrive className="w-4 h-4 mr-2" />
+                                        Downloaded Models
+                                    </h3>
+                                    <p className="text-sm text-green-700 dark:text-green-400">
+                                        Tier: {localAIStatus.tier} | {localAIStatus.tierInfo?.models || 'Models ready'}
+                                    </p>
+                                </div>
+
+                                {/* Start Local AI Server */}
+                                <div className="bg-blue-50 dark:bg-blue-900/20 p-4 rounded-lg border border-blue-200 dark:border-blue-800">
+                                    <h3 className="font-semibold mb-3 flex items-center text-blue-800 dark:text-blue-300">
+                                        <Server className="w-4 h-4 mr-2" />
+                                        Local AI Server
+                                    </h3>
+                                    
+                                    {!localAIStatus.serverStarted ? (
+                                        <button
+                                            onClick={async () => {
+                                                setLoading(true);
+                                                try {
+                                                    const res = await axios.post('/api/wizard/local/start-server');
+                                                    if (res.data.success) {
+                                                        setLocalAIStatus(prev => ({ ...prev, serverStarted: true }));
+                                                        // Start polling logs
+                                                        const pollLogs = async () => {
+                                                            try {
+                                                                const logRes = await axios.get('/api/wizard/local/server-logs');
+                                                                setLocalAIStatus(prev => ({
+                                                                    ...prev,
+                                                                    serverLogs: logRes.data.logs || [],
+                                                                    serverReady: logRes.data.ready
+                                                                }));
+                                                                if (!logRes.data.ready) {
+                                                                    setTimeout(pollLogs, 2000);
+                                                                }
+                                                            } catch {
+                                                                setTimeout(pollLogs, 3000);
+                                                            }
+                                                        };
+                                                        setTimeout(pollLogs, 2000);
+                                                    } else {
+                                                        setError(res.data.message);
+                                                    }
+                                                } catch (err: any) {
+                                                    setError('Failed to start server: ' + err.message);
+                                                }
+                                                setLoading(false);
+                                            }}
+                                            disabled={loading}
+                                            className="w-full px-4 py-2 rounded-md bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 flex items-center justify-center"
+                                        >
+                                            {loading ? (
+                                                <>
+                                                    <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                                                    Starting...
+                                                </>
+                                            ) : (
+                                                <>
+                                                    <Play className="w-4 h-4 mr-2" />
+                                                    Start Local AI Server
+                                                </>
+                                            )}
+                                        </button>
+                                    ) : (
+                                        <div className="space-y-3">
+                                            <div className="flex items-center gap-2">
+                                                {localAIStatus.serverReady ? (
+                                                    <span className="text-green-600 dark:text-green-400 flex items-center">
+                                                        <CheckCircle className="w-4 h-4 mr-2" />
+                                                        Server Ready!
+                                                    </span>
+                                                ) : (
+                                                    <span className="text-blue-600 dark:text-blue-400 flex items-center">
+                                                        <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-blue-600 mr-2"></div>
+                                                        Starting up... (loading models)
+                                                    </span>
+                                                )}
+                                            </div>
+                                            
+                                            {/* Server Logs */}
+                                            <div className="bg-black/90 rounded p-3 max-h-48 overflow-y-auto font-mono text-xs text-green-400">
+                                                {localAIStatus.serverLogs.length > 0 ? (
+                                                    localAIStatus.serverLogs.map((line, i) => (
+                                                        <div key={i} className="whitespace-pre-wrap">{line}</div>
+                                                    ))
+                                                ) : (
+                                                    <div className="text-gray-500">Waiting for logs...</div>
+                                                )}
+                                            </div>
+                                        </div>
+                                    )}
+                                </div>
+
+                                {/* Go to Dashboard - Only when server is ready */}
+                                {localAIStatus.serverReady && (
+                                    <div className="pt-4">
+                                        <button
+                                            onClick={() => navigate('/')}
+                                            className="w-full px-4 py-3 rounded-md bg-primary text-primary-foreground hover:bg-primary/90 font-medium"
+                                        >
+                                            Go to Dashboard
+                                        </button>
+                                    </div>
+                                )}
+
+                                {/* Dialplan for Local */}
+                                {localAIStatus.serverReady && (
+                                    <div className="bg-muted p-4 rounded-lg">
+                                        <h3 className="font-semibold mb-2 flex items-center">
+                                            <Terminal className="w-4 h-4 mr-2" />
+                                            Asterisk Dialplan for Local Provider
+                                        </h3>
+                                        <pre className="bg-black text-green-400 p-3 rounded-md overflow-x-auto text-xs font-mono">
+{`[from-ai-agent-local]
+exten => s,1,NoOp(AI Agent - Local Full)
+ same => n,Set(AI_CONTEXT=default)
+ same => n,Set(AI_PROVIDER=local)
+ same => n,Stasis(asterisk-ai-voice-agent)
+ same => n,Hangup()`}
+                                        </pre>
+                                    </div>
+                                )}
+                            </div>
+                        )}
+
+                        {/* AI Engine Status - Show start button if not running (non-local providers) */}
+                        {config.provider !== 'local' && engineStatus.checked && !engineStatus.running && (
                             <div className="bg-blue-50 dark:bg-blue-900/20 p-4 rounded-lg text-left border border-blue-200 dark:border-blue-800">
                                 <h3 className="font-semibold mb-3 flex items-center text-blue-800 dark:text-blue-300">
                                     <Server className="w-4 h-4 mr-2" />
@@ -873,8 +1009,8 @@ const Wizard = () => {
                             </div>
                         )}
 
-                        {/* Engine Running - Success */}
-                        {engineStatus.checked && engineStatus.running && (
+                        {/* Engine Running - Success (non-local providers) */}
+                        {config.provider !== 'local' && engineStatus.checked && engineStatus.running && (
                             <div className="bg-green-50 dark:bg-green-900/20 p-4 rounded-lg text-left border border-green-200 dark:border-green-800">
                                 <div className="flex items-center text-green-700 dark:text-green-400">
                                     <CheckCircle className="w-5 h-5 mr-2" />
@@ -883,6 +1019,9 @@ const Wizard = () => {
                             </div>
                         )}
 
+                        {/* Dialplan Section - non-local providers */}
+                        {config.provider !== 'local' && (
+                        <>
                         <div className="bg-muted p-4 rounded-lg text-left">
                             <h3 className="font-semibold mb-2 flex items-center">
                                 <Terminal className="w-4 h-4 mr-2" />
@@ -924,6 +1063,8 @@ exten => s,1,NoOp(AI Agent Call)
                                 Go to Dashboard
                             </button>
                         </div>
+                        </>
+                        )}
                     </div>
                 )}
 
@@ -941,8 +1082,8 @@ exten => s,1,NoOp(AI Agent Call)
                     {step < 5 && (
                         <button
                             onClick={handleNext}
-                            disabled={loading}
-                            className="px-4 py-2 rounded-md bg-primary text-primary-foreground hover:bg-primary/90 flex items-center"
+                            disabled={loading || (config.provider === 'local' && step === 3 && (localAIStatus.downloading || (!localAIStatus.downloadCompleted && !!localAIStatus.tier)))}
+                            className="px-4 py-2 rounded-md bg-primary text-primary-foreground hover:bg-primary/90 flex items-center disabled:opacity-50 disabled:cursor-not-allowed"
                         >
                             {loading && <Loader2 className="w-4 h-4 mr-2 animate-spin" />}
                             {step === 4 ? 'Finish Setup' : 'Next'}

@@ -191,11 +191,22 @@ async def detect_local_tier():
         return {"error": str(e)}
 
 
+_download_process = None
+_download_output = []
+_download_status = {"running": False, "completed": False, "error": None}
+
 @router.post("/local/download-models")
 async def download_local_models(tier: str = "auto"):
     """Start model download in background. Returns immediately."""
     import subprocess
+    import threading
     from settings import PROJECT_ROOT
+    
+    global _download_process, _download_output, _download_status
+    
+    # Reset state
+    _download_output = []
+    _download_status = {"running": True, "completed": False, "error": None}
     
     try:
         # Run model_setup.sh with --assume-yes
@@ -203,23 +214,59 @@ async def download_local_models(tier: str = "auto"):
         if tier != "auto":
             cmd.extend(["--tier", tier])
         
-        # Start in background
-        process = subprocess.Popen(
-            cmd,
-            cwd=PROJECT_ROOT,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True
-        )
+        def run_download():
+            global _download_process, _download_output, _download_status
+            try:
+                process = subprocess.Popen(
+                    cmd,
+                    cwd=PROJECT_ROOT,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1
+                )
+                _download_process = process
+                
+                for line in iter(process.stdout.readline, ''):
+                    if line:
+                        _download_output.append(line.strip())
+                        # Keep last 50 lines
+                        if len(_download_output) > 50:
+                            _download_output.pop(0)
+                
+                process.wait()
+                _download_status["running"] = False
+                _download_status["completed"] = process.returncode == 0
+                if process.returncode != 0:
+                    _download_status["error"] = f"Download failed with code {process.returncode}"
+            except Exception as e:
+                _download_status["running"] = False
+                _download_status["error"] = str(e)
         
-        # Store PID for status checking
+        # Start download thread
+        thread = threading.Thread(target=run_download, daemon=True)
+        thread.start()
+        
         return {
             "status": "started",
-            "pid": process.pid,
             "message": "Model download started. This may take several minutes."
         }
     except Exception as e:
+        _download_status = {"running": False, "completed": False, "error": str(e)}
         return {"status": "error", "message": str(e)}
+
+
+@router.get("/local/download-progress")
+async def get_download_progress():
+    """Get current download progress and output."""
+    global _download_output, _download_status
+    
+    return {
+        "running": _download_status.get("running", False),
+        "completed": _download_status.get("completed", False),
+        "error": _download_status.get("error"),
+        "output": _download_output[-20:] if _download_output else []  # Last 20 lines
+    }
 
 
 @router.get("/local/models-status")
@@ -291,6 +338,69 @@ async def start_local_ai_server():
             }
     except Exception as e:
         return {"success": False, "message": str(e)}
+
+
+@router.get("/local/server-logs")
+async def get_local_server_logs():
+    """Get local-ai-server container logs."""
+    import subprocess
+    
+    try:
+        result = subprocess.run(
+            ["docker", "logs", "--tail", "30", "local_ai_server"],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+        
+        logs = result.stdout or result.stderr
+        lines = logs.strip().split('\n') if logs else []
+        
+        # Check if server is ready (looking for typical ready message)
+        ready = any("uvicorn" in line.lower() and "started" in line.lower() for line in lines) or \
+                any("application startup complete" in line.lower() for line in lines) or \
+                any("models loaded" in line.lower() for line in lines)
+        
+        return {
+            "logs": lines[-20:],
+            "ready": ready
+        }
+    except subprocess.TimeoutExpired:
+        return {"logs": [], "ready": False, "error": "Timeout getting logs"}
+    except Exception as e:
+        return {"logs": [], "ready": False, "error": str(e)}
+
+
+@router.get("/local/server-status")
+async def get_local_server_status():
+    """Check if local-ai-server is running and healthy."""
+    import docker
+    import httpx
+    
+    try:
+        client = docker.from_env()
+        try:
+            container = client.containers.get("local_ai_server")
+            running = container.status == "running"
+        except:
+            running = False
+        
+        # Try health check
+        healthy = False
+        if running:
+            try:
+                async with httpx.AsyncClient() as http_client:
+                    response = await http_client.get("http://127.0.0.1:8000/health", timeout=5.0)
+                    healthy = response.status_code == 200
+            except:
+                pass
+        
+        return {
+            "running": running,
+            "healthy": healthy
+        }
+    except Exception as e:
+        return {"running": False, "healthy": False, "error": str(e)}
 
 
 class ApiKeyValidation(BaseModel):
