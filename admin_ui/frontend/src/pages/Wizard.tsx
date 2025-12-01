@@ -1041,8 +1041,63 @@ const Wizard = () => {
                                     )}
                                 </div>
 
-                                {/* Go to Dashboard - Only when server is ready */}
-                                {localAIStatus.serverReady && (
+                                {/* AI Engine Status for Local Provider - Show after local server is ready */}
+                                {localAIStatus.serverReady && !engineStatus.running && (
+                                    <div className="bg-blue-50 dark:bg-blue-900/20 p-4 rounded-lg border border-blue-200 dark:border-blue-800">
+                                        <h3 className="font-semibold mb-3 flex items-center text-blue-800 dark:text-blue-300">
+                                            <Server className="w-4 h-4 mr-2" />
+                                            Start AI Engine
+                                        </h3>
+                                        <p className="text-sm text-blue-700 dark:text-blue-400 mb-4">
+                                            Local AI Server is ready. Now start the AI Engine to connect to Asterisk.
+                                        </p>
+                                        <button
+                                            onClick={async () => {
+                                                setStartingEngine(true);
+                                                setError(null);
+                                                try {
+                                                    const res = await axios.post('/api/wizard/start-engine');
+                                                    if (res.data.success) {
+                                                        setEngineStatus({ ...engineStatus, running: true, exists: true });
+                                                    } else {
+                                                        setError(res.data.message);
+                                                    }
+                                                } catch (err: any) {
+                                                    setError(err.response?.data?.detail || err.message);
+                                                } finally {
+                                                    setStartingEngine(false);
+                                                }
+                                            }}
+                                            disabled={startingEngine}
+                                            className="w-full px-4 py-2 rounded-md bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 flex items-center justify-center"
+                                        >
+                                            {startingEngine ? (
+                                                <>
+                                                    <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                                                    Starting AI Engine...
+                                                </>
+                                            ) : (
+                                                <>
+                                                    <Play className="w-4 h-4 mr-2" />
+                                                    Start AI Engine
+                                                </>
+                                            )}
+                                        </button>
+                                    </div>
+                                )}
+
+                                {/* Engine Running Success for Local */}
+                                {localAIStatus.serverReady && engineStatus.running && (
+                                    <div className="bg-green-50 dark:bg-green-900/20 p-4 rounded-lg border border-green-200 dark:border-green-800">
+                                        <div className="flex items-center text-green-700 dark:text-green-400">
+                                            <CheckCircle className="w-5 h-5 mr-2" />
+                                            <span className="font-medium">AI Engine is running</span>
+                                        </div>
+                                    </div>
+                                )}
+
+                                {/* Go to Dashboard - Only when BOTH local server AND engine are ready */}
+                                {localAIStatus.serverReady && engineStatus.running && (
                                     <div className="pt-4">
                                         <button
                                             onClick={() => navigate('/')}
@@ -1054,7 +1109,7 @@ const Wizard = () => {
                                 )}
 
                                 {/* Dialplan for Local */}
-                                {localAIStatus.serverReady && (
+                                {localAIStatus.serverReady && engineStatus.running && (
                                     <div className="bg-muted p-4 rounded-lg">
                                         <h3 className="font-semibold mb-2 flex items-center">
                                             <Terminal className="w-4 h-4 mr-2" />
