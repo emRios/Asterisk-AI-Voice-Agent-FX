@@ -103,6 +103,54 @@ const ContextForm = ({ config, providers, onChange, isNew }: ContextFormProps) =
                     ))}
                 </div>
             </div>
+
+            {/* Background Music Configuration */}
+            <div className="space-y-4 p-4 rounded-lg border border-border bg-card/30">
+                <div className="flex items-center justify-between">
+                    <FormLabel tooltip="Play background music during calls. Music will be heard by the caller while talking to the AI agent.">
+                        Background Music
+                    </FormLabel>
+                    <label className="relative inline-flex items-center cursor-pointer">
+                        <input
+                            type="checkbox"
+                            className="sr-only peer"
+                            checked={!!config.background_music}
+                            onChange={(e) => {
+                                if (e.target.checked) {
+                                    updateConfig('background_music', 'default');
+                                } else {
+                                    updateConfig('background_music', undefined);
+                                }
+                            }}
+                        />
+                        <div className="w-11 h-6 bg-gray-600 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-primary rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-primary"></div>
+                    </label>
+                </div>
+
+                {config.background_music && (
+                    <div className="space-y-3">
+                        <FormInput
+                            label="MOH Class Name"
+                            value={config.background_music || 'default'}
+                            onChange={(e) => updateConfig('background_music', e.target.value || 'default')}
+                            placeholder="default"
+                            tooltip="Music On Hold class name from Asterisk's musiconhold.conf"
+                        />
+                        <div className="text-xs text-muted-foreground bg-muted/50 p-3 rounded-md space-y-2">
+                            <p className="font-medium text-foreground">📁 How to configure Music On Hold:</p>
+                            <ol className="list-decimal list-inside space-y-1 ml-1">
+                                <li>Place audio files in <code className="bg-muted px-1 rounded">/var/lib/asterisk/moh/{'<class-name>'}/</code></li>
+                                <li>For FreePBX: Go to <strong>Settings → Music On Hold</strong> to create categories</li>
+                                <li>Supported formats: WAV, ulaw, alaw, sln, mp3</li>
+                                <li>💡 <strong>Tip:</strong> Reduce music volume to ~15-20% to avoid interfering with conversation</li>
+                            </ol>
+                            <p className="mt-2 text-yellow-500/80">
+                                ⚠️ Music will be heard by the AI (for VAD). Use low-volume ambient music for best results.
+                            </p>
+                        </div>
+                    </div>
+                )}
+            </div>
         </div>
     );
 };
