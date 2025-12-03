@@ -15,6 +15,7 @@ interface SetupConfig {
     deepgram_key?: string;
     google_key?: string;
     elevenlabs_key?: string;
+    elevenlabs_agent_id?: string;
     cartesia_key?: string;
     greeting: string;
     ai_name: string;
@@ -206,6 +207,16 @@ const Wizard = () => {
                 setError('Google API key is required for Google Live.');
                 return;
             }
+            if (config.provider === 'elevenlabs_conversational') {
+                if (!config.elevenlabs_key) {
+                    setError('ElevenLabs API key is required.');
+                    return;
+                }
+                if (!config.elevenlabs_agent_id) {
+                    setError('ElevenLabs Agent ID is required.');
+                    return;
+                }
+            }
         }
 
         if (step === 3) {
@@ -248,6 +259,21 @@ const Wizard = () => {
                         setValidations(prev => ({ ...prev, google: true }));
                     } else {
                         throw new Error('Google API Key is required for Google Live provider');
+                    }
+                }
+
+                if (config.provider === 'elevenlabs_conversational') {
+                    if (!config.elevenlabs_agent_id) {
+                        throw new Error('ElevenLabs Agent ID is required');
+                    }
+                    if (config.elevenlabs_key) {
+                        const res = await axios.post('/api/wizard/validate-key', {
+                            provider: 'elevenlabs',
+                            api_key: config.elevenlabs_key
+                        });
+                        if (!res.data.valid) throw new Error(`ElevenLabs Key Invalid: ${res.data.error}`);
+                    } else {
+                        throw new Error('ElevenLabs API Key is required');
                     }
                 }
 
@@ -456,6 +482,12 @@ const Wizard = () => {
                                 description="100% on-premises. All processing stays local - STT, LLM, and TTS. No API keys required."
                                 icon={HardDrive}
                             />
+                            <ProviderCard
+                                id="elevenlabs_conversational"
+                                title="ElevenLabs Conversational"
+                                description="High-quality voices with pre-configured agent. Configure voice, prompt, and tools in ElevenLabs dashboard."
+                                icon={Cloud}
+                            />
                         </div>
                     </div>
                 )}
@@ -590,6 +622,68 @@ const Wizard = () => {
                                     </button>
                                 </div>
                                 <p className="text-xs text-muted-foreground">Required for Google Gemini Live provider.</p>
+                            </div>
+                        )}
+
+                        {config.provider === 'elevenlabs_conversational' && (
+                            <div className="space-y-4">
+                                <div className="bg-blue-50/50 dark:bg-blue-900/10 p-4 rounded-md border border-blue-100 dark:border-blue-900/20 text-sm text-blue-800 dark:text-blue-300">
+                                    <p className="font-semibold mb-1">ElevenLabs Conversational AI</p>
+                                    <p className="text-blue-700 dark:text-blue-400">
+                                        This provider uses a pre-configured agent from your ElevenLabs dashboard.
+                                        Voice, system prompt, and LLM model are configured there.
+                                    </p>
+                                </div>
+                                
+                                <div className="space-y-2">
+                                    <label className="text-sm font-medium">
+                                        Agent ID
+                                        <span className="text-destructive ml-1">*</span>
+                                    </label>
+                                    <input
+                                        type="text"
+                                        className="w-full p-2 rounded-md border border-input bg-background font-mono text-sm"
+                                        value={config.elevenlabs_agent_id}
+                                        onChange={e => setConfig({ ...config, elevenlabs_agent_id: e.target.value })}
+                                        placeholder="agent_xxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+                                    />
+                                    <p className="text-xs text-muted-foreground">
+                                        Get this from{' '}
+                                        <a href="https://elevenlabs.io/app/agents" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">
+                                            elevenlabs.io/app/agents
+                                        </a>
+                                    </p>
+                                </div>
+
+                                <div className="space-y-2">
+                                    <label className="text-sm font-medium">ElevenLabs API Key</label>
+                                    <div className="flex space-x-2">
+                                        <input
+                                            type="password"
+                                            className="w-full p-2 rounded-md border border-input bg-background"
+                                            value={config.elevenlabs_key}
+                                            onChange={e => setConfig({ ...config, elevenlabs_key: e.target.value })}
+                                            placeholder="xi-..."
+                                        />
+                                        <button
+                                            onClick={() => handleTestKey('elevenlabs', config.elevenlabs_key || '')}
+                                            className="px-3 py-2 rounded-md bg-secondary text-secondary-foreground hover:bg-secondary/80"
+                                            disabled={loading}
+                                        >
+                                            Test
+                                        </button>
+                                    </div>
+                                    <p className="text-xs text-muted-foreground">Required for ElevenLabs Conversational provider.</p>
+                                </div>
+
+                                <div className="bg-amber-50/50 dark:bg-amber-900/10 p-4 rounded-md border border-amber-100 dark:border-amber-900/20">
+                                    <h4 className="font-semibold mb-2 text-amber-800 dark:text-amber-300 text-sm">Setup Requirements</h4>
+                                    <ul className="text-xs text-amber-700 dark:text-amber-400 space-y-1 list-disc list-inside">
+                                        <li>Create an agent at elevenlabs.io/app/agents</li>
+                                        <li>Enable "Require authentication" in security settings</li>
+                                        <li>Add client tools (hangup_call, transfer_call, etc.)</li>
+                                    </ul>
+                                </div>
                             </div>
                         )}
 

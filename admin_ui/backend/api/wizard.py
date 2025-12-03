@@ -782,6 +782,20 @@ async def validate_api_key(validation: ApiKeyValidation):
                 else:
                     return {"valid": False, "error": f"API error: HTTP {response.status_code}"}
             
+            elif provider == "elevenlabs":
+                # Validate ElevenLabs API key by fetching user info
+                response = await client.get(
+                    "https://api.elevenlabs.io/v1/user",
+                    headers={"xi-api-key": api_key},
+                    timeout=10.0
+                )
+                if response.status_code == 200:
+                    return {"valid": True, "message": "ElevenLabs API key is valid"}
+                elif response.status_code == 401:
+                    return {"valid": False, "error": "Invalid API key"}
+                else:
+                    return {"valid": False, "error": f"API error: HTTP {response.status_code}"}
+            
             else:
                 return {"valid": False, "error": f"Unknown provider: {provider}"}
                 
@@ -860,6 +874,7 @@ class SetupConfig(BaseModel):
     deepgram_key: Optional[str] = None
     google_key: Optional[str] = None
     elevenlabs_key: Optional[str] = None
+    elevenlabs_agent_id: Optional[str] = None
     cartesia_key: Optional[str] = None
     greeting: str
     ai_name: str
@@ -879,6 +894,11 @@ async def save_setup_config(config: SetupConfig):
     # Local hybrid uses OpenAI for LLM, so check that too
     if config.provider == "local_hybrid" and not config.openai_key:
             raise HTTPException(status_code=400, detail="OpenAI API Key is required for Local Hybrid pipeline (LLM)")
+    if config.provider == "elevenlabs_conversational":
+        if not config.elevenlabs_key:
+            raise HTTPException(status_code=400, detail="ElevenLabs API Key is required for ElevenLabs Conversational provider")
+        if not config.elevenlabs_agent_id:
+            raise HTTPException(status_code=400, detail="ElevenLabs Agent ID is required for ElevenLabs Conversational provider")
 
     try:
         import shutil
@@ -914,6 +934,8 @@ async def save_setup_config(config: SetupConfig):
             env_updates["GOOGLE_API_KEY"] = config.google_key
         if config.elevenlabs_key:
             env_updates["ELEVENLABS_API_KEY"] = config.elevenlabs_key
+        if config.elevenlabs_agent_id:
+            env_updates["ELEVENLABS_AGENT_ID"] = config.elevenlabs_agent_id
         if config.cartesia_key:
             env_updates["CARTESIA_API_KEY"] = config.cartesia_key
 
@@ -991,6 +1013,18 @@ async def save_setup_config(config: SetupConfig):
                 yaml_config["providers"]["google_live"]["greeting"] = config.greeting
                 yaml_config["providers"].setdefault("openai_realtime", {})["enabled"] = False
                 yaml_config["providers"].setdefault("deepgram", {})["enabled"] = False
+                yaml_config["providers"].setdefault("local", {})["enabled"] = False
+
+            elif config.provider == "elevenlabs_conversational":
+                yaml_config["default_provider"] = "elevenlabs_conversational"
+                yaml_config.setdefault("providers", {})
+                yaml_config["providers"].setdefault("elevenlabs_conversational", {})["enabled"] = True
+                yaml_config["providers"]["elevenlabs_conversational"]["api_key"] = "${ELEVENLABS_API_KEY}"
+                yaml_config["providers"]["elevenlabs_conversational"]["agent_id"] = "${ELEVENLABS_AGENT_ID}"
+                # ElevenLabs greeting is configured in the agent dashboard, not here
+                yaml_config["providers"].setdefault("openai_realtime", {})["enabled"] = False
+                yaml_config["providers"].setdefault("deepgram", {})["enabled"] = False
+                yaml_config["providers"].setdefault("google_live", {})["enabled"] = False
                 yaml_config["providers"].setdefault("local", {})["enabled"] = False
 
             elif config.provider == "local":
