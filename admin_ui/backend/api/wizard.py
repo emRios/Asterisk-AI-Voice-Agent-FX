@@ -91,12 +91,12 @@ def setup_media_paths() -> dict:
     # Path on host (PROJECT_ROOT is mounted from host)
     host_media_dir = os.path.join(PROJECT_ROOT, "asterisk_media", "ai-generated")
     
-    # 1. Create directories with proper permissions
+    # 1. Create directories with proper permissions (775 = rwxrwxr-x)
     try:
-        os.makedirs(host_media_dir, mode=0o777, exist_ok=True)
+        os.makedirs(host_media_dir, mode=0o775, exist_ok=True)
         # Ensure parent also has correct permissions
-        os.chmod(os.path.dirname(host_media_dir), 0o777)
-        os.chmod(host_media_dir, 0o777)
+        os.chmod(os.path.dirname(host_media_dir), 0o775)
+        os.chmod(host_media_dir, 0o775)
         results["messages"].append(f"Created media directory: {host_media_dir}")
     except Exception as e:
         results["errors"].append(f"Failed to create media directory: {e}")
