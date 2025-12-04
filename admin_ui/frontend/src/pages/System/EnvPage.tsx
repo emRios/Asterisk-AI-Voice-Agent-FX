@@ -1,6 +1,6 @@
 import axios from 'axios';
 
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import { Save, Eye, EyeOff, RefreshCw, AlertTriangle } from 'lucide-react';
 import { ConfigSection } from '../../components/ui/ConfigSection';
 import { ConfigCard } from '../../components/ui/ConfigCard';
@@ -119,8 +119,17 @@ const EnvPage = () => {
         'LOG_LEVEL', 'LOG_FORMAT', 'LOG_COLOR', 'LOG_SHOW_TRACEBACKS',
         'STREAMING_LOG_LEVEL', 'LOG_TO_FILE', 'LOG_FILE_PATH',
         'LOCAL_WS_URL', 'LOCAL_WS_CONNECT_TIMEOUT', 'LOCAL_WS_RESPONSE_TIMEOUT', 'LOCAL_WS_CHUNK_MS',
-        'LOCAL_STT_MODEL_PATH', 'LOCAL_LLM_MODEL_PATH', 'LOCAL_TTS_MODEL_PATH',
+        // STT backends
+        'LOCAL_STT_BACKEND', 'LOCAL_STT_MODEL_PATH',
+        'KROKO_URL', 'KROKO_API_KEY', 'KROKO_LANGUAGE', 'KROKO_EMBEDDED', 'KROKO_MODEL_PATH', 'KROKO_PORT',
+        'SHERPA_MODEL_PATH',
+        // TTS backends
+        'LOCAL_TTS_BACKEND', 'LOCAL_TTS_MODEL_PATH',
+        'KOKORO_VOICE', 'KOKORO_LANG', 'KOKORO_MODEL_PATH',
+        // LLM
+        'LOCAL_LLM_MODEL_PATH', 'LOCAL_LLM_THREADS',
         'LOCAL_LLM_CONTEXT', 'LOCAL_LLM_BATCH', 'LOCAL_LLM_MAX_TOKENS', 'LOCAL_LLM_TEMPERATURE', 'LOCAL_LLM_INFER_TIMEOUT_SEC',
+        // Other
         'OPENAI_API_KEY', 'DEEPGRAM_API_KEY', 'GOOGLE_API_KEY', 'RESEND_API_KEY', 'ELEVENLABS_API_KEY', 'CARTESIA_API_KEY', 'JWT_SECRET',
         'AI_NAME', 'AI_ROLE', 'ASTERISK_ARI_PORT', 'ASTERISK_ARI_WEBSOCKET_SCHEME',
         'HEALTH_CHECK_LOCAL_AI_URL', 'HEALTH_CHECK_AI_ENGINE_URL'
@@ -387,8 +396,10 @@ const EnvPage = () => {
             </ConfigSection>
 
             {/* Local AI Server Connection Settings */}
-            <ConfigSection title="Local AI Server" description="Connection settings for local AI services.">
+            <ConfigSection title="Local AI Server" description="Connection and model settings for local AI services.">
+                {/* Connection Settings */}
                 <ConfigCard>
+                    <h3 className="text-sm font-semibold text-muted-foreground mb-4">Connection Settings</h3>
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                         <FormInput
                             label="WebSocket URL"
@@ -413,13 +424,126 @@ const EnvPage = () => {
                             value={env['LOCAL_WS_CHUNK_MS'] || '320'}
                             onChange={(e) => updateEnv('LOCAL_WS_CHUNK_MS', e.target.value)}
                         />
-                        <div className="col-span-full">
+                    </div>
+                </ConfigCard>
+
+                {/* STT Backend Settings */}
+                <ConfigCard>
+                    <h3 className="text-sm font-semibold text-muted-foreground mb-4">STT (Speech-to-Text)</h3>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                        <FormSelect
+                            label="STT Backend"
+                            value={env['LOCAL_STT_BACKEND'] || 'vosk'}
+                            onChange={(e) => updateEnv('LOCAL_STT_BACKEND', e.target.value)}
+                            options={[
+                                { value: 'vosk', label: 'Vosk (Local)' },
+                                { value: 'kroko', label: 'Kroko (Cloud/Embedded)' },
+                                { value: 'sherpa', label: 'Sherpa-ONNX (Local)' },
+                            ]}
+                        />
+                        
+                        {/* Vosk Settings */}
+                        {(env['LOCAL_STT_BACKEND'] || 'vosk') === 'vosk' && (
                             <FormInput
-                                label="STT Model Path"
+                                label="Vosk Model Path"
                                 value={env['LOCAL_STT_MODEL_PATH'] || '/app/models/stt/vosk-model-en-us-0.22'}
                                 onChange={(e) => updateEnv('LOCAL_STT_MODEL_PATH', e.target.value)}
                             />
-                        </div>
+                        )}
+                        
+                        {/* Kroko Settings */}
+                        {env['LOCAL_STT_BACKEND'] === 'kroko' && (
+                            <>
+                                <FormInput
+                                    label="Kroko URL"
+                                    value={env['KROKO_URL'] || 'wss://app.kroko.ai/api/v1/transcripts/streaming'}
+                                    onChange={(e) => updateEnv('KROKO_URL', e.target.value)}
+                                />
+                                <SecretInput label="Kroko API Key" name="KROKO_API_KEY" placeholder="Your Kroko API key" />
+                                <FormSelect
+                                    label="Language"
+                                    value={env['KROKO_LANGUAGE'] || 'en-US'}
+                                    onChange={(e) => updateEnv('KROKO_LANGUAGE', e.target.value)}
+                                    options={[
+                                        { value: 'en-US', label: 'English (US)' },
+                                        { value: 'en-GB', label: 'English (UK)' },
+                                        { value: 'es-ES', label: 'Spanish' },
+                                        { value: 'fr-FR', label: 'French' },
+                                        { value: 'de-DE', label: 'German' },
+                                    ]}
+                                />
+                            </>
+                        )}
+                        
+                        {/* Sherpa Settings */}
+                        {env['LOCAL_STT_BACKEND'] === 'sherpa' && (
+                            <FormInput
+                                label="Sherpa Model Path"
+                                value={env['SHERPA_MODEL_PATH'] || '/app/models/stt/sherpa-onnx-streaming-zipformer-en-2023-06-26'}
+                                onChange={(e) => updateEnv('SHERPA_MODEL_PATH', e.target.value)}
+                            />
+                        )}
+                    </div>
+                </ConfigCard>
+
+                {/* TTS Backend Settings */}
+                <ConfigCard>
+                    <h3 className="text-sm font-semibold text-muted-foreground mb-4">TTS (Text-to-Speech)</h3>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                        <FormSelect
+                            label="TTS Backend"
+                            value={env['LOCAL_TTS_BACKEND'] || 'piper'}
+                            onChange={(e) => updateEnv('LOCAL_TTS_BACKEND', e.target.value)}
+                            options={[
+                                { value: 'piper', label: 'Piper (Local)' },
+                                { value: 'kokoro', label: 'Kokoro (Local, Premium)' },
+                            ]}
+                        />
+                        
+                        {/* Piper Settings */}
+                        {(env['LOCAL_TTS_BACKEND'] || 'piper') === 'piper' && (
+                            <FormInput
+                                label="Piper Model Path"
+                                value={env['LOCAL_TTS_MODEL_PATH'] || '/app/models/tts/en_US-lessac-medium.onnx'}
+                                onChange={(e) => updateEnv('LOCAL_TTS_MODEL_PATH', e.target.value)}
+                            />
+                        )}
+                        
+                        {/* Kokoro Settings */}
+                        {env['LOCAL_TTS_BACKEND'] === 'kokoro' && (
+                            <>
+                                <FormSelect
+                                    label="Voice"
+                                    value={env['KOKORO_VOICE'] || 'af_heart'}
+                                    onChange={(e) => updateEnv('KOKORO_VOICE', e.target.value)}
+                                    options={[
+                                        { value: 'af_heart', label: 'Heart (Female, American)' },
+                                        { value: 'af_bella', label: 'Bella (Female, American)' },
+                                        { value: 'af_nicole', label: 'Nicole (Female, American)' },
+                                        { value: 'af_sarah', label: 'Sarah (Female, American)' },
+                                        { value: 'af_sky', label: 'Sky (Female, American)' },
+                                        { value: 'am_adam', label: 'Adam (Male, American)' },
+                                        { value: 'am_michael', label: 'Michael (Male, American)' },
+                                        { value: 'bf_emma', label: 'Emma (Female, British)' },
+                                        { value: 'bf_isabella', label: 'Isabella (Female, British)' },
+                                        { value: 'bm_george', label: 'George (Male, British)' },
+                                        { value: 'bm_lewis', label: 'Lewis (Male, British)' },
+                                    ]}
+                                />
+                                <FormInput
+                                    label="Model Path"
+                                    value={env['KOKORO_MODEL_PATH'] || '/app/models/tts/kokoro'}
+                                    onChange={(e) => updateEnv('KOKORO_MODEL_PATH', e.target.value)}
+                                />
+                            </>
+                        )}
+                    </div>
+                </ConfigCard>
+
+                {/* LLM Settings */}
+                <ConfigCard>
+                    <h3 className="text-sm font-semibold text-muted-foreground mb-4">LLM (Large Language Model)</h3>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                         <div className="col-span-full">
                             <FormInput
                                 label="LLM Model Path"
@@ -427,37 +551,36 @@ const EnvPage = () => {
                                 onChange={(e) => updateEnv('LOCAL_LLM_MODEL_PATH', e.target.value)}
                             />
                         </div>
-                        <div className="col-span-full">
-                            <FormInput
-                                label="TTS Model Path"
-                                value={env['LOCAL_TTS_MODEL_PATH'] || '/app/models/tts/en_US-lessac-medium.onnx'}
-                                onChange={(e) => updateEnv('LOCAL_TTS_MODEL_PATH', e.target.value)}
-                            />
-                        </div>
                         <FormInput
-                            label="LLM Context"
+                            label="Context Size"
                             type="number"
-                            value={env['LOCAL_LLM_CONTEXT'] || '512'}
+                            value={env['LOCAL_LLM_CONTEXT'] || '4096'}
                             onChange={(e) => updateEnv('LOCAL_LLM_CONTEXT', e.target.value)}
                         />
                         <FormInput
-                            label="LLM Batch"
+                            label="Batch Size"
                             type="number"
-                            value={env['LOCAL_LLM_BATCH'] || '512'}
+                            value={env['LOCAL_LLM_BATCH'] || '256'}
                             onChange={(e) => updateEnv('LOCAL_LLM_BATCH', e.target.value)}
                         />
                         <FormInput
-                            label="LLM Max Tokens"
+                            label="Max Tokens"
                             type="number"
-                            value={env['LOCAL_LLM_MAX_TOKENS'] || '32'}
+                            value={env['LOCAL_LLM_MAX_TOKENS'] || '128'}
                             onChange={(e) => updateEnv('LOCAL_LLM_MAX_TOKENS', e.target.value)}
                         />
                         <FormInput
-                            label="LLM Temperature"
+                            label="Temperature"
                             type="number"
                             step="0.1"
-                            value={env['LOCAL_LLM_TEMPERATURE'] || '0.3'}
+                            value={env['LOCAL_LLM_TEMPERATURE'] || '0.7'}
                             onChange={(e) => updateEnv('LOCAL_LLM_TEMPERATURE', e.target.value)}
+                        />
+                        <FormInput
+                            label="Threads"
+                            type="number"
+                            value={env['LOCAL_LLM_THREADS'] || '4'}
+                            onChange={(e) => updateEnv('LOCAL_LLM_THREADS', e.target.value)}
                         />
                         <FormInput
                             label="Infer Timeout (s)"
