@@ -506,7 +506,7 @@ def load_config(path: str = "config/ai-agent.yaml") -> AppConfig:
     normalize_local_provider_tokens(config_data)
     
     # Phase 4b: Validate normalized configuration
-    from .config.normalization import validate_providers, validate_pipelines, ConfigValidationError
+    from src.config.normalization import validate_providers, validate_pipelines, ConfigValidationError
     try:
         validate_providers(config_data)
         validate_pipelines(config_data)
