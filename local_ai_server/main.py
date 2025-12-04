@@ -330,19 +330,17 @@ class SherpaONNXSTTBackend:
             logging.info("   decoder: %s", decoder_file)
             logging.info("   joiner: %s", joiner_file)
             
-            # Create recognizer config
-            recognizer_config = sherpa_onnx.OnlineRecognizerConfig(
+            # Create recognizer using from_transducer classmethod
+            self.recognizer = sherpa_onnx.OnlineRecognizer.from_transducer(
                 tokens=tokens_file,
-                model_config=sherpa_onnx.OnlineTransducerModelConfig(
-                    encoder=encoder_file,
-                    decoder=decoder_file,
-                    joiner=joiner_file,
-                ),
+                encoder=encoder_file,
+                decoder=decoder_file,
+                joiner=joiner_file,
+                num_threads=2,
+                sample_rate=float(self.sample_rate),
                 enable_endpoint_detection=True,
                 decoding_method="greedy_search",
             )
-            
-            self.recognizer = sherpa_onnx.OnlineRecognizer(recognizer_config)
             self._initialized = True
             logging.info("✅ SHERPA - Recognizer initialized with model %s", self.model_path)
             return True
