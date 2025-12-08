@@ -422,6 +422,7 @@ providers:
     connect_timeout_sec: ${LOCAL_WS_CONNECT_TIMEOUT:=2.0}
     enabled: true
     response_timeout_sec: ${LOCAL_WS_RESPONSE_TIMEOUT:=10.0}
+    stt_backend: vosk
     stt_model: models/stt/vosk-model-en-us-0.22
     type: local
     ws_url: ${LOCAL_WS_URL:-ws://127.0.0.1:8765}
