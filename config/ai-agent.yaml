@@ -74,7 +74,15 @@ contexts:
       \ options\n- Be conversational, clear, and adapt to user's technical level\n\
       - Keep responses short and concise (1-3 sentences) unless the caller asks for\
       \ more detail. Do not read punctuation characters like '-', '*', ':' or '_'\
-      \ out loud; pause briefly instead"
+      \ out loud; pause briefly instead\n\nCALL ENDING PROTOCOL:\n- When user indicates\
+      \ they're done (goodbye, that's all, thanks, etc.), FIRST offer: 'Before you\
+      \ go, would you like me to email you a transcript of our conversation?'\n- If\
+      \ they say yes, use the request_transcript tool to get their email and send\
+      \ the transcript\n- If they decline or after transcript is sent, confirm: 'Is\
+      \ there anything else I can help with?'\n- After user confirms they're done,\
+      \ use the hangup_call tool with an appropriate farewell\n- Farewell messages\
+      \ should be warm and professional (e.g., 'Have a great day!', 'Thank you for\
+      \ calling!')"
     provider: deepgram
     tools:
     - transfer
@@ -138,13 +146,16 @@ contexts:
       \ to choose Google Live vs other options\n- Be conversational, clear, and adapt\
       \ to user's technical level\n- Keep responses short and concise (1-3 sentences)\
       \ unless the caller asks for more detail. Do not read punctuation characters\
-      \ like '-', '*', ':' or '_' out loud; pause briefly instead\n\nCALL ENDING PROTOCOL:\n\
-      - When user indicates they're done (goodbye, that's all, thanks, etc.), politely\
-      \ confirm: 'Is there anything else I can help with?'\n- After user confirms\
-      \ they're done, use the hangup_call tool with an appropriate farewell\n- Always\
-      \ use hangup_call tool to end conversations properly - never end without it\n\
-      - Farewell messages should be warm and professional (e.g., 'Have a great day!',\
-      \ 'Thank you for calling!')\n"
+      \ like '-', '*', ':' or '_' out loud; pause briefly instead\n\n\nCALL ENDING PROTOCOL:\n\
+      - When user indicates they're done (goodbye, that's all, thanks, etc.), FIRST\
+      \ offer: 'Before you go, would you like me to email you a transcript of our\
+      \ conversation?'\n- If they say yes, use the request_transcript tool to get\
+      \ their email and send the transcript\n- If they decline or after transcript\
+      \ is sent, confirm: 'Is there anything else I can help with?'\n- After user\
+      \ confirms they're done, use the hangup_call tool with an appropriate farewell\n\
+      - Always use hangup_call tool to end conversations properly - never end without\
+      \ it\n- Farewell messages should be warm and professional (e.g., 'Have a great\
+      \ day!', 'Thank you for calling!')\n"
     tools:
     - transfer
     - cancel_transfer
@@ -165,7 +176,15 @@ contexts:
       \ when local processing is the right choice\n- Speak in short, concise sentences\
       \ by default (1\u20133 sentences)\n- Only elaborate when the caller asks for\
       \ more detail\n- Do not read punctuation characters like '-', '*', ':' or '_'\
-      \ out loud; pause briefly instead\n"
+      \ out loud; pause briefly instead\n\nCALL ENDING PROTOCOL:\n- When user indicates\
+      \ they're done (goodbye, that's all, thanks, etc.), FIRST offer: 'Before you\
+      \ go, would you like me to email you a transcript of our conversation?'\n- If\
+      \ they say yes, use the request_transcript tool to get their email and send\
+      \ the transcript\n- If they decline or after transcript is sent, confirm: 'Is\
+      \ there anything else I can help with?'\n- After user confirms they're done,\
+      \ use the hangup_call tool with an appropriate farewell\n- Farewell messages\
+      \ should be warm and professional (e.g., 'Have a great day!', 'Thank you for\
+      \ calling!')\n"
     tools:
     - transfer
     - cancel_transfer
@@ -183,12 +202,15 @@ contexts:
       \ and setup\n- Help callers understand when OpenAI Realtime is the best choice\n\
       - Speak in short, natural sentences by default (1\u20133 sentences)\n- Only\
       \ elaborate when the caller asks for more detail\n- Do not read punctuation\
-      \ characters like '-', '*', ':' or '_' out loud; pause briefly instead\n\nCALL\
+      \ characters like '-', '*', ':' or '_' out loud; pause briefly instead\n\n\nCALL\
       \ ENDING PROTOCOL:\n- When the caller indicates they're done (e.g., goodbye,\
-      \ that's all, thanks), politely confirm: \"Is there anything else I can help\
-      \ with?\"\n- After the caller confirms they're done, call the hangup_call tool\
-      \ with a brief, warm farewell\n- Farewell messages should be warm and professional\
-      \ (for example: \"Have a great day!\" or \"Thank you for calling!\")\n"
+      \ that's all, thanks), FIRST offer: 'Before you go, would you like me to email\
+      \ you a transcript of our conversation?'\n- If they say yes, use the request_transcript\
+      \ tool to get their email and send the transcript\n- If they decline or after\
+      \ transcript is sent, confirm: 'Is there anything else I can help with?'\n-\
+      \ After the caller confirms they're done, use the hangup_call tool with a brief,\
+      \ warm farewell\n- Farewell messages should be warm and professional (e.g.,\
+      \ 'Have a great day!', 'Thank you for calling!')\n"
     provider: openai_realtime
     tools:
     - transfer
@@ -208,9 +230,14 @@ contexts:
       \ turn-taking\n\nYOUR ROLE:\n- Demonstrate ElevenLabs voice quality and capabilities\n\
       - Answer questions about the Asterisk AI Voice Agent project\n- Speak naturally\
       \ and conversationally\n- Keep responses concise (1-3 sentences) unless more\
-      \ detail is requested\n\nCALL ENDING PROTOCOL:\n- When the caller indicates\
-      \ they're done, confirm: \"Is there anything else I can help with?\"\n- After\
-      \ confirmation, use the hangup_call tool with a warm farewell\n"
+      \ detail is requested\n\n\nCALL ENDING PROTOCOL:\n- When the caller indicates\
+      \ they're done (goodbye, that's all, thanks, etc.), FIRST offer: 'Before you\
+      \ go, would you like me to email you a transcript of our conversation?'\n- If\
+      \ they say yes, use the request_transcript tool to get their email and send\
+      \ the transcript\n- If they decline or after transcript is sent, confirm: 'Is\
+      \ there anything else I can help with?'\n- After confirmation, use the hangup_call\
+      \ tool with a warm farewell\n- Farewell messages should be warm and professional\
+      \ (e.g., 'Have a great day!', 'Thank you for calling!')\n"
     provider: elevenlabs_agent
     tools:
     - transfer
