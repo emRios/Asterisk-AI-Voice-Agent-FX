@@ -70,3 +70,69 @@ jobs:
               echo "✗ Coverage below threshold" >> $GITHUB_STEP_SUMMARY
             fi
           fi
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Docker Image Size Check (AAVA-113)
+  # Ensures images don't exceed size budgets
+  # ─────────────────────────────────────────────────────────────────────────────
+  image-size:
+    name: Check Docker Image Sizes
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build ai-engine image
+        run: docker build -t ai-engine:test .
+
+      - name: Build local-ai-server image
+        run: docker build -t local-ai-server:test ./local_ai_server
+
+      - name: Check image sizes
+        run: |
+          echo "## 📦 Docker Image Sizes" >> $GITHUB_STEP_SUMMARY
+          
+          # ai-engine budget: 1.5GB
+          AI_ENGINE_SIZE=$(docker inspect ai-engine:test --format='{{.Size}}')
+          AI_ENGINE_MB=$((AI_ENGINE_SIZE / 1024 / 1024))
+          AI_ENGINE_BUDGET=1500
+          
+          echo "| Image | Size | Budget | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|------|--------|--------|" >> $GITHUB_STEP_SUMMARY
+          
+          if [ $AI_ENGINE_MB -gt $AI_ENGINE_BUDGET ]; then
+            echo "| ai-engine | ${AI_ENGINE_MB}MB | ${AI_ENGINE_BUDGET}MB | ❌ Over budget |" >> $GITHUB_STEP_SUMMARY
+            AI_ENGINE_PASS=false
+          else
+            echo "| ai-engine | ${AI_ENGINE_MB}MB | ${AI_ENGINE_BUDGET}MB | ✅ OK |" >> $GITHUB_STEP_SUMMARY
+            AI_ENGINE_PASS=true
+          fi
+          
+          # local-ai-server budget: 4GB (includes ML models)
+          LOCAL_AI_SIZE=$(docker inspect local-ai-server:test --format='{{.Size}}')
+          LOCAL_AI_MB=$((LOCAL_AI_SIZE / 1024 / 1024))
+          LOCAL_AI_BUDGET=4000
+          
+          if [ $LOCAL_AI_MB -gt $LOCAL_AI_BUDGET ]; then
+            echo "| local-ai-server | ${LOCAL_AI_MB}MB | ${LOCAL_AI_BUDGET}MB | ❌ Over budget |" >> $GITHUB_STEP_SUMMARY
+            LOCAL_AI_PASS=false
+          else
+            echo "| local-ai-server | ${LOCAL_AI_MB}MB | ${LOCAL_AI_BUDGET}MB | ✅ OK |" >> $GITHUB_STEP_SUMMARY
+            LOCAL_AI_PASS=true
+          fi
+          
+          # Fail if any image exceeds budget
+          if [ "$AI_ENGINE_PASS" = "false" ] || [ "$LOCAL_AI_PASS" = "false" ]; then
+            echo ""
+            echo "⚠️ **One or more images exceed size budget!**" >> $GITHUB_STEP_SUMMARY
+            echo "Consider using build args to exclude unused backends." >> $GITHUB_STEP_SUMMARY
+            exit 1
+          fi
+
+      - name: Check outdated dependencies
+        continue-on-error: true
+        run: |
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## 📋 Outdated Dependencies" >> $GITHUB_STEP_SUMMARY
+          pip install pip-outdated || true
+          pip list --outdated --format=columns | head -20 >> $GITHUB_STEP_SUMMARY || echo "Unable to check" >> $GITHUB_STEP_SUMMARY

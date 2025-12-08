@@ -1,6 +1,17 @@
 # --- Stage 1: Builder (Dependencies) ---
 FROM python:3.11 as builder
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Build Args - Conditionally include backends (AAVA-112)
+# Default: all backends enabled for backward compatibility
+# Usage: docker build --build-arg INCLUDE_VOSK=false ...
+# ─────────────────────────────────────────────────────────────────────────────
+ARG INCLUDE_VOSK=true
+ARG INCLUDE_SHERPA=true
+ARG INCLUDE_PIPER=true
+ARG INCLUDE_KOKORO=true
+ARG INCLUDE_LLAMA=true
+
 WORKDIR /usr/src/app
 
 # Create virtual environment
@@ -9,12 +20,41 @@ ENV PATH="/opt/venv/bin:$PATH"
 
 # Copy requirements first for optimal caching
 COPY requirements.txt .
+COPY requirements-base.txt .
 
-# Install dependencies
-RUN pip install --no-cache-dir -r requirements.txt
+# Install base dependencies (always required)
+RUN pip install --no-cache-dir -r requirements-base.txt
 
-# Pre-install spacy model for Kokoro TTS (requires write access to venv)
-RUN python -m spacy download en_core_web_sm || true
+# Conditionally install backends based on build args
+RUN if [ "$INCLUDE_VOSK" = "true" ]; then \
+        echo "📦 Installing Vosk STT..." && \
+        pip install --no-cache-dir vosk==0.3.45; \
+    fi
+
+RUN if [ "$INCLUDE_SHERPA" = "true" ]; then \
+        echo "📦 Installing Sherpa-ONNX STT..." && \
+        pip install --no-cache-dir sherpa-onnx==1.12.18; \
+    fi
+
+RUN if [ "$INCLUDE_PIPER" = "true" ]; then \
+        echo "📦 Installing Piper TTS..." && \
+        pip install --no-cache-dir piper-tts==1.2.0; \
+    fi
+
+RUN if [ "$INCLUDE_KOKORO" = "true" ]; then \
+        echo "📦 Installing Kokoro TTS..." && \
+        pip install --no-cache-dir "kokoro>=0.9.2"; \
+    fi
+
+RUN if [ "$INCLUDE_LLAMA" = "true" ]; then \
+        echo "📦 Installing llama-cpp-python LLM..." && \
+        pip install --no-cache-dir llama-cpp-python==0.3.16; \
+    fi
+
+# Pre-install spacy model for Kokoro TTS (only if Kokoro included)
+RUN if [ "$INCLUDE_KOKORO" = "true" ]; then \
+        python -m spacy download en_core_web_sm || true; \
+    fi
 
 # --- Stage 2: Final Runtime Image ---
 FROM python:3.11-slim

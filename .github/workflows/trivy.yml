@@ -10,12 +10,16 @@ on:
     paths:
       - 'Dockerfile'
       - 'requirements.txt'
+      - 'local_ai_server/Dockerfile'
+      - 'local_ai_server/requirements*.txt'
       - '.github/workflows/trivy.yml'
   pull_request:
     branches: [ "main", "develop" ]
     paths:
       - 'Dockerfile'
       - 'requirements.txt'
+      - 'local_ai_server/Dockerfile'
+      - 'local_ai_server/requirements*.txt'
   schedule:
     # Run weekly on Monday at 7am UTC (after CodeQL)
     - cron: '0 7 * * 1'
@@ -33,37 +37,58 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
 
-    - name: Build Docker image
-      run: |
-        docker build -t ai-engine:${{ github.sha }} .
+    - name: Build ai-engine image
+      run: docker build -t ai-engine:${{ github.sha }} .
+
+    - name: Build local-ai-server image
+      run: docker build -t local-ai-server:${{ github.sha }} ./local_ai_server
       
-    - name: Run Trivy vulnerability scanner
+    - name: Scan ai-engine image
       uses: aquasecurity/trivy-action@master
       with:
         image-ref: 'ai-engine:${{ github.sha }}'
         format: 'sarif'
-        output: 'trivy-results.sarif'
+        output: 'trivy-ai-engine.sarif'
         severity: 'CRITICAL,HIGH,MEDIUM'
         vuln-type: 'os,library'
-        # Scan both OS packages and application dependencies
         scanners: 'vuln,secret,config'
-        # Report vulnerabilities but don't block CI (for initial assessment)
-        # Change to '1' after addressing findings to enforce blocking
         exit-code: '0'
-        ignore-unfixed: true  # Only report fixable vulnerabilities
+        ignore-unfixed: true
         timeout: '15m'
 
-    - name: Upload Trivy results to GitHub Security tab
+    - name: Scan local-ai-server image
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: 'local-ai-server:${{ github.sha }}'
+        format: 'sarif'
+        output: 'trivy-local-ai-server.sarif'
+        severity: 'CRITICAL,HIGH,MEDIUM'
+        vuln-type: 'os,library'
+        scanners: 'vuln,secret,config'
+        exit-code: '0'
+        ignore-unfixed: true
+        timeout: '15m'
+
+    - name: Upload ai-engine results to GitHub Security tab
       uses: github/codeql-action/upload-sarif@v3
       if: always()
       with:
-        sarif_file: 'trivy-results.sarif'
-        category: 'trivy-docker'
+        sarif_file: 'trivy-ai-engine.sarif'
+        category: 'trivy-ai-engine'
+
+    - name: Upload local-ai-server results to GitHub Security tab
+      uses: github/codeql-action/upload-sarif@v3
+      if: always()
+      with:
+        sarif_file: 'trivy-local-ai-server.sarif'
+        category: 'trivy-local-ai-server'
 
     - name: Upload Trivy results as artifact
       uses: actions/upload-artifact@v4
       if: always()
       with:
         name: trivy-results-${{ github.sha }}
-        path: trivy-results.sarif
+        path: |
+          trivy-ai-engine.sarif
+          trivy-local-ai-server.sarif
         retention-days: 30

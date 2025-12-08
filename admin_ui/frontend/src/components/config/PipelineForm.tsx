@@ -1,6 +1,16 @@
 import React, { useState, useEffect } from 'react';
 import { FormInput, FormLabel } from '../ui/FormComponents';
 import { ensureModularKey, isFullAgentProvider, isRegisteredProvider } from '../../utils/providerNaming';
+import { CheckCircle, AlertCircle, Loader2 } from 'lucide-react';
+
+interface LocalAIStatus {
+    stt_backend?: string;
+    stt_model?: string;
+    tts_backend?: string;
+    tts_voice?: string;
+    llm_model?: string;
+    healthy?: boolean;
+}
 
 interface PipelineFormProps {
     config: any;
@@ -11,6 +21,27 @@ interface PipelineFormProps {
 
 const PipelineForm: React.FC<PipelineFormProps> = ({ config, providers, onChange, isNew }) => {
     const [localConfig, setLocalConfig] = useState<any>({ ...config });
+    const [localAIStatus, setLocalAIStatus] = useState<LocalAIStatus | null>(null);
+    const [statusLoading, setStatusLoading] = useState(false);
+
+    // Fetch local AI server status for backend info (AAVA-116)
+    useEffect(() => {
+        const fetchLocalAIStatus = async () => {
+            setStatusLoading(true);
+            try {
+                const response = await fetch('/api/local-ai/status');
+                if (response.ok) {
+                    const data = await response.json();
+                    setLocalAIStatus(data);
+                }
+            } catch (error) {
+                console.error('Failed to fetch local AI status:', error);
+            } finally {
+                setStatusLoading(false);
+            }
+        };
+        fetchLocalAIStatus();
+    }, []);
 
     useEffect(() => {
         setLocalConfig({ ...config });
@@ -88,6 +119,22 @@ const PipelineForm: React.FC<PipelineFormProps> = ({ config, providers, onChange
                             </option>
                         ))}
                     </select>
+                    {/* AAVA-116: Show active backend for local_stt */}
+                    {localConfig.stt?.includes('local') && localAIStatus && (
+                        <div className="flex items-center gap-2 text-xs text-muted-foreground bg-muted/50 px-3 py-2 rounded-md">
+                            {statusLoading ? (
+                                <Loader2 className="h-3 w-3 animate-spin" />
+                            ) : localAIStatus.healthy ? (
+                                <CheckCircle className="h-3 w-3 text-green-500" />
+                            ) : (
+                                <AlertCircle className="h-3 w-3 text-yellow-500" />
+                            )}
+                            <span>
+                                Active Backend: <strong className="text-foreground">{localAIStatus.stt_backend || 'Unknown'}</strong>
+                                {localAIStatus.stt_model && <span className="text-muted-foreground"> ({localAIStatus.stt_model})</span>}
+                            </span>
+                        </div>
+                    )}
                     {sttProviders.length === 0 && (
                         <p className="text-xs text-destructive">No STT providers available. Create a modular STT provider first.</p>
                     )}
@@ -126,6 +173,22 @@ const PipelineForm: React.FC<PipelineFormProps> = ({ config, providers, onChange
                             </option>
                         ))}
                     </select>
+                    {/* AAVA-116: Show active backend for local_tts */}
+                    {localConfig.tts?.includes('local') && localAIStatus && (
+                        <div className="flex items-center gap-2 text-xs text-muted-foreground bg-muted/50 px-3 py-2 rounded-md">
+                            {statusLoading ? (
+                                <Loader2 className="h-3 w-3 animate-spin" />
+                            ) : localAIStatus.healthy ? (
+                                <CheckCircle className="h-3 w-3 text-green-500" />
+                            ) : (
+                                <AlertCircle className="h-3 w-3 text-yellow-500" />
+                            )}
+                            <span>
+                                Active Backend: <strong className="text-foreground">{localAIStatus.tts_backend || 'Unknown'}</strong>
+                                {localAIStatus.tts_voice && <span className="text-muted-foreground"> ({localAIStatus.tts_voice})</span>}
+                            </span>
+                        </div>
+                    )}
                     {ttsProviders.length === 0 && (
                         <p className="text-xs text-destructive">No TTS providers available. Create a modular TTS provider first.</p>
                     )}
