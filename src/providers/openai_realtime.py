@@ -504,20 +504,17 @@ class OpenAIRealtimeProvider(AIProviderInterface):
                 return
             
             # ECHO GATING for speakerphone support:
-            # Only gate input while we have actual audio to output (not just silence).
-            # Check if there's buffered audio waiting to be played - if so, gate input.
-            # This prevents the agent from "hearing itself" on speakerphone calls.
+            # Gate input ONLY while we're outputting real audio from OpenAI.
+            # The pacer keeps running and emitting silence, so we can't just check _outbuf.
+            # Instead, check if pacer has real audio (underruns == 0 means real audio).
             # 
-            # We use buffer state instead of _in_audio_burst because:
-            # 1. _in_audio_burst stays True until response.audio.done (for AgentAudioDone)
-            # 2. But once buffer is empty, agent is just emitting silence - allow input
+            # When _pacer_underruns > 0, we're just emitting silence - allow input.
             try:
-                has_buffered_audio = len(self._outbuf) > 0
-                if has_buffered_audio:
-                    # Agent has audio to play - gate input to prevent echo
+                if self._in_audio_burst and self._pacer_underruns == 0:
+                    # Agent is outputting REAL audio - gate input to prevent echo
                     return
             except Exception:
-                pass  # If we can't check buffer, allow input
+                pass  # If we can't check, allow input
             
             # Send audio to OpenAI for processing
             await self._send_audio_to_openai(pcm16)
