@@ -5,7 +5,7 @@ Run Asterisk AI Voice Agent completely on-premises with no cloud APIs.
 ## Overview
 
 This guide covers setting up a fully local deployment using:
-- **STT**: Vosk (supports multiple languages)
+- **STT**: Vosk or Sherpa-ONNX (supports multiple languages)
 - **LLM**: Phi-3 Mini (or other GGUF models)
 - **TTS**: Piper or Kokoro
 
@@ -153,11 +153,22 @@ python3 model_setup.py
 
 ### Supported Models
 
-**STT (Vosk)**:
+**STT - Vosk** (offline, good accuracy):
 - `vosk-model-en-us-0.22` (English, recommended)
 - `vosk-model-small-en-us-0.15` (English, smaller/faster)
 - `vosk-model-nl-0.22` (Dutch)
 - See [Vosk Models](https://alphacephei.com/vosk/models)
+
+**STT - Sherpa-ONNX** (streaming, lower latency):
+- `sherpa-onnx-streaming-zipformer-en-2023-06-26` (English, recommended)
+- `sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20` (Chinese/English)
+- See [Sherpa-ONNX Models](https://github.com/k2-fsa/sherpa-onnx/releases)
+
+To use Sherpa instead of Vosk, set in `.env`:
+```bash
+LOCAL_STT_BACKEND=sherpa
+LOCAL_STT_MODEL_PATH=/app/models/stt/sherpa-onnx-streaming-zipformer-en-2023-06-26
+```
 
 **LLM (GGUF)**:
 - `phi-3-mini-4k-instruct.Q4_K_M.gguf` (recommended)
