@@ -99,6 +99,8 @@ class OpenAIRealtimeProvider(AIProviderInterface):
         self._hangup_after_response: bool = False  # Flag to trigger hangup after next response
         self._farewell_timeout_task: Optional[asyncio.Task] = None  # Timeout fallback for hangup
         self._in_audio_burst: bool = False
+        self._response_audio_start_time: Optional[float] = None  # Track when audio started for interruption cooldown
+        self._min_response_time_before_interrupt: float = 1.5  # Minimum seconds of audio before allowing interruption
         self._first_output_chunk_logged: bool = False
         self._closing: bool = False
         self._closed: bool = False
@@ -1279,6 +1281,8 @@ class OpenAIRealtimeProvider(AIProviderInterface):
                 # Track audio burst for metrics, but don't use gating for server-side VAD
                 if not self._in_audio_burst:
                     self._in_audio_burst = True
+                    # SMOOTHNESS FIX: Record when audio started for interruption cooldown
+                    self._response_audio_start_time = time.time()
                 
                 await self._handle_output_audio(audio_b64)
             else:
@@ -1289,6 +1293,8 @@ class OpenAIRealtimeProvider(AIProviderInterface):
             # Track end of audio burst for metrics
             if self._in_audio_burst:
                 self._in_audio_burst = False
+            # NOTE: Don't reset _response_audio_start_time here - response.audio.done fires per-segment
+            # We keep the timer until the full response is done to prevent mid-sentence interruption
             
             # NOTE: response.audio.done fires after EACH audio segment, not at end of response
             # Do NOT re-enable VAD here - it will trigger too early!
@@ -1319,6 +1325,9 @@ class OpenAIRealtimeProvider(AIProviderInterface):
         if event_type in ("response.completed", "response.error", "response.cancelled", "response.done"):
             # Track if audio was emitted during this response
             had_audio_burst = self._in_audio_burst
+            
+            # Reset audio start time when response fully completes - allows interruption for next response
+            self._response_audio_start_time = None
             
             await self._emit_audio_done()
             
@@ -1475,9 +1484,29 @@ class OpenAIRealtimeProvider(AIProviderInterface):
                         call_id=self._call_id,
                         response_id=self._current_response_id
                     )
+                # SMOOTHNESS FIX: Don't cancel if response just started - prevents premature cutoff
+                elif self._response_audio_start_time:
+                    elapsed = time.time() - self._response_audio_start_time
+                    if elapsed < self._min_response_time_before_interrupt:
+                        logger.info(
+                            "🛡️  Barge-in blocked - response too young",
+                            call_id=self._call_id,
+                            response_id=self._current_response_id,
+                            elapsed_seconds=round(elapsed, 2),
+                            min_required=self._min_response_time_before_interrupt
+                        )
+                    else:
+                        logger.info(
+                            "🎤 User interruption detected, cancelling response",
+                            call_id=self._call_id,
+                            response_id=self._current_response_id,
+                            elapsed_seconds=round(elapsed, 2)
+                        )
+                        await self._cancel_response(self._current_response_id)
                 else:
+                    # No audio started yet, still cancel text-only responses
                     logger.info(
-                        "🎤 User interruption detected, cancelling response",
+                        "🎤 User interruption detected (no audio), cancelling response",
                         call_id=self._call_id,
                         response_id=self._current_response_id
                     )
