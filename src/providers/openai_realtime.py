@@ -391,37 +391,35 @@ class OpenAIRealtimeProvider(AIProviderInterface):
         await self._send_session_update()
         self._log_session_assumptions()
         
-        # CRITICAL FIX #2: Send greeting IMMEDIATELY, don't wait for ACK
-        # Waiting for ACK blocks greeting for 3+ seconds (ACK arrives 8ms after timeout)
-        # This creates 4.5 second silence gap before greeting plays
-        # Proactively request an initial response so the agent can greet
-        # even before user audio arrives. Prefer explicit greeting text
-        # when provided; otherwise fall back to generic instructions.
+        # CRITICAL: Wait for session.updated ACK BEFORE sending greeting
+        # Per OpenAI Dec 2024 docs, session config (voice, modalities, audio format)
+        # must be applied before response.create will generate audio correctly
         try:
-            if (self.config.greeting or "").strip():
-                logger.info("Sending explicit greeting (before ACK wait)", call_id=call_id)
-                await self._send_explicit_greeting()
-            else:
-                await self._ensure_response_request()
-        except Exception:
-            logger.debug("Initial response.create request failed", call_id=call_id, exc_info=True)
-        
-        # THEN wait for session.updated ACK (doesn't block greeting anymore)
-        try:
-            logger.debug("Waiting for OpenAI session.updated ACK...", call_id=call_id)
-            await asyncio.wait_for(self._session_ack_event.wait(), timeout=3.0)  # Increased from 2.0s - ACK arrives at ~2.005s
+            logger.debug("Waiting for OpenAI session.updated ACK before greeting...", call_id=call_id)
+            await asyncio.wait_for(self._session_ack_event.wait(), timeout=5.0)  # Increased timeout
             logger.info(
-                "✅ OpenAI session.updated ACK received",
+                "✅ OpenAI session.updated ACK received - session configured",
                 call_id=call_id,
+                acknowledged=self._outfmt_acknowledged,
                 output_format=self._provider_output_format,
                 sample_rate=self._active_output_sample_rate_hz,
             )
         except asyncio.TimeoutError:
             logger.warning(
-                "❌ OpenAI session.updated ACK timeout (greeting already sent)",
+                "⚠️ OpenAI session.updated ACK timeout - proceeding anyway",
                 call_id=call_id,
-                note="OpenAI may have rejected audio format configuration - will use inference"
+                note="Session may not be fully configured, greeting may be text-only"
             )
+        
+        # NOW send greeting after session is configured
+        try:
+            if (self.config.greeting or "").strip():
+                logger.info("Sending explicit greeting (after session ACK)", call_id=call_id)
+                await self._send_explicit_greeting()
+            else:
+                await self._ensure_response_request()
+        except Exception:
+            logger.debug("Initial response.create request failed", call_id=call_id, exc_info=True)
 
         self._receive_task = asyncio.create_task(self._receive_loop())
         self._keepalive_task = asyncio.create_task(self._keepalive_loop())
@@ -790,15 +788,14 @@ class OpenAIRealtimeProvider(AIProviderInterface):
         if not greeting or not self.websocket or self.websocket.closed:
             return
 
-        # OFFICIAL OPENAI SOLUTION: Disable turn_detection during greeting
-        # This prevents server-side VAD from committing user speech while greeting generates
-        # Reference: https://platform.openai.com/docs/guides/realtime-vad
+        # Per OpenAI Dec 2024 docs: Disable turn_detection during greeting
+        # to prevent user speech from interrupting the greeting
         logger.info(
             "🔇 Disabling turn_detection for greeting playback",
             call_id=self._call_id
         )
         
-        # Send session.update to disable VAD temporarily
+        # Disable VAD before greeting
         disable_vad_payload: Dict[str, Any] = {
             "type": "session.update",
             "event_id": f"sess-disable-vad-{uuid.uuid4()}",
@@ -808,43 +805,39 @@ class OpenAIRealtimeProvider(AIProviderInterface):
         }
         await self._send_json(disable_vad_payload)
         
-        # Give a small delay for session update to take effect
-        await asyncio.sleep(0.05)
+        # Small delay to ensure VAD disable is processed
+        await asyncio.sleep(0.1)
 
-        # Map config modalities to output_modalities
-        output_modalities = [m for m in (self.config.response_modalities or []) if m in ("audio", "text")] or ["audio"]
+        # Map config modalities - ensure audio is included
+        output_modalities = [m for m in (self.config.response_modalities or []) if m in ("audio", "text")] or ["audio", "text"]
 
         response_payload: Dict[str, Any] = {
             "type": "response.create",
             "event_id": f"resp-{uuid.uuid4()}",
             "response": {
-                # Force audio modality for greeting at response level
+                # CRITICAL: Per OpenAI Dec 2024 docs - commit and cancel_previous
+                "commit": True,
+                "cancel_previous": True,
+                # Force audio+text modality for greeting
                 "modalities": output_modalities,
-                # CRITICAL: Explicitly set voice and output format at response level
-                # This ensures audio is generated even if session config has issues
-                "voice": self.config.voice or "alloy",
-                "output_audio_format": "pcm16",
-                # Be explicit to ensure the model speaks immediately
-                "instructions": f"Please greet the user with the following: {greeting}",
-                "metadata": {"call_id": self._call_id, "purpose": "initial_greeting"},
-                # Optionally strip context to avoid distractions
-                "input": [],
+                # Clear instructions to speak the greeting
+                "instructions": f"Speak this greeting to the user: {greeting}",
             },
         }
         
         logger.info(
-            "🎤 Sending greeting response.create with explicit voice config",
+            "🎤 Sending greeting response.create",
             call_id=self._call_id,
-            voice=self.config.voice or "alloy",
+            commit=True,
+            cancel_previous=True,
             modalities=output_modalities,
         )
 
         await self._send_json(response_payload)
         self._pending_response = True
         
-        # Mark that we've sent a greeting - next response.created will be protected
         logger.info(
-            "🛡️  Greeting sent with VAD disabled - will re-enable after completion",
+            "🛡️  Greeting sent - will re-enable VAD after completion",
             call_id=self._call_id
         )
 
