@@ -397,7 +397,11 @@ providers:
     connect_timeout_sec: ${LOCAL_WS_CONNECT_TIMEOUT:=2.0}
     continuous_input: true
     enabled: true
-    # Farewell timeout: how long to wait for goodbye TTS before hanging up
+    # Farewell mode: how to play goodbye when call ends
+    # "tts" - Use local TTS (best for fast hardware with <5s LLM response time)
+    # "asterisk" - Use Asterisk's built-in goodbye sound (reliable for slow hardware)
+    farewell_mode: ${LOCAL_FAREWELL_MODE:=asterisk}
+    # Farewell TTS timeout (only used when farewell_mode="tts")
     # Set based on LLM warmup time shown in logs (e.g., if warmup is 20s, set to 25-30s)
     farewell_timeout_sec: ${LOCAL_FAREWELL_TIMEOUT:=30.0}
     greeting: Hello! I'm your local AI assistant running entirely on-premises.

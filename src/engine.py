@@ -4742,31 +4742,50 @@ class Engine:
                                 has_tts_method=hasattr(local_provider, 'text_to_speech') if local_provider else False,
                             )
                             
-                            # On slow hardware, TTS takes too long. Use Asterisk's built-in
-                            # goodbye sound for immediate playback, then hang up.
+                            # Get farewell mode from config
+                            farewell_mode = "asterisk"  # default
+                            farewell_timeout = 30.0
+                            try:
+                                local_config = self.config.providers.get("local")
+                                if local_config:
+                                    farewell_mode = getattr(local_config, 'farewell_mode', 'asterisk') or 'asterisk'
+                                    farewell_timeout = float(getattr(local_config, 'farewell_timeout_sec', 30.0) or 30.0)
+                            except Exception:
+                                pass
+                            
                             logger.info(
-                                "🔊 Playing Asterisk goodbye sound",
+                                "🎤 Farewell mode",
                                 call_id=call_id,
+                                mode=farewell_mode,
+                                timeout_sec=farewell_timeout if farewell_mode == "tts" else "N/A",
                             )
                             
-                            try:
-                                # Play Asterisk's built-in goodbye sound via ARI
-                                # This bypasses the slow local-ai-server queue
-                                await self.ari_client.play_media(
-                                    session.caller_channel_id,
-                                    "sound:goodbye"
-                                )
-                                # Wait for the sound to play (~2 seconds)
-                                await asyncio.sleep(3.0)
-                                logger.info("✅ Goodbye sound played", call_id=call_id)
-                            except Exception as sound_err:
-                                logger.warning(
-                                    "⚠️ Failed to play goodbye sound",
+                            if farewell_mode == "tts":
+                                # Use TTS farewell - best for fast hardware
+                                # Wait for TTS from LLM response to complete
+                                logger.info(
+                                    "⏳ Waiting for TTS farewell",
                                     call_id=call_id,
-                                    error=str(sound_err),
+                                    timeout_sec=farewell_timeout,
                                 )
-                                # Fall back to short wait
-                                await asyncio.sleep(1.0)
+                                await asyncio.sleep(farewell_timeout)
+                            else:
+                                # Use Asterisk's built-in goodbye sound - reliable for slow hardware
+                                try:
+                                    await self.ari_client.play_media(
+                                        session.caller_channel_id,
+                                        "sound:goodbye"
+                                    )
+                                    # Wait for the sound to play (~2 seconds)
+                                    await asyncio.sleep(3.0)
+                                    logger.info("✅ Goodbye sound played", call_id=call_id)
+                                except Exception as sound_err:
+                                    logger.warning(
+                                        "⚠️ Failed to play goodbye sound",
+                                        call_id=call_id,
+                                        error=str(sound_err),
+                                    )
+                                    await asyncio.sleep(1.0)
                             
                             logger.info("✅ Farewell wait complete", call_id=call_id)
                             

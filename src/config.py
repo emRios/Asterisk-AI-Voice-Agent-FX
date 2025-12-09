@@ -74,7 +74,12 @@ class LocalProviderConfig(BaseModel):
     ws_url: Optional[str] = Field(default="ws://127.0.0.1:8765")
     connect_timeout_sec: float = Field(default=5.0)
     response_timeout_sec: float = Field(default=5.0)
+    # Farewell mode: how to play goodbye message when call ends
+    # "tts" - Use local TTS (best for fast hardware with <5s LLM response)
+    # "asterisk" - Use Asterisk's built-in goodbye sound (reliable for slow hardware)
+    farewell_mode: str = Field(default="asterisk")
     # Farewell TTS timeout - how long to wait for goodbye TTS before hanging up
+    # Only used when farewell_mode="tts"
     # Set based on your hardware speed (see LLM warmup time in logs)
     # Fast hardware: 5-10s, Slow hardware: 30-60s
     farewell_timeout_sec: float = Field(default=30.0)

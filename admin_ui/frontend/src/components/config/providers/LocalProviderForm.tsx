@@ -152,16 +152,31 @@ const LocalProviderForm: React.FC<LocalProviderFormProps> = ({ config, onChange 
                         />
                     </div>
                     <div className="space-y-2">
-                        <label className="text-sm font-medium">Farewell Timeout (s)</label>
+                        <label className="text-sm font-medium">Farewell Mode</label>
+                        <select
+                            className="w-full p-2 rounded border border-input bg-background"
+                            value={config.farewell_mode || 'asterisk'}
+                            onChange={(e) => handleChange('farewell_mode', e.target.value)}
+                        >
+                            <option value="asterisk">Asterisk Sound (Reliable)</option>
+                            <option value="tts">Local TTS (Fast Hardware)</option>
+                        </select>
+                        <p className="text-xs text-muted-foreground">
+                            "asterisk" for slow hardware, "tts" for fast hardware (&lt;5s LLM response).
+                        </p>
+                    </div>
+                    <div className="space-y-2">
+                        <label className="text-sm font-medium">Farewell TTS Timeout (s)</label>
                         <input
                             type="number"
                             step="1"
                             className="w-full p-2 rounded border border-input bg-background"
                             value={config.farewell_timeout_sec || 30.0}
                             onChange={(e) => handleChange('farewell_timeout_sec', parseFloat(e.target.value))}
+                            disabled={config.farewell_mode !== 'tts'}
                         />
                         <p className="text-xs text-muted-foreground">
-                            Time to wait for goodbye TTS. Set based on LLM warmup time (check logs).
+                            Only for TTS mode. Set based on LLM warmup time in logs.
                         </p>
                     </div>
                     <div className="space-y-2">
