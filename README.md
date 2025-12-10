@@ -2,7 +2,7 @@
 
 # Asterisk AI Voice Agent
 
-![Version](https://img.shields.io/badge/version-4.4.2-blue.svg)
+![Version](https://img.shields.io/badge/version-4.4.3-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 ![Python](https://img.shields.io/badge/python-3.10+-blue.svg)
 ![Docker](https://img.shields.io/badge/docker-compose-blue.svg)
@@ -21,7 +21,7 @@ The most powerful, flexible open-source AI voice agent for Asterisk/FreePBX. Fea
 ## 📖 Table of Contents
 
 - [🚀 Quick Start](#-quick-start)
-- [🎉 What's New](#-whats-new-in-v442)
+- [🎉 What's New](#-whats-new-in-v443)
 - [🌟 Why Asterisk AI Voice Agent?](#-why-asterisk-ai-voice-agent)
 - [✨ Features](#-features)
 - [🎥 Demo](#-demo)
@@ -41,25 +41,35 @@ The most powerful, flexible open-source AI voice agent for Asterisk/FreePBX. Fea
 
 Get up and running in **2 minutes** with the Admin UI.
 
-### 1. Start the Admin UI
+### 1. Run Pre-flight Check
 
 ```bash
 # Clone repository
 git clone https://github.com/hkjarral/Asterisk-AI-Voice-Agent.git
 cd Asterisk-AI-Voice-Agent
 
-# Start the Admin UI container
-docker-compose up -d admin-ui
+# Check system compatibility
+./preflight.sh
+
+# Auto-fix issues (optional)
+./preflight.sh --apply-fixes
 ```
 
-### 2. Access the Dashboard
+### 2. Start the Admin UI
+
+```bash
+# Start the Admin UI container
+docker compose up -d admin-ui
+```
+
+### 3. Access the Dashboard
 
 Open **[http://localhost:3003](http://localhost:3003)** in your browser.
 
 - **Login**: `admin` / `admin` (Please change this immediately!)
 - Follow the **Setup Wizard** to configure your providers and pipelines.
 
-### 3. Connect Asterisk
+### 4. Connect Asterisk
 
 The wizard will generate the necessary dialplan configuration for your Asterisk server.
 
@@ -107,36 +117,39 @@ docker compose logs -f ai-engine
 
 ---
 
-## 🎉 What's New in v4.4.2
+## 🎉 What's New in v4.4.3
 
 <details open>
 <summary><b>Latest Updates</b></summary>
 
-### 🎤 New STT Backends
-- **Kroko ASR**: High-quality streaming with 12+ languages, no hallucinations.
-- **Sherpa-ONNX**: Low-latency local streaming ASR.
-- Configure via `LOCAL_STT_BACKEND=kroko|sherpa|vosk`.
+### 🌍 Cross-Platform Support (AAVA-126)
+- **Pre-flight Script** (`preflight.sh`): Comprehensive system compatibility checker.
+  - Detects OS, Docker version, Compose version, architecture.
+  - Auto-fix mode with `--apply-fixes`.
+  - Supports Ubuntu, Debian, CentOS, RHEL, Rocky, Alma, Fedora, FreePBX/Sangoma.
+  - Rootless Docker and SELinux support.
 
-### 🔊 Kokoro TTS
-- High-quality neural text-to-speech with natural prosody.
-- Voices: `af_heart`, `af_bella`, `am_michael`.
-- Configure via `LOCAL_TTS_BACKEND=kokoro|piper`.
+### 🔧 Admin UI Bug Fixes
+- **Models Page**: Fixed installed models display and added delete functionality.
+- **Providers Page**: Fixed local provider form, improved test connection for Local/ElevenLabs.
+- **Dashboard**: Fixed STT/TTS dropdowns, added null guards for metrics.
+- **Model Switching**: Proper container restart with environment reload.
 
-### 🔄 Model Management
-- **Dynamic Backend Switching**: Quick-switch STT/TTS/LLM models from Dashboard without editing config files.
-- **Hot-reload**: Automatic container recreation.
-
-### 🔧 DevOps Improvements
-- Optional build args to exclude unused backends (smaller images).
-- CI image size checks and vulnerability scanning.
-
-### 📚 Documentation
-- New [LOCAL_ONLY_SETUP.md](docs/LOCAL_ONLY_SETUP.md) guide for fully local deployment.
+### 🛠️ Developer Experience
+- **Code Splitting**: Lazy-loaded heavy pages for faster initial load.
+- **ESLint + Prettier**: Linting and formatting configuration.
+- **Frontend README**: Documentation for setup and build.
 
 </details>
 
 <details>
 <summary><b>Previous Versions</b></summary>
+
+#### v4.4.2 - Local AI Enhancements
+- **🎤 New STT Backends**: Kroko ASR, Sherpa-ONNX.
+- **🔊 Kokoro TTS**: High-quality neural TTS.
+- **🔄 Model Management**: Dynamic backend switching from Dashboard.
+- **📚 Documentation**: LOCAL_ONLY_SETUP.md guide.
 
 #### v4.4.1 - Admin UI v1.0
 - **🖥️ Admin UI v1.0**: Modern web interface (http://localhost:3003).

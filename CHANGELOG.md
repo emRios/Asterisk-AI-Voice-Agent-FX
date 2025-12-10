@@ -36,6 +36,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 #### Model Switching
 - **Container Restart**: Uses `docker-compose down/up` instead of Docker SDK to properly reload environment variables
 
+### Added - Cross-Platform Support (AAVA-126) 🌍
+
+#### Pre-flight Script (`preflight.sh`)
+- **Comprehensive System Checks**: OS detection, Docker version, Compose version, architecture verification
+- **Auto-fix Mode**: Run with `--apply-fixes` to automatically resolve fixable issues
+- **Multi-distro Support**: Ubuntu, Debian, CentOS, RHEL, Rocky, Alma, Fedora, Sangoma/FreePBX
+- **Rootless Docker Detection**: Proper handling for rootless Docker installations
+- **SELinux Handling**: Automatic context fix commands for RHEL-family systems
+- **Asterisk Detection**: Finds Asterisk config directory and FreePBX installations
+- **Port Availability Check**: Verifies Admin UI port (3003) is available
+- **Environment Setup**: Creates `.env` from `.env.example` if missing
+
+#### Admin UI Integration
+- **System Status Widget**: Dashboard displays preflight check results
+- **Platform API**: `GET /api/system/platform` returns system compatibility info
+- **Preflight API**: `POST /api/system/preflight` triggers fresh system check
+
 ### Added - Developer Experience 🛠️
 
 - **React.lazy Code Splitting**: Heavy pages (Wizard, RawYaml, Terminal, Logs, Models) now lazy-loaded for faster initial bundle
