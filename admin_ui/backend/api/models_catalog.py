@@ -196,9 +196,9 @@ SHERPA_STT_MODELS = [
      "size_mb": 100, "size_display": "100 MB", "model_path": "sherpa-onnx-streaming-zipformer-en-2023-06-26",
      "download_url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-en-2023-06-26.tar.bz2",
      "recommended": True, "is_archive": True, "archive_type": "tar.bz2"},
-    {"id": "sherpa_zh", "name": "Chinese (Streaming)", "language": "zh-CN", "region": "asia", "backend": "sherpa",
-     "size_mb": 120, "size_display": "120 MB", "model_path": "sherpa-onnx-streaming-zipformer-zh-2023-06-26",
-     "download_url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-zh-2023-06-26.tar.bz2",
+    {"id": "sherpa_zh", "name": "Chinese-English Bilingual (Streaming)", "language": "zh-CN", "region": "asia", "backend": "sherpa",
+     "size_mb": 120, "size_display": "120 MB", "model_path": "sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20",
+     "download_url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20.tar.bz2",
      "is_archive": True, "archive_type": "tar.bz2"},
 ]
 
@@ -223,11 +223,11 @@ PIPER_TTS_MODELS = [
      "model_path": "en_US-lessac-high.onnx",
      "download_url": "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_US/lessac/high/en_US-lessac-high.onnx",
      "config_url": "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_US/lessac/high/en_US-lessac-high.onnx.json"},
-    {"id": "piper_en_gb_amy_medium", "name": "Amy (en-GB, Female)", "language": "en-GB", "region": "europe", "backend": "piper",
+    {"id": "piper_en_gb_alba_medium", "name": "Alba (en-GB, Female)", "language": "en-GB", "region": "europe", "backend": "piper",
      "gender": "female", "quality": "medium", "size_mb": 100, "size_display": "100 MB",
-     "model_path": "en_GB-amy-medium.onnx",
-     "download_url": "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_GB/amy/medium/en_GB-amy-medium.onnx",
-     "config_url": "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_GB/amy/medium/en_GB-amy-medium.onnx.json"},
+     "model_path": "en_GB-alba-medium.onnx",
+     "download_url": "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_GB/alba/medium/en_GB-alba-medium.onnx",
+     "config_url": "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_GB/alba/medium/en_GB-alba-medium.onnx.json"},
     
     # === European Languages ===
     {"id": "piper_de_thorsten_medium", "name": "Thorsten (de-DE, Male)", "language": "de-DE", "region": "europe", "backend": "piper",
@@ -275,11 +275,11 @@ PIPER_TTS_MODELS = [
      "model_path": "uk_UA-lada-x_low.onnx",
      "download_url": "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/uk/uk_UA/lada/x_low/uk_UA-lada-x_low.onnx",
      "config_url": "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/uk/uk_UA/lada/x_low/uk_UA-lada-x_low.onnx.json"},
-    {"id": "piper_pl_mls_medium", "name": "MLS (pl-PL, Multi)", "language": "pl-PL", "region": "europe", "backend": "piper",
-     "gender": "multi", "quality": "medium", "size_mb": 100, "size_display": "100 MB",
-     "model_path": "pl_PL-mls-medium.onnx",
-     "download_url": "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/pl/pl_PL/mls/medium/pl_PL-mls-medium.onnx",
-     "config_url": "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/pl/pl_PL/mls/medium/pl_PL-mls-medium.onnx.json"},
+    {"id": "piper_pl_gosia_medium", "name": "Gosia (pl-PL, Female)", "language": "pl-PL", "region": "europe", "backend": "piper",
+     "gender": "female", "quality": "medium", "size_mb": 100, "size_display": "100 MB",
+     "model_path": "pl_PL-gosia_prosodic-medium.onnx",
+     "download_url": "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/pl/pl_PL/gosia_prosodic/medium/pl_PL-gosia_prosodic-medium.onnx",
+     "config_url": "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/pl/pl_PL/gosia_prosodic/medium/pl_PL-gosia_prosodic-medium.onnx.json"},
     {"id": "piper_cs_jirka_medium", "name": "Jirka (cs-CZ, Male)", "language": "cs-CZ", "region": "europe", "backend": "piper",
      "gender": "male", "quality": "medium", "size_mb": 100, "size_display": "100 MB",
      "model_path": "cs_CZ-jirka-medium.onnx",
@@ -361,11 +361,11 @@ PIPER_TTS_MODELS = [
      "config_url": "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/ar/ar_JO/kareem/medium/ar_JO-kareem-medium.onnx.json"},
     
     # === Africa ===
-    {"id": "piper_sw_lanfrica_medium", "name": "Lanfrica (sw, Male)", "language": "sw", "region": "africa", "backend": "piper",
+    {"id": "piper_sw_lanfrica_medium", "name": "Lanfrica (sw-CD, Male)", "language": "sw", "region": "africa", "backend": "piper",
      "gender": "male", "quality": "medium", "size_mb": 100, "size_display": "100 MB",
-     "model_path": "sw-lanfrica-medium.onnx",
-     "download_url": "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/sw/lanfrica/medium/sw-lanfrica-medium.onnx",
-     "config_url": "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/sw/lanfrica/medium/sw-lanfrica-medium.onnx.json"},
+     "model_path": "sw_CD-lanfrica-medium.onnx",
+     "download_url": "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/sw/sw_CD/lanfrica/medium/sw_CD-lanfrica-medium.onnx",
+     "config_url": "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/sw/sw_CD/lanfrica/medium/sw_CD-lanfrica-medium.onnx.json"},
 ]
 
 KOKORO_TTS_MODELS = [
