@@ -588,6 +588,126 @@ async def get_download_progress():
     }
 
 
+class SingleModelDownload(BaseModel):
+    model_id: str
+    type: str  # stt, tts, llm
+    download_url: str
+    model_path: Optional[str] = None
+
+
+@router.post("/local/download-model")
+async def download_single_model(request: SingleModelDownload):
+    """Download a single model from the catalog."""
+    import threading
+    import urllib.request
+    import zipfile
+    import tarfile
+    import shutil
+    from settings import PROJECT_ROOT
+    
+    global _download_output, _download_status
+    
+    # Reset state
+    _download_output = []
+    _download_status = {"running": True, "completed": False, "error": None}
+    
+    # Determine target directory based on type
+    if request.type == "stt":
+        target_dir = os.path.join(PROJECT_ROOT, "models", "stt")
+    elif request.type == "tts":
+        target_dir = os.path.join(PROJECT_ROOT, "models", "tts")
+    elif request.type == "llm":
+        target_dir = os.path.join(PROJECT_ROOT, "models", "llm")
+    else:
+        return {"status": "error", "message": f"Invalid model type: {request.type}"}
+    
+    # Ensure target directory exists
+    os.makedirs(target_dir, exist_ok=True)
+    
+    def download_worker():
+        global _download_output, _download_status
+        try:
+            _download_output.append(f"📥 Starting download: {request.model_id}")
+            _download_output.append(f"   URL: {request.download_url}")
+            
+            # Determine file extension
+            url_lower = request.download_url.lower()
+            if '.zip' in url_lower:
+                ext = '.zip'
+                is_archive = True
+            elif '.tar.gz' in url_lower or '.tgz' in url_lower:
+                ext = '.tar.gz'
+                is_archive = True
+            elif '.tar' in url_lower:
+                ext = '.tar'
+                is_archive = True
+            else:
+                # Single file (e.g., ONNX model)
+                ext = os.path.splitext(request.download_url)[1] or ''
+                is_archive = False
+            
+            # Download to temp file
+            temp_file = os.path.join(target_dir, f"temp_download{ext}")
+            
+            def progress_hook(block_num, block_size, total_size):
+                if total_size > 0:
+                    percent = min(100, (block_num * block_size * 100) // total_size)
+                    if block_num % 100 == 0:  # Update every 100 blocks
+                        _download_output.append(f"   Progress: {percent}%")
+                        if len(_download_output) > 50:
+                            _download_output.pop(0)
+            
+            urllib.request.urlretrieve(request.download_url, temp_file, progress_hook)
+            _download_output.append("✅ Download complete, extracting...")
+            
+            if is_archive:
+                # Extract archive
+                if ext == '.zip':
+                    with zipfile.ZipFile(temp_file, 'r') as zf:
+                        # Get the root folder name from the archive
+                        names = zf.namelist()
+                        root_folder = names[0].split('/')[0] if names else None
+                        zf.extractall(target_dir)
+                        _download_output.append(f"✅ Extracted to {target_dir}/{root_folder}")
+                elif ext in ['.tar.gz', '.tar', '.tgz']:
+                    with tarfile.open(temp_file, 'r:*') as tf:
+                        names = tf.getnames()
+                        root_folder = names[0].split('/')[0] if names else None
+                        tf.extractall(target_dir)
+                        _download_output.append(f"✅ Extracted to {target_dir}/{root_folder}")
+                
+                # Clean up temp file
+                os.remove(temp_file)
+            else:
+                # Single file - rename to model_path or keep original name
+                if request.model_path:
+                    final_path = os.path.join(target_dir, request.model_path)
+                else:
+                    final_path = os.path.join(target_dir, os.path.basename(request.download_url))
+                
+                if temp_file != final_path:
+                    shutil.move(temp_file, final_path)
+                _download_output.append(f"✅ Saved to {final_path}")
+            
+            _download_status["running"] = False
+            _download_status["completed"] = True
+            _download_output.append(f"🎉 Model {request.model_id} installed successfully!")
+            
+        except Exception as e:
+            _download_status["running"] = False
+            _download_status["error"] = str(e)
+            _download_output.append(f"❌ Error: {str(e)}")
+    
+    # Start download thread
+    thread = threading.Thread(target=download_worker, daemon=True)
+    thread.start()
+    
+    return {
+        "status": "started",
+        "message": f"Downloading {request.model_id}..."
+    }
+
+
 class ModelSelection(BaseModel):
     stt: str
     llm: str
