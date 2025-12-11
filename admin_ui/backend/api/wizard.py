@@ -1538,9 +1538,11 @@ async def save_setup_config(config: SetupConfig):
                 yaml_config = yaml.safe_load(f)
             
             # Update default provider based on provider selection
-            # Update default provider based on provider selection
+            # CRITICAL: Monolithic providers (openai_realtime, deepgram, google_live, elevenlabs_agent)
+            # must have active_pipeline cleared/disabled to avoid pipeline mode taking over
             if config.provider == "openai_realtime":
                 yaml_config["default_provider"] = "openai_realtime"
+                yaml_config["active_pipeline"] = None  # Disable pipeline mode for monolithic provider
                 yaml_config.setdefault("providers", {})
                 yaml_config["providers"].setdefault("openai_realtime", {})["enabled"] = True
                 yaml_config["providers"]["openai_realtime"]["greeting"] = config.greeting
@@ -1550,6 +1552,7 @@ async def save_setup_config(config: SetupConfig):
                 
             elif config.provider == "deepgram":
                 yaml_config["default_provider"] = "deepgram"
+                yaml_config["active_pipeline"] = None  # Disable pipeline mode for monolithic provider
                 yaml_config.setdefault("providers", {})
                 yaml_config["providers"].setdefault("deepgram", {})["enabled"] = True
                 yaml_config["providers"]["deepgram"]["greeting"] = config.greeting
@@ -1586,9 +1589,11 @@ async def save_setup_config(config: SetupConfig):
 
             elif config.provider == "google_live":
                 yaml_config["default_provider"] = "google_live"
+                yaml_config["active_pipeline"] = None  # Disable pipeline mode for monolithic provider
                 yaml_config.setdefault("providers", {})
                 yaml_config["providers"].setdefault("google_live", {})["enabled"] = True
                 yaml_config["providers"]["google_live"]["greeting"] = config.greeting
+                yaml_config["providers"]["google_live"]["api_key"] = "${GOOGLE_API_KEY}"  # Reference env var
                 # CRITICAL: Set correct model for Google Live API
                 # Only models with "API Live" category support bidiGenerateContent:
                 # - gemini-2.5-flash-live (recommended, newer)
@@ -1602,6 +1607,7 @@ async def save_setup_config(config: SetupConfig):
 
             elif config.provider == "elevenlabs_agent":
                 yaml_config["default_provider"] = "elevenlabs_agent"
+                yaml_config["active_pipeline"] = None  # Disable pipeline mode for monolithic provider
                 yaml_config.setdefault("providers", {})
                 yaml_config["providers"].setdefault("elevenlabs_agent", {})["enabled"] = True
                 yaml_config["providers"]["elevenlabs_agent"]["api_key"] = "${ELEVENLABS_API_KEY}"
@@ -1615,6 +1621,7 @@ async def save_setup_config(config: SetupConfig):
             elif config.provider == "local":
                 # Local Full: 100% on-premises using Local AI Server as full agent
                 yaml_config["default_provider"] = "local"
+                yaml_config["active_pipeline"] = None  # Disable pipeline mode for monolithic provider
                 yaml_config.setdefault("providers", {})
                 yaml_config["providers"].setdefault("local", {})["enabled"] = True
                 yaml_config["providers"]["local"]["greeting"] = config.greeting
