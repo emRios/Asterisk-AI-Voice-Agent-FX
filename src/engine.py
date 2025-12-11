@@ -190,6 +190,7 @@ class Engine:
 
     def __init__(self, config: AppConfig):
         self.config = config
+        self._start_time = time.time()  # Track engine start time for uptime
         base_url = f"http://{config.asterisk.host}:{config.asterisk.port}/ari"
         self.ari_client = ARIClient(
             username=config.asterisk.username,
@@ -453,19 +454,8 @@ class Engine:
                       packet_len=len(packet), 
                       addr=addr)
         
-        # Disable this bypass to prevent STT fragmentation
-        # All audio should go through RTPServer -> _on_rtp_audio -> _process_rtp_audio_with_vad
+        # All audio goes through RTPServer -> _on_rtp_audio -> _process_rtp_audio_with_vad
         return
-        
-        # LEGACY CODE (disabled):
-        # if self.active_calls:
-        #     channel_id = list(self.active_calls.keys())[0]
-        #     call_data = self.active_calls[channel_id]
-        #     provider = call_data.get("provider")
-        #     if provider:
-        #         # The first 12 bytes of an RTP packet are the header. The rest is payload.
-        #         audio_payload = packet[12:]
-        #         await provider.send_audio(audio_payload)
 
     async def _on_ari_event(self, event: Dict[str, Any]):
         """Default event handler for unhandled ARI events."""
@@ -676,9 +666,47 @@ class Engine:
             )
             return (int(fallback_port), int(fallback_port))
 
-    async def stop(self):
-        """Disconnect from ARI and stop the engine."""
-        # Clean up all sessions from SessionStore
+    async def stop(self, graceful_timeout: float = 30.0):
+        """Disconnect from ARI and stop the engine.
+        
+        Args:
+            graceful_timeout: Maximum seconds to wait for active calls to complete.
+                             Set to 0 for immediate shutdown.
+        """
+        sessions = await self.session_store.get_all_sessions()
+        active_count = len(sessions)
+        
+        if active_count > 0 and graceful_timeout > 0:
+            logger.info(
+                "[SHUTDOWN] Graceful shutdown initiated - waiting for active calls",
+                active_calls=active_count,
+                timeout_seconds=graceful_timeout,
+            )
+            
+            # Wait for calls to complete (check every 1 second)
+            start_time = time.time()
+            while time.time() - start_time < graceful_timeout:
+                sessions = await self.session_store.get_all_sessions()
+                if len(sessions) == 0:
+                    logger.info("[SHUTDOWN] All calls completed - proceeding with shutdown")
+                    break
+                remaining = graceful_timeout - (time.time() - start_time)
+                logger.debug(
+                    "[SHUTDOWN] Waiting for calls to complete",
+                    active_calls=len(sessions),
+                    remaining_seconds=int(remaining),
+                )
+                await asyncio.sleep(1.0)
+            else:
+                # Timeout reached - force cleanup
+                sessions = await self.session_store.get_all_sessions()
+                if len(sessions) > 0:
+                    logger.warning(
+                        "[SHUTDOWN] Timeout reached - forcing cleanup of remaining calls",
+                        remaining_calls=len(sessions),
+                    )
+        
+        # Clean up all remaining sessions
         sessions = await self.session_store.get_all_sessions()
         for session in sessions:
             await self._cleanup_call(session.call_id)
@@ -7401,12 +7429,21 @@ class Engine:
             audiosocket_listening = self.audio_socket_server is not None if self.config.audio_transport == 'audiosocket' else True
             is_ready = ari_connected and audiosocket_listening and default_ready
 
+            # Get conversation coordinator metrics
+            conversation_summary = await self.conversation_coordinator.get_summary()
+            pending_timers = self.conversation_coordinator.get_pending_timer_count()
+            active_sessions = await self.session_store.get_all_sessions()
+            uptime_seconds = int(time.time() - self._start_time)
+
             payload = {
                 "status": "healthy" if is_ready else "degraded",
                 "ari_connected": ari_connected,
                 "rtp_server_running": bool(getattr(self, 'rtp_server', None)),
                 "audio_transport": self.config.audio_transport,
-                "active_calls": len(await self.session_store.get_all_sessions()),
+                "active_calls": len(active_sessions),
+                "active_sessions": len(active_sessions),
+                "pending_timers": pending_timers,
+                "uptime_seconds": uptime_seconds,
                 "active_playbacks": 0,
                 "providers": providers_info,
                 "pipelines": pipelines_info,
@@ -7419,9 +7456,10 @@ class Engine:
                 },
                 "audiosocket_listening": audiosocket_listening,
                 "conversation": {
-                    "gating_active": 0,
-                    "capture_disabled": 0,
-                    "barge_in_total": 0,
+                    "gating_active": conversation_summary.get("gating_active", 0),
+                    "capture_disabled": conversation_summary.get("capture_disabled", 0),
+                    "barge_in_total": conversation_summary.get("barge_in_total", 0),
+                    "pending_timers": pending_timers,
                 },
                 "streaming": {},
                 "streaming_details": [],

@@ -11,6 +11,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Additional provider integrations
 - Enhanced monitoring features
 
+## [4.5.0] - 2025-12-13
+
+### Added - Stability Improvements 🛡️
+
+#### Enhanced Timer Logging (L2)
+- **Structured Timer Logs**: All timer operations now log with `[TIMER]` prefix for easy filtering
+- **Timer Lifecycle Tracking**: Logs show scheduled, executed, and cancelled timer events
+- **Pending Timer Count**: `get_pending_timer_count()` method exposes timer queue depth
+
+#### Health Check Improvements (L4)
+- **Uptime Tracking**: `/health` endpoint now returns `uptime_seconds`
+- **Pending Timers**: Health response includes `pending_timers` count
+- **Active Sessions**: Added `active_sessions` field (alias for `active_calls`)
+- **Real Conversation Metrics**: `conversation` object now pulls live data from ConversationCoordinator
+
+#### Graceful Shutdown Handler (M4)
+- **SIGTERM Handling**: `docker stop` now waits up to 30 seconds for active calls to complete
+- **Shutdown Logging**: `[SHUTDOWN]` prefixed logs track graceful shutdown progress
+- **Configurable Timeout**: `engine.stop(graceful_timeout=30)` parameter for custom drain time
+
+### Changed
+
+#### Code Cleanup (H1)
+- **Removed Legacy Code**: Deleted commented `active_calls` legacy code block from engine.py
+- **SessionStore is Single Source**: All session state now uses SessionStore exclusively
+
 ## [4.4.3] - 2025-12-10
 
 ### Fixed - Admin UI Bug Fixes 🔧
