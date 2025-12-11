@@ -1546,6 +1546,23 @@ async def save_setup_config(config: SetupConfig):
                 yaml_config.setdefault("providers", {})
                 yaml_config["providers"].setdefault("openai_realtime", {})["enabled"] = True
                 yaml_config["providers"]["openai_realtime"]["greeting"] = config.greeting
+                # Set essential config for OpenAI Realtime
+                yaml_config["providers"]["openai_realtime"]["model"] = "gpt-4o-realtime-preview-2024-12-17"
+                yaml_config["providers"]["openai_realtime"]["voice"] = "alloy"
+                yaml_config["providers"]["openai_realtime"]["instructions"] = f"You are {config.ai_name}, a {config.ai_role}. Be helpful and concise. Always speak your responses out loud."
+                # Audio format config for telephony
+                yaml_config["providers"]["openai_realtime"]["input_encoding"] = "ulaw"
+                yaml_config["providers"]["openai_realtime"]["input_sample_rate_hz"] = 8000
+                yaml_config["providers"]["openai_realtime"]["target_encoding"] = "mulaw"
+                yaml_config["providers"]["openai_realtime"]["target_sample_rate_hz"] = 8000
+                # Turn detection for natural conversation
+                yaml_config["providers"]["openai_realtime"]["turn_detection"] = {
+                    "type": "server_vad",
+                    "threshold": 0.5,
+                    "silence_duration_ms": 1000,
+                    "prefix_padding_ms": 300,
+                    "create_response": True
+                }
                 yaml_config["providers"].setdefault("deepgram", {})["enabled"] = False
                 yaml_config["providers"].setdefault("local", {})["enabled"] = False
                 yaml_config["providers"].setdefault("google_live", {})["enabled"] = False
@@ -1556,21 +1573,58 @@ async def save_setup_config(config: SetupConfig):
                 yaml_config.setdefault("providers", {})
                 yaml_config["providers"].setdefault("deepgram", {})["enabled"] = True
                 yaml_config["providers"]["deepgram"]["greeting"] = config.greeting
+                yaml_config["providers"]["deepgram"]["instructions"] = f"You are {config.ai_name}, a {config.ai_role}. Be helpful and concise."
+                # Deepgram Voice Agent config
+                yaml_config["providers"]["deepgram"]["model"] = "nova-2-general"
+                yaml_config["providers"]["deepgram"]["tts_model"] = "aura-asteria-en"
+                # Audio format for telephony
+                yaml_config["providers"]["deepgram"]["input_encoding"] = "mulaw"
+                yaml_config["providers"]["deepgram"]["input_sample_rate_hz"] = 8000
+                yaml_config["providers"]["deepgram"]["output_encoding"] = "mulaw"
+                yaml_config["providers"]["deepgram"]["output_sample_rate_hz"] = 8000
                 yaml_config["providers"].setdefault("openai_realtime", {})["enabled"] = False
                 yaml_config["providers"].setdefault("local", {})["enabled"] = False
                 yaml_config["providers"].setdefault("google_live", {})["enabled"] = False
                 
             elif config.provider == "local_hybrid":
-                # C4 Fix: local_hybrid is a pipeline, not a provider
+                # local_hybrid is a PIPELINE (Local STT + OpenAI LLM + Local TTS)
                 yaml_config["active_pipeline"] = "local_hybrid"
-                yaml_config["default_provider"] = "local"
+                yaml_config["default_provider"] = "local"  # Fallback provider
                 yaml_config.setdefault("providers", {})
+                
+                # Configure local provider for STT and TTS
                 yaml_config["providers"].setdefault("local", {})["enabled"] = True
-                # Ensure OpenAI is enabled for hybrid pipeline (LLM)
-                yaml_config["providers"].setdefault("openai", {})["enabled"] = True
+                yaml_config["providers"]["local"]["type"] = "full"
+                yaml_config["providers"]["local"]["capabilities"] = ["stt", "llm", "tts"]
+                yaml_config["providers"]["local"]["base_url"] = "${LOCAL_WS_URL:-ws://127.0.0.1:8765}"
+                yaml_config["providers"]["local"]["connect_timeout_sec"] = 2.0
+                yaml_config["providers"]["local"]["response_timeout_sec"] = 10.0
+                yaml_config["providers"]["local"]["chunk_ms"] = 320
+                
+                # Configure local_stt and local_tts for pipeline
+                yaml_config["providers"].setdefault("local_stt", {})["enabled"] = True
+                yaml_config["providers"]["local_stt"]["ws_url"] = "${LOCAL_WS_URL:-ws://127.0.0.1:8765}"
+                yaml_config["providers"]["local_stt"]["stt_backend"] = "vosk"
+                
+                yaml_config["providers"].setdefault("local_tts", {})["enabled"] = True
+                yaml_config["providers"]["local_tts"]["ws_url"] = "${LOCAL_WS_URL:-ws://127.0.0.1:8765}"
+                
+                # Configure OpenAI LLM for pipeline
+                yaml_config["providers"].setdefault("openai_llm", {})["enabled"] = True
+                yaml_config["providers"]["openai_llm"]["chat_base_url"] = "https://api.openai.com/v1"
+                yaml_config["providers"]["openai_llm"]["chat_model"] = "gpt-4o-mini"
+                
+                # Ensure monolithic providers are disabled
                 yaml_config["providers"].setdefault("openai_realtime", {})["enabled"] = False
                 yaml_config["providers"].setdefault("deepgram", {})["enabled"] = False
                 yaml_config["providers"].setdefault("google_live", {})["enabled"] = False
+                
+                # Define the pipeline
+                yaml_config.setdefault("pipelines", {})["local_hybrid"] = {
+                    "stt": "local_stt",
+                    "llm": "openai_llm",
+                    "tts": "local_tts"
+                }
                 
                 # Start local-ai-server container
                 try:
@@ -1594,13 +1648,20 @@ async def save_setup_config(config: SetupConfig):
                 yaml_config["providers"].setdefault("google_live", {})["enabled"] = True
                 yaml_config["providers"]["google_live"]["greeting"] = config.greeting
                 yaml_config["providers"]["google_live"]["api_key"] = "${GOOGLE_API_KEY}"  # Reference env var
+                yaml_config["providers"]["google_live"]["instructions"] = f"You are {config.ai_name}, a {config.ai_role}. Be helpful and concise."
                 # CRITICAL: Set correct model for Google Live API
-                # Only models with "API Live" category support bidiGenerateContent:
-                # - gemini-2.5-flash-live (recommended, newer)
-                # - gemini-2.5-flash-native-audio-dialog
-                # - gemini-2.0-flash-live
-                # gemini-1.5-pro does NOT support Live API
+                # Only models with "API Live" category support bidiGenerateContent
                 yaml_config["providers"]["google_live"]["llm_model"] = "gemini-2.0-flash-live"
+                # Audio format for telephony (matches server config)
+                yaml_config["providers"]["google_live"]["input_encoding"] = "ulaw"
+                yaml_config["providers"]["google_live"]["input_sample_rate_hz"] = 8000
+                yaml_config["providers"]["google_live"]["provider_input_encoding"] = "linear16"
+                yaml_config["providers"]["google_live"]["provider_input_sample_rate_hz"] = 16000
+                yaml_config["providers"]["google_live"]["target_encoding"] = "ulaw"
+                yaml_config["providers"]["google_live"]["target_sample_rate_hz"] = 8000
+                yaml_config["providers"]["google_live"]["response_modalities"] = "audio"
+                yaml_config["providers"]["google_live"]["type"] = "full"
+                yaml_config["providers"]["google_live"]["capabilities"] = ["stt", "llm", "tts"]
                 yaml_config["providers"].setdefault("openai_realtime", {})["enabled"] = False
                 yaml_config["providers"].setdefault("deepgram", {})["enabled"] = False
                 yaml_config["providers"].setdefault("local", {})["enabled"] = False
@@ -1612,7 +1673,14 @@ async def save_setup_config(config: SetupConfig):
                 yaml_config["providers"].setdefault("elevenlabs_agent", {})["enabled"] = True
                 yaml_config["providers"]["elevenlabs_agent"]["api_key"] = "${ELEVENLABS_API_KEY}"
                 yaml_config["providers"]["elevenlabs_agent"]["agent_id"] = "${ELEVENLABS_AGENT_ID}"
-                # ElevenLabs greeting is configured in the agent dashboard, not here
+                # ElevenLabs greeting/instructions are configured in the ElevenLabs dashboard
+                yaml_config["providers"]["elevenlabs_agent"]["type"] = "full"
+                yaml_config["providers"]["elevenlabs_agent"]["capabilities"] = ["stt", "llm", "tts"]
+                # Audio format for telephony
+                yaml_config["providers"]["elevenlabs_agent"]["input_encoding"] = "ulaw"
+                yaml_config["providers"]["elevenlabs_agent"]["input_sample_rate_hz"] = 8000
+                yaml_config["providers"]["elevenlabs_agent"]["target_encoding"] = "ulaw"
+                yaml_config["providers"]["elevenlabs_agent"]["target_sample_rate_hz"] = 8000
                 yaml_config["providers"].setdefault("openai_realtime", {})["enabled"] = False
                 yaml_config["providers"].setdefault("deepgram", {})["enabled"] = False
                 yaml_config["providers"].setdefault("google_live", {})["enabled"] = False
@@ -1625,8 +1693,14 @@ async def save_setup_config(config: SetupConfig):
                 yaml_config.setdefault("providers", {})
                 yaml_config["providers"].setdefault("local", {})["enabled"] = True
                 yaml_config["providers"]["local"]["greeting"] = config.greeting
+                yaml_config["providers"]["local"]["instructions"] = f"You are {config.ai_name}, a {config.ai_role}. Be helpful and concise."
                 yaml_config["providers"]["local"]["type"] = "full"
                 yaml_config["providers"]["local"]["capabilities"] = ["stt", "llm", "tts"]
+                yaml_config["providers"]["local"]["base_url"] = "${LOCAL_WS_URL:-ws://127.0.0.1:8765}"
+                # Timeouts for local server
+                yaml_config["providers"]["local"]["connect_timeout_sec"] = 2.0
+                yaml_config["providers"]["local"]["response_timeout_sec"] = 10.0
+                yaml_config["providers"]["local"]["chunk_ms"] = 320
                 yaml_config["providers"].setdefault("openai_realtime", {})["enabled"] = False
                 yaml_config["providers"].setdefault("deepgram", {})["enabled"] = False
                 yaml_config["providers"].setdefault("google_live", {})["enabled"] = False
