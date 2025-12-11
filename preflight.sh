@@ -380,6 +380,100 @@ check_asterisk() {
 }
 
 # ============================================================================
+# Asterisk UID/GID Detection
+# ============================================================================
+check_asterisk_uid_gid() {
+    # Skip if Asterisk not found on host
+    if ! command -v asterisk &>/dev/null && [ ! -f /etc/asterisk/asterisk.conf ]; then
+        log_info "Asterisk not on host - skipping UID/GID detection"
+        return 0
+    fi
+    
+    local AST_UID=""
+    local AST_GID=""
+    
+    # Try to get asterisk user UID/GID
+    if id asterisk &>/dev/null; then
+        AST_UID=$(id -u asterisk 2>/dev/null)
+        AST_GID=$(id -g asterisk 2>/dev/null)
+    elif getent passwd asterisk &>/dev/null; then
+        AST_UID=$(getent passwd asterisk | cut -d: -f3)
+        AST_GID=$(getent passwd asterisk | cut -d: -f4)
+    fi
+    
+    if [ -z "$AST_UID" ] || [ -z "$AST_GID" ]; then
+        log_warn "Could not detect Asterisk UID/GID - using defaults (995:995)"
+        return 0
+    fi
+    
+    log_ok "Asterisk UID:GID = $AST_UID:$AST_GID"
+    
+    # Check if .env exists and update if needed
+    if [ -f "$SCRIPT_DIR/.env" ]; then
+        local NEEDS_UPDATE=false
+        
+        # Check if ASTERISK_UID is set correctly
+        if grep -q "^ASTERISK_UID=" "$SCRIPT_DIR/.env"; then
+            local CURRENT_UID=$(grep "^ASTERISK_UID=" "$SCRIPT_DIR/.env" | cut -d= -f2)
+            if [ "$CURRENT_UID" != "$AST_UID" ]; then
+                log_warn "ASTERISK_UID in .env ($CURRENT_UID) doesn't match system ($AST_UID)"
+                NEEDS_UPDATE=true
+            fi
+        else
+            # Not set, need to add if not default
+            if [ "$AST_UID" != "995" ]; then
+                NEEDS_UPDATE=true
+            fi
+        fi
+        
+        # Check if ASTERISK_GID is set correctly
+        if grep -q "^ASTERISK_GID=" "$SCRIPT_DIR/.env"; then
+            local CURRENT_GID=$(grep "^ASTERISK_GID=" "$SCRIPT_DIR/.env" | cut -d= -f2)
+            if [ "$CURRENT_GID" != "$AST_GID" ]; then
+                log_warn "ASTERISK_GID in .env ($CURRENT_GID) doesn't match system ($AST_GID)"
+                NEEDS_UPDATE=true
+            fi
+        else
+            # Not set, need to add if not default
+            if [ "$AST_GID" != "995" ]; then
+                NEEDS_UPDATE=true
+            fi
+        fi
+        
+        # Update .env if needed
+        if [ "$NEEDS_UPDATE" = true ]; then
+            if [ "$APPLY_FIXES" = true ]; then
+                # Remove old entries if they exist
+                sed -i.bak '/^ASTERISK_UID=/d' "$SCRIPT_DIR/.env" 2>/dev/null || \
+                    sed -i '' '/^ASTERISK_UID=/d' "$SCRIPT_DIR/.env"
+                sed -i.bak '/^ASTERISK_GID=/d' "$SCRIPT_DIR/.env" 2>/dev/null || \
+                    sed -i '' '/^ASTERISK_GID=/d' "$SCRIPT_DIR/.env"
+                
+                # Add correct values
+                echo "" >> "$SCRIPT_DIR/.env"
+                echo "# Asterisk user UID/GID for file permissions (auto-detected by preflight.sh)" >> "$SCRIPT_DIR/.env"
+                echo "ASTERISK_UID=$AST_UID" >> "$SCRIPT_DIR/.env"
+                echo "ASTERISK_GID=$AST_GID" >> "$SCRIPT_DIR/.env"
+                
+                # Clean up backup file
+                rm -f "$SCRIPT_DIR/.env.bak"
+                
+                log_ok "Updated .env with ASTERISK_UID=$AST_UID ASTERISK_GID=$AST_GID"
+            else
+                log_warn "ASTERISK_UID/GID need to be updated in .env"
+                FIX_CMDS+=("# Update .env with: ASTERISK_UID=$AST_UID ASTERISK_GID=$AST_GID")
+            fi
+        fi
+    else
+        # No .env file yet - will be created by check_env, add to FIX_CMDS
+        if [ "$AST_UID" != "995" ] || [ "$AST_GID" != "995" ]; then
+            FIX_CMDS+=("echo 'ASTERISK_UID=$AST_UID' >> $SCRIPT_DIR/.env")
+            FIX_CMDS+=("echo 'ASTERISK_GID=$AST_GID' >> $SCRIPT_DIR/.env")
+        fi
+    fi
+}
+
+# ============================================================================
 # Port Check
 # ============================================================================
 check_ports() {
@@ -525,6 +619,7 @@ main() {
     check_selinux
     check_env
     check_asterisk
+    check_asterisk_uid_gid
     check_ports
     
     # Apply fixes if requested

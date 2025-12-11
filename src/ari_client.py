@@ -408,10 +408,10 @@ class ARIClient:
             logger.debug("Ulaw audio file written (generated as ulaw at 8000 Hz)", path=container_path)
             
             # Change ownership to asterisk user so Asterisk can read the file
-            # Use hardcoded UID/GID since pwd.getpwnam doesn't work in container
+            # Configurable via ASTERISK_UID/GID env vars (default 995:995)
             try:
-                asterisk_uid = 995  # asterisk user UID
-                asterisk_gid = 995  # asterisk group GID
+                asterisk_uid = int(os.getenv("ASTERISK_UID", "995"))
+                asterisk_gid = int(os.getenv("ASTERISK_GID", "995"))
                 os.chown(container_path, asterisk_uid, asterisk_gid)
                 logger.debug("Changed file ownership to asterisk user", path=container_path, uid=asterisk_uid, gid=asterisk_gid)
             except Exception as e:

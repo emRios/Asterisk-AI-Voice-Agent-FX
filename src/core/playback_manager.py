@@ -54,7 +54,9 @@ class PlaybackManager:
             except Exception:
                 pass
             try:
-                os.chown(media_dir, 995, 995)
+                ast_uid = int(os.getenv("ASTERISK_UID", "995"))
+                ast_gid = int(os.getenv("ASTERISK_GID", "995"))
+                os.chown(media_dir, ast_uid, ast_gid)
             except Exception:
                 pass
         except (PermissionError, OSError):
@@ -248,10 +250,12 @@ class PlaybackManager:
             with open(file_path, 'wb') as f:
                 f.write(audio_bytes)
             
-            # Set file ownership for Asterisk readability (UID:GID 995:995)
+            # Set file ownership for Asterisk readability (configurable via ASTERISK_UID/GID)
             chowned = False
             try:
-                os.chown(file_path, 995, 995)
+                ast_uid = int(os.getenv("ASTERISK_UID", "995"))
+                ast_gid = int(os.getenv("ASTERISK_GID", "995"))
+                os.chown(file_path, ast_uid, ast_gid)
                 chowned = True
                 logger.debug("Audio file ownership set for Asterisk",
                             file_path=file_path)
