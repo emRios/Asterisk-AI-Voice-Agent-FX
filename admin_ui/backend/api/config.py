@@ -379,6 +379,30 @@ async def test_provider_connection(request: ProviderTestRequest):
             except Exception as e:
                 # If local-ai-server is on host network, ensure we use host.docker.internal or host networking properties
                 return {"success": False, "message": f"Cannot reach local AI server at {ws_url}. Error: {str(e)}"}
+        
+        # ============================================================
+        # OLLAMA - Self-hosted LLM
+        # ============================================================
+        if 'ollama' in provider_name or provider_config.get('type') == 'ollama':
+            import aiohttp
+            base_url = provider_config.get('base_url', 'http://localhost:11434').rstrip('/')
+            try:
+                async with aiohttp.ClientSession() as session:
+                    url = f"{base_url}/api/tags"
+                    timeout = aiohttp.ClientTimeout(total=10)
+                    async with session.get(url, timeout=timeout) as response:
+                        if response.status == 200:
+                            data = await response.json()
+                            models = data.get("models", [])
+                            return {"success": True, "message": f"Connected to Ollama! Found {len(models)} models."}
+                        else:
+                            return {"success": False, "message": f"Ollama returned status {response.status}"}
+            except aiohttp.ClientConnectorError:
+                return {"success": False, "message": f"Cannot connect to Ollama at {base_url}. Ensure Ollama is running and accessible."}
+            except asyncio.TimeoutError:
+                return {"success": False, "message": "Connection timeout - is Ollama running?"}
+            except Exception as e:
+                return {"success": False, "message": f"Ollama connection failed: {str(e)}"}
                 
         elif 'model' in provider_config or 'stt_model' in provider_config or 'chat_model' in provider_config or 'tts_model' in provider_config:
             # Check if it's Deepgram or OpenAI standard

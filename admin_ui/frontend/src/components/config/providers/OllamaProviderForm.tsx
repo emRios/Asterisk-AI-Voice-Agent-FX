@@ -11,7 +11,7 @@ interface OllamaModel {
 
 interface OllamaProviderFormProps {
   config: any;
-  onChange: (key: string, value: any) => void;
+  onChange: (updates: Record<string, any>) => void;
 }
 
 const OllamaProviderForm: React.FC<OllamaProviderFormProps> = ({ config, onChange }) => {
@@ -79,7 +79,7 @@ const OllamaProviderForm: React.FC<OllamaProviderFormProps> = ({ config, onChang
         <input
           type="text"
           value={config.base_url || 'http://localhost:11434'}
-          onChange={(e) => onChange('base_url', e.target.value)}
+          onChange={(e) => onChange({ base_url: e.target.value })}
           placeholder="http://192.168.1.100:11434"
           className="w-full px-3 py-2 bg-background border rounded-md focus:ring-2 focus:ring-primary"
         />
@@ -125,7 +125,7 @@ const OllamaProviderForm: React.FC<OllamaProviderFormProps> = ({ config, onChang
           <input
             type="text"
             value={config.model || 'llama3.2'}
-            onChange={(e) => onChange('model', e.target.value)}
+            onChange={(e) => onChange({ model: e.target.value })}
             placeholder="llama3.2"
             className="flex-1 px-3 py-2 bg-background border rounded-md focus:ring-2 focus:ring-primary"
           />
@@ -133,7 +133,7 @@ const OllamaProviderForm: React.FC<OllamaProviderFormProps> = ({ config, onChang
             <select
               onChange={(e) => {
                 if (e.target.value) {
-                  onChange('model', e.target.value);
+                  onChange({ model: e.target.value });
                 }
               }}
               className="px-3 py-2 bg-background border rounded-md focus:ring-2 focus:ring-primary"
@@ -162,7 +162,7 @@ const OllamaProviderForm: React.FC<OllamaProviderFormProps> = ({ config, onChang
             {availableModels.map((model) => (
               <button
                 key={model.name}
-                onClick={() => onChange('model', model.name)}
+                onClick={() => onChange({ model: model.name })}
                 className={`flex items-center justify-between p-2 text-left text-sm border rounded-md hover:bg-muted/50 transition-colors ${
                   config.model === model.name ? 'border-primary bg-primary/10' : 'border-border'
                 }`}
@@ -194,7 +194,7 @@ const OllamaProviderForm: React.FC<OllamaProviderFormProps> = ({ config, onChang
           min="0"
           max="2"
           value={config.temperature ?? 0.7}
-          onChange={(e) => onChange('temperature', parseFloat(e.target.value))}
+          onChange={(e) => onChange({ temperature: parseFloat(e.target.value) })}
           className="w-32 px-3 py-2 bg-background border rounded-md focus:ring-2 focus:ring-primary"
         />
         <p className="text-xs text-muted-foreground mt-1">
@@ -210,7 +210,7 @@ const OllamaProviderForm: React.FC<OllamaProviderFormProps> = ({ config, onChang
           min="50"
           max="2000"
           value={config.max_tokens ?? 200}
-          onChange={(e) => onChange('max_tokens', parseInt(e.target.value))}
+          onChange={(e) => onChange({ max_tokens: parseInt(e.target.value) })}
           className="w-32 px-3 py-2 bg-background border rounded-md focus:ring-2 focus:ring-primary"
         />
         <p className="text-xs text-muted-foreground mt-1">
@@ -226,7 +226,7 @@ const OllamaProviderForm: React.FC<OllamaProviderFormProps> = ({ config, onChang
           min="10"
           max="300"
           value={config.timeout_sec ?? 60}
-          onChange={(e) => onChange('timeout_sec', parseInt(e.target.value))}
+          onChange={(e) => onChange({ timeout_sec: parseInt(e.target.value) })}
           className="w-32 px-3 py-2 bg-background border rounded-md focus:ring-2 focus:ring-primary"
         />
         <p className="text-xs text-muted-foreground mt-1">
@@ -240,7 +240,7 @@ const OllamaProviderForm: React.FC<OllamaProviderFormProps> = ({ config, onChang
           type="checkbox"
           id="tools_enabled"
           checked={config.tools_enabled ?? true}
-          onChange={(e) => onChange('tools_enabled', e.target.checked)}
+          onChange={(e) => onChange({ tools_enabled: e.target.checked })}
           className="w-4 h-4 rounded border-gray-300 text-primary focus:ring-primary"
         />
         <label htmlFor="tools_enabled" className="text-sm font-medium">
