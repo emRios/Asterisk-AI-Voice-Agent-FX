@@ -346,7 +346,14 @@ class OpenAILLMAdapter(LLMComponent):
             await self._session.close()
         self._session = None
 
-    # validate_connectivity removed - uses smart generic base class implementation
+    async def validate_connectivity(self, options: Dict[str, Any]) -> Dict[str, Any]:
+        """Override to merge provider defaults with options for validation."""
+        merged = {
+            "chat_base_url": self._provider_defaults.chat_base_url,
+            "api_key": self._provider_defaults.api_key,
+        }
+        merged.update(options)
+        return await super().validate_connectivity(merged)
 
     async def generate(
         self,
