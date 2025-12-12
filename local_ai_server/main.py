@@ -775,6 +775,10 @@ class LocalAIServer:
         self.llm_temperature = float(os.getenv("LOCAL_LLM_TEMPERATURE", "0.2"))
         self.llm_top_p = float(os.getenv("LOCAL_LLM_TOP_P", "0.85"))
         self.llm_repeat_penalty = float(os.getenv("LOCAL_LLM_REPEAT_PENALTY", "1.05"))
+        
+        # GPU acceleration: 0 = CPU only, -1 = auto-detect, N = specific layer count
+        # Auto-detect will use GPU if CUDA is available, otherwise CPU
+        self.llm_gpu_layers = int(os.getenv("LOCAL_LLM_GPU_LAYERS", "0"))
         self.llm_system_prompt = os.getenv(
             "LOCAL_LLM_SYSTEM_PROMPT",
             "You are a helpful AI voice assistant. Respond naturally and conversationally to the caller."
@@ -923,31 +927,65 @@ class LocalAIServer:
             logging.error("❌ Failed to initialize Sherpa STT backend: %s", exc)
             raise
 
+    def _detect_gpu_layers(self) -> int:
+        """Detect GPU availability and return appropriate layer count.
+        
+        Returns:
+            0 if no GPU or GPU disabled
+            Number of layers to offload if GPU available
+        """
+        if self.llm_gpu_layers == 0:
+            return 0  # Explicitly disabled
+        
+        if self.llm_gpu_layers > 0:
+            return self.llm_gpu_layers  # User specified exact count
+        
+        # Auto-detect (-1): check if CUDA is available
+        try:
+            import torch
+            if torch.cuda.is_available():
+                gpu_name = torch.cuda.get_device_name(0)
+                gpu_mem = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+                logging.info("🎮 GPU detected: %s (%.1f GB)", gpu_name, gpu_mem)
+                # Use 35 layers for most models (good balance)
+                return 35
+        except ImportError:
+            logging.debug("PyTorch not available for GPU detection")
+        except Exception as e:
+            logging.debug("GPU detection failed: %s", e)
+        
+        return 0  # Default to CPU
+
     async def _load_llm_model(self):
         """Load LLM model with optimized parameters for faster inference"""
         try:
             if not os.path.exists(self.llm_model_path):
                 raise FileNotFoundError(f"LLM model not found at {self.llm_model_path}")
 
+            # Determine GPU layers
+            gpu_layers = self._detect_gpu_layers()
+            gpu_status = f"GPU ({gpu_layers} layers)" if gpu_layers > 0 else "CPU only"
+
             self.llm_model = Llama(
                 model_path=self.llm_model_path,
                 n_ctx=self.llm_context,
                 n_threads=self.llm_threads,
                 n_batch=self.llm_batch,
-                n_gpu_layers=0,
+                n_gpu_layers=gpu_layers,
                 verbose=False,
                 use_mmap=True,
                 use_mlock=self.llm_use_mlock,
                 add_bos=False,
             )
-            logging.info("✅ LLM model loaded: %s", self.llm_model_path)
+            logging.info("✅ LLM model loaded: %s (%s)", self.llm_model_path, gpu_status)
             logging.info(
-                "📊 LLM Config: ctx=%s, threads=%s, batch=%s, max_tokens=%s, temp=%s",
+                "📊 LLM Config: ctx=%s, threads=%s, batch=%s, max_tokens=%s, temp=%s, gpu_layers=%s",
                 self.llm_context,
                 self.llm_threads,
                 self.llm_batch,
                 self.llm_max_tokens,
                 self.llm_temperature,
+                gpu_layers,
             )
         except Exception as exc:
             logging.error("❌ Failed to load LLM model: %s", exc)
@@ -1041,6 +1079,15 @@ class LocalAIServer:
         try:
             if not os.path.exists(self.tts_model_path):
                 raise FileNotFoundError(f"TTS model not found at {self.tts_model_path}")
+            
+            # Piper requires both .onnx model AND .onnx.json config file
+            config_path = self.tts_model_path + ".json"
+            if not os.path.exists(config_path):
+                raise FileNotFoundError(
+                    f"Piper TTS config file not found at {config_path}. "
+                    f"Piper requires both the .onnx model AND the .onnx.json config file. "
+                    f"Please re-download the model from the Models page to get both files."
+                )
 
             self.tts_model = PiperVoice.load(self.tts_model_path)
             logging.info("✅ TTS backend: Piper loaded from %s (22kHz native)", self.tts_model_path)
@@ -2326,6 +2373,73 @@ class LocalAIServer:
                     f"max_tokens={self.llm_max_tokens})"
                 ),
             }
+            await self._send_json(websocket, response)
+            return
+
+        if msg_type == "switch_model":
+            # Switch to a different model without container restart
+            # Supported: stt_model_path, llm_model_path, tts_model_path, stt_backend, tts_backend
+            logging.info("🔄 MODEL SWITCH REQUEST - Switching model configuration...")
+            try:
+                changed = []
+                
+                # STT backend switch
+                if "stt_backend" in data:
+                    new_backend = data["stt_backend"].lower()
+                    if new_backend in ["vosk", "sherpa", "kroko"]:
+                        self.stt_backend = new_backend
+                        changed.append(f"stt_backend={new_backend}")
+                
+                # STT model path
+                if "stt_model_path" in data:
+                    self.stt_model_path = data["stt_model_path"]
+                    changed.append(f"stt_model_path={os.path.basename(data['stt_model_path'])}")
+                
+                # LLM model path
+                if "llm_model_path" in data:
+                    self.llm_model_path = data["llm_model_path"]
+                    changed.append(f"llm_model_path={os.path.basename(data['llm_model_path'])}")
+                
+                # TTS backend switch
+                if "tts_backend" in data:
+                    new_backend = data["tts_backend"].lower()
+                    if new_backend in ["piper", "kokoro"]:
+                        self.tts_backend = new_backend
+                        changed.append(f"tts_backend={new_backend}")
+                
+                # TTS model path
+                if "tts_model_path" in data:
+                    self.tts_model_path = data["tts_model_path"]
+                    changed.append(f"tts_model_path={os.path.basename(data['tts_model_path'])}")
+                
+                # Kokoro settings
+                if "kokoro_voice" in data:
+                    self.kokoro_voice = data["kokoro_voice"]
+                    changed.append(f"kokoro_voice={data['kokoro_voice']}")
+                
+                if changed:
+                    logging.info("📝 Configuration updated: %s", ", ".join(changed))
+                    # Reload affected models
+                    await self.reload_models()
+                    response = {
+                        "type": "switch_response",
+                        "status": "success",
+                        "message": f"Models switched and reloaded: {', '.join(changed)}",
+                        "changed": changed,
+                    }
+                else:
+                    response = {
+                        "type": "switch_response",
+                        "status": "no_change",
+                        "message": "No valid model parameters provided",
+                    }
+            except Exception as e:
+                logging.error("❌ Model switch failed: %s", e)
+                response = {
+                    "type": "switch_response",
+                    "status": "error",
+                    "message": str(e),
+                }
             await self._send_json(websocket, response)
             return
 

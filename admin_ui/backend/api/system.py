@@ -1,9 +1,48 @@
 from fastapi import APIRouter, HTTPException
 import docker
-from typing import List
+from typing import List, Optional
 from pydantic import BaseModel
 import psutil
 import os
+import shutil
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+def get_docker_compose_cmd() -> List[str]:
+    """
+    Find docker-compose binary dynamically.
+    Returns the command as a list (either ['docker-compose'] or ['docker', 'compose']).
+    """
+    # Try docker-compose standalone first
+    compose_path = shutil.which('docker-compose')
+    if compose_path:
+        return [compose_path]
+    
+    # Try docker compose (v2 plugin)
+    docker_path = shutil.which('docker')
+    if docker_path:
+        # Verify 'docker compose' works
+        import subprocess
+        try:
+            result = subprocess.run(
+                [docker_path, 'compose', 'version'],
+                capture_output=True,
+                timeout=5
+            )
+            if result.returncode == 0:
+                return [docker_path, 'compose']
+        except:
+            pass
+    
+    # Fallback to hardcoded paths for backwards compatibility
+    if os.path.exists('/usr/local/bin/docker-compose'):
+        return ['/usr/local/bin/docker-compose']
+    if os.path.exists('/usr/bin/docker-compose'):
+        return ['/usr/bin/docker-compose']
+    
+    raise FileNotFoundError('docker-compose not found in PATH or standard locations')
 
 router = APIRouter()
 
@@ -99,7 +138,7 @@ async def get_containers():
 
 @router.post("/containers/{container_id}/start")
 async def start_container(container_id: str):
-    """Start a stopped container using docker-compose."""
+    """Start a stopped container using docker-compose or Docker API."""
     import subprocess
     
     # Map container names to docker-compose service names
@@ -123,22 +162,22 @@ async def start_container(container_id: str):
     
     project_root = os.getenv("PROJECT_ROOT", "/app/project")
     
-    print(f"DEBUG: Starting {service_name} from {project_root}")
+    logger.info(f"Starting {service_name} from {project_root}")
     
     try:
-        # Use docker-compose up to start the service
+        # A4: Use dynamic docker-compose path resolution
+        compose_cmd = get_docker_compose_cmd()
+        cmd = compose_cmd + ["-p", "asterisk-ai-voice-agent", "up", "-d", "--no-build", service_name]
+        
         result = subprocess.run(
-            ["/usr/local/bin/docker-compose", "-p", "asterisk-ai-voice-agent",
-             "up", "-d", "--no-build", service_name],
+            cmd,
             cwd=project_root,
             capture_output=True,
             text=True,
             timeout=120
         )
         
-        print(f"DEBUG: start returncode={result.returncode}")
-        print(f"DEBUG: start stdout={result.stdout}")
-        print(f"DEBUG: start stderr={result.stderr}")
+        logger.debug(f"start returncode={result.returncode}, stdout={result.stdout}, stderr={result.stderr}")
         
         if result.returncode == 0:
             return {"status": "success", "output": result.stdout or "Container started"}
@@ -164,9 +203,10 @@ async def start_container(container_id: str):
 
 @router.post("/containers/{container_id}/restart")
 async def restart_container(container_id: str):
-    """Restart a container using docker-compose with proper stop/remove/recreate."""
-    import subprocess
-    
+    """
+    Restart a container using Docker SDK (preferred) or docker-compose.
+    A5: Uses container.restart() for cleaner, faster restarts.
+    """
     # Map container names to docker-compose service names
     service_map = {
         "ai_engine": "ai-engine",
@@ -174,88 +214,84 @@ async def restart_container(container_id: str):
         "local_ai_server": "local-ai-server"
     }
     
-    service_name = service_map.get(container_id)
-    
-    # If not in map, it might be an ID or a raw name.
-    # Try to resolve ID to name if possible.
-    if not service_name:
-        try:
-            client = docker.from_env()
-            container = client.containers.get(container_id)
-            # Strip leading slash
-            name = container.name.lstrip('/')
-            # Try map again with name, or use name directly
-            service_name = service_map.get(name, name)
-        except:
-            # Fallback to using the input as is
-            service_name = container_id
-    
-    project_root = os.getenv("PROJECT_ROOT", "/app/project")
-    
-    print(f"DEBUG: Restarting {service_name} from {project_root}")
-    
     # Map service names to container names
     container_name_map = {
         "ai-engine": "ai_engine",
         "admin-ui": "admin_ui", 
         "local-ai-server": "local_ai_server"
     }
-    container_name = container_name_map.get(service_name, service_name.replace("-", "_"))
+    
+    # Resolve container name
+    container_name = container_id
+    if container_id in service_map:
+        # Input is already a container name like "ai_engine"
+        container_name = container_id
+    elif container_id in container_name_map:
+        # Input is a service name like "ai-engine"
+        container_name = container_name_map[container_id]
+    
+    logger.info(f"Restarting container: {container_name}")
     
     try:
-        # Step 1: Stop the container using docker directly (more reliable)
-        stop_result = subprocess.run(
-            ["/usr/bin/docker", "stop", container_name],
-            capture_output=True,
-            text=True,
-            timeout=60
-        )
-        print(f"DEBUG: docker stop returncode={stop_result.returncode}")
+        # A5: Use Docker SDK for cleaner restart (no stop/rm/up)
+        client = docker.from_env()
+        container = client.containers.get(container_name)
         
-        # Step 2: Force remove the container using docker directly
-        rm_result = subprocess.run(
-            ["/usr/bin/docker", "rm", "-f", container_name],
-            capture_output=True,
-            text=True,
-            timeout=30
-        )
-        print(f"DEBUG: docker rm returncode={rm_result.returncode}")
+        # Restart with 10 second timeout for graceful stop
+        container.restart(timeout=10)
         
-        # Step 3: Bring the service back up using docker-compose
-        # -p: Use correct project name to match existing images
-        up_result = subprocess.run(
-            ["/usr/local/bin/docker-compose", "-p", "asterisk-ai-voice-agent",
-             "up", "-d", "--no-build", service_name],
+        logger.info(f"Container {container_name} restarted successfully via Docker SDK")
+        return {
+            "status": "success", 
+            "method": "docker-sdk",
+            "output": f"Container {container_name} restarted"
+        }
+        
+    except docker.errors.NotFound:
+        # Container doesn't exist, try to start it via docker-compose
+        logger.warning(f"Container {container_name} not found, attempting docker-compose up")
+        return await _start_via_compose(container_id, service_map)
+        
+    except docker.errors.APIError as e:
+        logger.error(f"Docker API error restarting {container_name}: {e}")
+        # Fallback to docker-compose for recreation
+        return await _start_via_compose(container_id, service_map)
+        
+    except Exception as e:
+        logger.error(f"Error restarting container {container_name}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+async def _start_via_compose(container_id: str, service_map: dict):
+    """Helper to start a container via docker-compose."""
+    import subprocess
+    
+    service_name = service_map.get(container_id, container_id)
+    project_root = os.getenv("PROJECT_ROOT", "/app/project")
+    
+    try:
+        compose_cmd = get_docker_compose_cmd()
+        cmd = compose_cmd + ["-p", "asterisk-ai-voice-agent", "up", "-d", "--no-build", service_name]
+        
+        result = subprocess.run(
+            cmd,
             cwd=project_root,
             capture_output=True,
             text=True,
             timeout=120
         )
         
-        print(f"DEBUG: up returncode={up_result.returncode}")
-        print(f"DEBUG: up stdout={up_result.stdout}")
-        print(f"DEBUG: up stderr={up_result.stderr}")
-        
-        if up_result.returncode == 0:
-            return {"status": "success", "output": up_result.stdout or "Container restarted"}
+        if result.returncode == 0:
+            return {"status": "success", "method": "docker-compose", "output": result.stdout or "Container started"}
         else:
             raise HTTPException(
-                status_code=500, 
-                detail=f"Failed to restart: {up_result.stderr or up_result.stdout}"
+                status_code=500,
+                detail=f"Failed to start via compose: {result.stderr or result.stdout}"
             )
-    except subprocess.TimeoutExpired:
-        raise HTTPException(status_code=500, detail="Timeout waiting for container restart")
     except FileNotFoundError:
-        # Fallback to Docker API if docker-compose not available
-        try:
-            client = docker.from_env()
-            container = client.containers.get(container_id)
-            container.restart()
-            return {"status": "success", "method": "docker-api"}
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="docker-compose not found")
+    except subprocess.TimeoutExpired:
+        raise HTTPException(status_code=500, detail="Timeout waiting for container start")
 
 @router.get("/metrics")
 async def get_system_metrics():

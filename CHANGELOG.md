@@ -8,8 +8,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Planned
+
 - Additional provider integrations
 - Enhanced monitoring features
+
+## [4.5.0] - 2025-12-11
+
+### Fixed - Admin UI Stability 🔧
+
+#### ConfigEditor Critical Fixes (A1-A3, A9)
+
+- **Missing State Hooks**: Added `loading`, `saving`, `error`, `success`, `restartRequired` useState declarations
+- **Duplicate Import**: Removed duplicate `AudioSocketConfig` import
+- **Provider Type Persistence**: New providers now correctly save their `type` field
+- **Provider Name Validation**: Empty provider names are now rejected with error message
+- **Unused Code Cleanup**: Removed 15+ unused icon imports, reducing bundle size
+
+#### Save Flow Improvements (A6)
+
+- **Restart Required Banner**: UI now displays amber banner when config changes require engine restart
+- **Toast Notifications**: Replaced browser `alert()` with inline dismissible notifications
+- **Loading Spinner**: Added visual feedback during config fetch
+
+#### Docker Operations (A4-A5)
+
+- **Dynamic Path Resolution**: Uses `shutil.which()` to find docker-compose instead of hardcoded paths
+- **Cleaner Restarts**: Uses `container.restart()` via Docker SDK instead of destructive stop/rm/up flow
+- **Fallback Support**: Gracefully falls back to docker-compose if Docker SDK fails
+
+#### Config File Safety (A8, A11, A12)
+
+- **Atomic Writes**: Config and .env files written via temp file + atomic rename (prevents corruption on crash)
+- **Backup Rotation**: Only keeps last 5 backups per file (prevents disk exhaustion)
+- **Env Validation**: Rejects empty keys, newlines in values, and `=` in keys before writing .env
+
+### Added - Stability Improvements 🛡️
+
+#### Enhanced Timer Logging (L2)
+
+- **Structured Timer Logs**: All timer operations now log with `[TIMER]` prefix for easy filtering
+- **Timer Lifecycle Tracking**: Logs show scheduled, executed, and cancelled timer events
+- **Pending Timer Count**: `get_pending_timer_count()` method exposes timer queue depth
+
+#### Health Check Improvements (L4)
+
+- **Uptime Tracking**: `/health` endpoint now returns `uptime_seconds`
+- **Pending Timers**: Health response includes `pending_timers` count
+- **Active Sessions**: Added `active_sessions` field (alias for `active_calls`)
+- **Real Conversation Metrics**: `conversation` object now pulls live data from ConversationCoordinator
+
+#### Graceful Shutdown Handler (M4)
+
+- **SIGTERM Handling**: `docker stop` now waits up to 30 seconds for active calls to complete
+- **Shutdown Logging**: `[SHUTDOWN]` prefixed logs track graceful shutdown progress
+- **Configurable Timeout**: `engine.stop(graceful_timeout=30)` parameter for custom drain time
+
+### Changed
+
+#### Code Cleanup (H1)
+
+- **Removed Legacy Code**: Deleted commented `active_calls` legacy code block from engine.py
+- **SessionStore is Single Source**: All session state now uses SessionStore exclusively
 
 ## [4.4.3] - 2025-12-10
 

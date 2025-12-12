@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import axios from 'axios';
 import yaml from 'js-yaml';
-import { Save, Zap, AlertCircle } from 'lucide-react';
+import { Save, Zap, AlertCircle, RefreshCw, Loader2 } from 'lucide-react';
 import { ConfigSection } from '../../components/ui/ConfigSection';
 import { ConfigCard } from '../../components/ui/ConfigCard';
 import { FormInput, FormSwitch } from '../../components/ui/FormComponents';
@@ -10,6 +10,8 @@ const BargeInPage = () => {
     const [config, setConfig] = useState<any>({});
     const [loading, setLoading] = useState(true);
     const [saving, setSaving] = useState(false);
+    const [pendingRestart, setPendingRestart] = useState(false);
+    const [restartingEngine, setRestartingEngine] = useState(false);
 
     useEffect(() => {
         fetchConfig();
@@ -31,12 +33,28 @@ const BargeInPage = () => {
         setSaving(true);
         try {
             await axios.post('/api/config/yaml', { content: yaml.dump(config) });
+            setPendingRestart(true);
             alert('Barge-in configuration saved successfully');
         } catch (err) {
             console.error('Failed to save config', err);
             alert('Failed to save configuration');
         } finally {
             setSaving(false);
+        }
+    };
+
+    const handleRestartAIEngine = async () => {
+        setRestartingEngine(true);
+        try {
+            const response = await axios.post('/api/system/containers/ai_engine/restart');
+            if (response.data.status === 'success') {
+                setPendingRestart(false);
+                alert('AI Engine restarted successfully. Changes are now active.');
+            }
+        } catch (error: any) {
+            alert(`Failed to restart AI Engine: ${error.response?.data?.detail || error.message}`);
+        } finally {
+            setRestartingEngine(false);
         }
     };
 
@@ -56,19 +74,27 @@ const BargeInPage = () => {
 
     return (
         <div className="space-y-6">
-            {/* Restart Warning Banner */}
-            <div className="bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg p-4">
-                <div className="flex items-start">
-                    <AlertCircle className="w-5 h-5 text-amber-600 dark:text-amber-400 mt-0.5 mr-3 flex-shrink-0" />
-                    <div>
-                        <h3 className="text-sm font-medium text-amber-800 dark:text-amber-300">
-                            Configuration Reload Required
-                        </h3>
-                        <p className="mt-1 text-sm text-amber-700 dark:text-amber-400">
-                            Changes to barge-in settings require restarting the AI Engine container to take effect.
-                        </p>
-                    </div>
+            <div className={`${pendingRestart ? 'bg-orange-500/15 border-orange-500/30' : 'bg-yellow-500/10 border-yellow-500/20'} border text-yellow-600 dark:text-yellow-500 p-4 rounded-md flex items-center justify-between`}>
+                <div className="flex items-center">
+                    <AlertCircle className="w-5 h-5 mr-2" />
+                    Changes to barge-in configurations require an AI Engine restart to take effect.
                 </div>
+                <button
+                    onClick={handleRestartAIEngine}
+                    disabled={restartingEngine}
+                    className={`flex items-center text-xs px-3 py-1.5 rounded transition-colors ${
+                        pendingRestart 
+                            ? 'bg-orange-500 text-white hover:bg-orange-600 font-medium' 
+                            : 'bg-yellow-500/20 hover:bg-yellow-500/30'
+                    } disabled:opacity-50`}
+                >
+                    {restartingEngine ? (
+                        <Loader2 className="w-3 h-3 mr-1.5 animate-spin" />
+                    ) : (
+                        <RefreshCw className="w-3 h-3 mr-1.5" />
+                    )}
+                    {restartingEngine ? 'Restarting...' : 'Reload AI Engine'}
+                </button>
             </div>
 
             <div className="flex justify-between items-center">

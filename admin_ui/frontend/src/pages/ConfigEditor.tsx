@@ -1,7 +1,7 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import Editor from '@monaco-editor/react';
 import axios from 'axios';
-import { Save, Plus, Trash2, Edit2, Check, X, Download, Upload, RefreshCw, AlertCircle, CheckCircle2, FileJson, Settings, Mic, Activity, Radio, Wrench, MessageSquare, Phone, Server } from 'lucide-react';
+import { Save, Download, AlertCircle, Settings, Server, Trash2 } from 'lucide-react';
 import yaml from 'js-yaml';
 
 // Import Config Components
@@ -12,7 +12,6 @@ import StreamingConfig from '../components/config/StreamingConfig';
 import LLMConfig from '../components/config/LLMConfig';
 import ToolsConfig from '../components/config/ToolsConfig';
 import ContextsConfig from '../components/config/ContextsConfig';
-import AudioSocketConfig from '../components/config/AudioSocketConfig';
 import AudioSocketConfig from '../components/config/AudioSocketConfig';
 import DeepgramProviderForm from '../components/config/providers/DeepgramProviderForm';
 import OpenAIRealtimeProviderForm from '../components/config/providers/OpenAIRealtimeProviderForm';
@@ -26,7 +25,13 @@ const ConfigEditor = () => {
     const [activeTab, setActiveTab] = useState<'general' | 'asterisk' | 'contexts' | 'providers' | 'pipelines' | 'vad' | 'streaming' | 'llm' | 'tools' | 'audiosocket' | 'yaml'>('general');
     const [yamlContent, setYamlContent] = useState('');
     const [parsedConfig, setParsedConfig] = useState<any>({});
-    const [parsingError, setParsingError] = useState<string | null>(null);
+    
+    // UI State
+    const [loading, setLoading] = useState(false);
+    const [saving, setSaving] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+    const [success, setSuccess] = useState<string | null>(null);
+    const [restartRequired, setRestartRequired] = useState(false);
 
     // Provider Editing State
     const [editingProvider, setEditingProvider] = useState<string | null>(null);
@@ -91,13 +96,19 @@ const ConfigEditor = () => {
                 setYamlContent(contentToSave);
             }
 
-            await axios.post('/api/config/yaml', { content: contentToSave });
-            alert('Configuration saved successfully');
+            const response = await axios.post('/api/config/yaml', { content: contentToSave });
+            setSuccess('Configuration saved successfully');
+            setTimeout(() => setSuccess(null), 5000);
+            
+            // Check if restart is required
+            if (response.data?.restart_required) {
+                setRestartRequired(true);
+            }
         } catch (err: any) {
             console.error(err);
             const msg = err.response?.data?.detail || 'Failed to save configuration';
             setError(msg);
-            alert(msg);
+            setTimeout(() => setError(null), 10000);
         } finally {
             setSaving(false);
         }
@@ -141,16 +152,24 @@ const ConfigEditor = () => {
     };
 
     const handleProviderSave = () => {
-        if (!providerForm.name && !editingProvider) return;
-
-        const providerName = isNewProvider ? providerForm.name : editingProvider;
-        if (!providerName) return;
+        // A9: Require provider name before save
+        const providerName = isNewProvider ? providerForm.name?.trim() : editingProvider;
+        if (!providerName) {
+            setError('Provider name is required');
+            return;
+        }
 
         const newConfig = { ...parsedConfig };
         if (!newConfig.providers) newConfig.providers = {};
 
         // Remove name from the config object itself as it's the key
         const { name, ...providerData } = providerForm;
+        
+        // A3: Persist provider type when saving new providers
+        if (isNewProvider && newProviderType) {
+            providerData.type = newProviderType;
+        }
+        
         newConfig.providers[providerName] = providerData;
 
         setParsedConfig(newConfig);
@@ -311,12 +330,32 @@ const ConfigEditor = () => {
             </div>
 
             {error && (
-                <div className="p-4 bg-destructive/10 text-destructive rounded-md border border-destructive/20">
-                    {error}
+                <div className="p-4 bg-destructive/10 text-destructive rounded-md border border-destructive/20 flex justify-between items-center">
+                    <span>{error}</span>
+                    <button onClick={() => setError(null)} className="text-destructive hover:opacity-70">×</button>
+                </div>
+            )}
+            
+            {success && (
+                <div className="p-4 bg-green-500/10 text-green-600 dark:text-green-400 rounded-md border border-green-500/20 flex justify-between items-center">
+                    <span>{success}</span>
+                    <button onClick={() => setSuccess(null)} className="hover:opacity-70">×</button>
+                </div>
+            )}
+            
+            {restartRequired && (
+                <div className="p-4 bg-amber-500/10 text-amber-600 dark:text-amber-400 rounded-md border border-amber-500/20 flex justify-between items-center">
+                    <span><strong>Restart Required:</strong> Configuration saved. Restart the AI Engine to apply changes.</span>
+                    <button onClick={() => setRestartRequired(false)} className="hover:opacity-70">×</button>
                 </div>
             )}
 
             <div className="flex-1 overflow-y-auto border border-border rounded-lg p-4 bg-card">
+                {loading && (
+                    <div className="flex items-center justify-center p-8">
+                        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div>
+                    </div>
+                )}
                 {activeTab === 'general' && (
                     <GeneralConfig
                         config={{
@@ -419,7 +458,7 @@ const ConfigEditor = () => {
                                             onClick={() => handleProviderDelete(name)}
                                             className="p-2 hover:bg-destructive/20 text-destructive rounded-md"
                                         >
-                                            <AlertCircle className="w-4 h-4" />
+                                            <Trash2 className="w-4 h-4" />
                                         </button>
                                     </div>
                                 </div>

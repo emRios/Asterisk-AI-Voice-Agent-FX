@@ -190,6 +190,7 @@ class Engine:
 
     def __init__(self, config: AppConfig):
         self.config = config
+        self._start_time = time.time()  # Track engine start time for uptime
         base_url = f"http://{config.asterisk.host}:{config.asterisk.port}/ari"
         self.ari_client = ARIClient(
             username=config.asterisk.username,
@@ -453,19 +454,8 @@ class Engine:
                       packet_len=len(packet), 
                       addr=addr)
         
-        # Disable this bypass to prevent STT fragmentation
-        # All audio should go through RTPServer -> _on_rtp_audio -> _process_rtp_audio_with_vad
+        # All audio goes through RTPServer -> _on_rtp_audio -> _process_rtp_audio_with_vad
         return
-        
-        # LEGACY CODE (disabled):
-        # if self.active_calls:
-        #     channel_id = list(self.active_calls.keys())[0]
-        #     call_data = self.active_calls[channel_id]
-        #     provider = call_data.get("provider")
-        #     if provider:
-        #         # The first 12 bytes of an RTP packet are the header. The rest is payload.
-        #         audio_payload = packet[12:]
-        #         await provider.send_audio(audio_payload)
 
     async def _on_ari_event(self, event: Dict[str, Any]):
         """Default event handler for unhandled ARI events."""
@@ -676,9 +666,47 @@ class Engine:
             )
             return (int(fallback_port), int(fallback_port))
 
-    async def stop(self):
-        """Disconnect from ARI and stop the engine."""
-        # Clean up all sessions from SessionStore
+    async def stop(self, graceful_timeout: float = 30.0):
+        """Disconnect from ARI and stop the engine.
+        
+        Args:
+            graceful_timeout: Maximum seconds to wait for active calls to complete.
+                             Set to 0 for immediate shutdown.
+        """
+        sessions = await self.session_store.get_all_sessions()
+        active_count = len(sessions)
+        
+        if active_count > 0 and graceful_timeout > 0:
+            logger.info(
+                "[SHUTDOWN] Graceful shutdown initiated - waiting for active calls",
+                active_calls=active_count,
+                timeout_seconds=graceful_timeout,
+            )
+            
+            # Wait for calls to complete (check every 1 second)
+            start_time = time.time()
+            while time.time() - start_time < graceful_timeout:
+                sessions = await self.session_store.get_all_sessions()
+                if len(sessions) == 0:
+                    logger.info("[SHUTDOWN] All calls completed - proceeding with shutdown")
+                    break
+                remaining = graceful_timeout - (time.time() - start_time)
+                logger.debug(
+                    "[SHUTDOWN] Waiting for calls to complete",
+                    active_calls=len(sessions),
+                    remaining_seconds=int(remaining),
+                )
+                await asyncio.sleep(1.0)
+            else:
+                # Timeout reached - force cleanup
+                sessions = await self.session_store.get_all_sessions()
+                if len(sessions) > 0:
+                    logger.warning(
+                        "[SHUTDOWN] Timeout reached - forcing cleanup of remaining calls",
+                        remaining_calls=len(sessions),
+                    )
+        
+        # Clean up all remaining sessions
         sessions = await self.session_store.get_all_sessions()
         for session in sessions:
             await self._cleanup_call(session.call_id)
@@ -777,7 +805,13 @@ class Engine:
                 elif name == "google_live":
                     # google_live uses GoogleProviderConfig like the pipeline adapters
                     try:
-                        google_cfg = GoogleProviderConfig(**provider_config_data)
+                        # SECURITY: API key ONLY from environment variables, never from YAML
+                        merged = dict(provider_config_data)
+                        merged['api_key'] = os.getenv('GOOGLE_API_KEY') or ''
+                        google_cfg = GoogleProviderConfig(**merged)
+                        # Note: Don't skip for missing API key - let is_ready() handle it
+                        if not google_cfg.api_key:
+                            logger.warning("Google Live provider API key missing (GOOGLE_API_KEY) - provider will show as Not Ready")
                     except Exception as e:
                         logger.error(f"Failed to build GoogleProviderConfig for google_live: {e}", exc_info=True)
                         continue
@@ -832,24 +866,31 @@ class Engine:
             
             # Validate provider connectivity (full agent mode)
             for provider_name, provider in self.providers.items():
-                # Check basic readiness
+                # Check basic readiness - providers must have is_ready() and return True
                 try:
-                    ready = provider.is_ready() if hasattr(provider, 'is_ready') else True
-                    if not ready:
-                        logger.error(
-                            "Provider NOT ready",
-                            provider=provider_name,
-                            reason="is_ready() returned False"
-                        )
+                    if hasattr(provider, 'is_ready'):
+                        ready = provider.is_ready()
+                        if not ready:
+                            logger.warning(
+                                "⚠️ Provider NOT ready - missing API key or config",
+                                provider=provider_name,
+                                hint="Check that API key is set in ai-agent.yaml or .env"
+                            )
+                        else:
+                            logger.info(
+                                "✅ Provider validated and ready",
+                                provider=provider_name,
+                                type=provider.__class__.__name__
+                            )
                     else:
-                        logger.info(
-                            "Provider validated and ready",
+                        logger.warning(
+                            "⚠️ Provider missing is_ready() method",
                             provider=provider_name,
                             type=provider.__class__.__name__
                         )
                 except Exception as exc:
                     logger.error(
-                        "Provider readiness check failed",
+                        "❌ Provider readiness check failed",
                         provider=provider_name,
                         error=str(exc),
                         exc_info=True
@@ -3727,12 +3768,13 @@ class Engine:
         try:
             # SECURITY: API keys ONLY from environment variables, never from YAML
             merged = dict(provider_cfg)
-            merged['api_key'] = os.getenv('DEEPGRAM_API_KEY')  # Force from .env only
+            merged['api_key'] = os.getenv('DEEPGRAM_API_KEY') or ''  # Force from .env only
             
             cfg = DeepgramProviderConfig(**merged)
+            # Note: Don't return None for missing API key - let is_ready() handle it
+            # This allows the provider to appear in health status as "Not Ready"
             if not cfg.api_key:
-                logger.error("Deepgram provider API key missing (DEEPGRAM_API_KEY)")
-                return None
+                logger.warning("Deepgram provider API key missing (DEEPGRAM_API_KEY) - provider will show as Not Ready")
             return cfg
         except Exception as exc:
             logger.error("Failed to build DeepgramProviderConfig", error=str(exc), exc_info=True)
@@ -3764,9 +3806,9 @@ class Engine:
             if not cfg.enabled:
                 logger.info("OpenAI Realtime provider disabled in configuration; skipping initialization.")
                 return None
+            # Note: Don't return None for missing API key - let is_ready() handle it
             if not cfg.api_key:
-                logger.error("OpenAI Realtime provider API key missing (OPENAI_API_KEY)")
-                return None
+                logger.warning("OpenAI Realtime provider API key missing (OPENAI_API_KEY) - provider will show as Not Ready")
             return cfg
         except Exception as exc:
             logger.error("Failed to build OpenAIRealtimeProviderConfig", error=str(exc), exc_info=True)
@@ -3799,12 +3841,11 @@ class Engine:
             if not cfg.enabled:
                 logger.info("ElevenLabs provider disabled in configuration; skipping initialization.")
                 return None
+            # Note: Don't return None for missing API key/agent_id - let is_ready() handle it
             if not cfg.api_key:
-                logger.error("ElevenLabs provider API key missing (ELEVENLABS_API_KEY)")
-                return None
+                logger.warning("ElevenLabs provider API key missing (ELEVENLABS_API_KEY) - provider will show as Not Ready")
             if not cfg.agent_id:
-                logger.error("ElevenLabs provider agent ID missing (ELEVENLABS_AGENT_ID)")
-                return None
+                logger.warning("ElevenLabs provider agent ID missing (ELEVENLABS_AGENT_ID) - provider will show as Not Ready")
             return cfg
         except Exception as exc:
             logger.error("Failed to build ElevenLabsAgentConfig", error=str(exc), exc_info=True)
@@ -7378,35 +7419,52 @@ class Engine:
                         "tools": p_cfg.tools
                     }
 
-            # Gather provider details
+            # Gather provider details - only mark ready if is_ready() explicitly returns True
             providers_info = {}
             for name, prov in (self.providers or {}).items():
-                ready = True
+                ready = False  # Default to not ready
+                reason = None
                 try:
                     if hasattr(prov, 'is_ready'):
                         ready = bool(prov.is_ready())
-                except Exception:
-                    ready = True
-                providers_info[name] = {"ready": ready}
+                        if not ready:
+                            reason = "missing_config"
+                    else:
+                        # Provider doesn't implement is_ready - assume not ready
+                        ready = False
+                        reason = "no_is_ready_method"
+                except Exception as e:
+                    ready = False
+                    reason = f"error: {str(e)}"
+                providers_info[name] = {"ready": ready, "reason": reason} if reason else {"ready": ready}
 
-            # Compute readiness
+            # Compute readiness - default provider must be ready
             default_ready = False
             if self.config and getattr(self.config, 'default_provider', None) in (self.providers or {}):
                 prov = self.providers[self.config.default_provider]
                 try:
-                    default_ready = bool(prov.is_ready()) if hasattr(prov, 'is_ready') else True
+                    default_ready = bool(prov.is_ready()) if hasattr(prov, 'is_ready') else False
                 except Exception:
-                    default_ready = True
+                    default_ready = False
             ari_connected = bool(self.ari_client and self.ari_client.running)
             audiosocket_listening = self.audio_socket_server is not None if self.config.audio_transport == 'audiosocket' else True
             is_ready = ari_connected and audiosocket_listening and default_ready
+
+            # Get conversation coordinator metrics
+            conversation_summary = await self.conversation_coordinator.get_summary()
+            pending_timers = self.conversation_coordinator.get_pending_timer_count()
+            active_sessions = await self.session_store.get_all_sessions()
+            uptime_seconds = int(time.time() - self._start_time)
 
             payload = {
                 "status": "healthy" if is_ready else "degraded",
                 "ari_connected": ari_connected,
                 "rtp_server_running": bool(getattr(self, 'rtp_server', None)),
                 "audio_transport": self.config.audio_transport,
-                "active_calls": len(await self.session_store.get_all_sessions()),
+                "active_calls": len(active_sessions),
+                "active_sessions": len(active_sessions),
+                "pending_timers": pending_timers,
+                "uptime_seconds": uptime_seconds,
                 "active_playbacks": 0,
                 "providers": providers_info,
                 "pipelines": pipelines_info,
@@ -7419,9 +7477,10 @@ class Engine:
                 },
                 "audiosocket_listening": audiosocket_listening,
                 "conversation": {
-                    "gating_active": 0,
-                    "capture_disabled": 0,
-                    "barge_in_total": 0,
+                    "gating_active": conversation_summary.get("gating_active", 0),
+                    "capture_disabled": conversation_summary.get("capture_disabled", 0),
+                    "barge_in_total": conversation_summary.get("barge_in_total", 0),
+                    "pending_timers": pending_timers,
                 },
                 "streaming": {},
                 "streaming_details": [],

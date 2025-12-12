@@ -86,6 +86,12 @@ class ElevenLabsAgentProvider(AIProviderInterface, ProviderCapabilitiesMixin):
         """Returns supported codec names."""
         return ["linear16", "pcm16", "ulaw"]
     
+    def is_ready(self) -> bool:
+        """Check if provider is properly configured with required API key and agent ID."""
+        api_key = getattr(self.config, 'api_key', None) or os.getenv("ELEVENLABS_API_KEY", "")
+        agent_id = getattr(self.config, 'agent_id', None) or os.getenv("ELEVENLABS_AGENT_ID", "")
+        return bool(api_key and str(api_key).strip() and agent_id and str(agent_id).strip())
+
     def get_capabilities(self) -> ProviderCapabilities:
         """Return static capability hints for the orchestrator."""
         return ProviderCapabilities(
@@ -233,6 +239,9 @@ class ElevenLabsAgentProvider(AIProviderInterface, ProviderCapabilitiesMixin):
             init_data["dynamic_variables"] = {
                 "caller_name": context["caller_name"]
             }
+        
+        # Note: Tools are configured in ElevenLabs dashboard, not sent via WebSocket
+        # See docs/Provider-ElevenLabs-Setup.md for tool configuration instructions
         
         # Send initialization message if we have config
         if init_data:
@@ -578,7 +587,7 @@ class ElevenLabsAgentProvider(AIProviderInterface, ProviderCapabilitiesMixin):
                 await self._ws.send(json.dumps(pong))
             except Exception as e:
                 logger.warning(f"[elevenlabs] [{self._call_id}] Failed to send pong: {e}")
-    
+
     async def _handle_tool_call(self, data: Dict[str, Any]) -> None:
         """Handle tool/function call request from ElevenLabs."""
         tool_call = data.get("client_tool_call", {})

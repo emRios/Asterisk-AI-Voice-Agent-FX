@@ -2,7 +2,7 @@
 
 # Asterisk AI Voice Agent
 
-![Version](https://img.shields.io/badge/version-4.4.3-blue.svg)
+![Version](https://img.shields.io/badge/version-4.5.0-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 ![Python](https://img.shields.io/badge/python-3.10+-blue.svg)
 ![Docker](https://img.shields.io/badge/docker-compose-blue.svg)
@@ -117,33 +117,32 @@ docker compose logs -f ai-engine
 
 ---
 
-## 🎉 What's New in v4.4.3
+## 🎉 What's New in v4.5.0
 
 <details open>
 <summary><b>Latest Updates</b></summary>
 
-### 🌍 Cross-Platform Support (AAVA-126)
-- **Pre-flight Script** (`preflight.sh`): Comprehensive system compatibility checker.
-  - Detects OS, Docker version, Compose version, architecture.
-  - Auto-fix mode with `--apply-fixes`.
-  - Supports Ubuntu, Debian, CentOS, RHEL, Rocky, Alma, Fedora, FreePBX/Sangoma.
-  - Rootless Docker and SELinux support.
+### 🔧 Admin UI Stability (AAVA-129)
+- **Atomic Config Writes**: Config files written via temp file + rename (prevents corruption).
+- **Backup Rotation**: Only keeps last 5 backups per file.
+- **Docker SDK Restarts**: Uses `container.restart()` instead of destructive stop/rm/up.
+- **Toast Notifications**: Replaced browser `alert()` with inline notifications.
+- **Input Focus Fix**: Environment page inputs no longer lose focus.
 
-### 🔧 Admin UI Bug Fixes
-- **Models Page**: Fixed installed models display and added delete functionality.
-- **Providers Page**: Fixed local provider form, improved test connection for Local/ElevenLabs.
-- **Dashboard**: Fixed STT/TTS dropdowns, added null guards for metrics.
-- **Model Switching**: Proper container restart with environment reload.
-
-### 🛠️ Developer Experience
-- **Code Splitting**: Lazy-loaded heavy pages for faster initial load.
-- **ESLint + Prettier**: Linting and formatting configuration.
-- **Frontend README**: Documentation for setup and build.
+### 🛡️ Engine Stability
+- **Timer Logging**: All timers log with `[TIMER]` prefix for easy filtering.
+- **Health Improvements**: `/health` returns `uptime_seconds`, `pending_timers`, `active_sessions`.
+- **Graceful Shutdown**: `docker stop` waits for active calls to complete (30s timeout).
 
 </details>
 
 <details>
 <summary><b>Previous Versions</b></summary>
+
+#### v4.4.3 - Cross-Platform Support
+- **🌍 Pre-flight Script**: System compatibility checker with auto-fix mode.
+- **🔧 Admin UI Fixes**: Models page, providers page, dashboard improvements.
+- **🛠️ Developer Experience**: Code splitting, ESLint + Prettier.
 
 #### v4.4.2 - Local AI Enhancements
 - **🎤 New STT Backends**: Kroko ASR, Sherpa-ONNX.

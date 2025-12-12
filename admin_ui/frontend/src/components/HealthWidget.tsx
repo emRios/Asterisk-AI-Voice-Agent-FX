@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
-import { Activity, CheckCircle2, Cpu, RefreshCw, Settings, Terminal, XCircle, HardDrive, AlertCircle, Layers, Box, Play } from 'lucide-react';
+import { Activity, CheckCircle2, Cpu, RefreshCw, Settings, Terminal, XCircle, HardDrive, AlertCircle, Layers, Box, Play, Star } from 'lucide-react';
+import yaml from 'js-yaml';
 import { ConfigCard } from './ui/ConfigCard';
 import axios from 'axios';
 
@@ -45,6 +46,8 @@ export const HealthWidget = () => {
     const [applyingChanges, setApplyingChanges] = useState(false);
     const [startingLocalAI, setStartingLocalAI] = useState(false);
     const [startingAIEngine, setStartingAIEngine] = useState(false);
+    const [defaultProvider, setDefaultProvider] = useState<string | null>(null);
+    const [activePipeline, setActivePipeline] = useState<string | null>(null);
 
     const handleStartContainer = async (containerName: string, setStarting: (v: boolean) => void) => {
         setStarting(true);
@@ -91,6 +94,24 @@ export const HealthWidget = () => {
             }
         };
         fetchModels();
+    }, []);
+
+    // Fetch default provider and active pipeline from config
+    useEffect(() => {
+        const fetchConfig = async () => {
+            try {
+                const res = await axios.get('/api/config/yaml');
+                const parsed = yaml.load(res.data.content) as any;
+                setDefaultProvider(parsed?.default_provider || null);
+                setActivePipeline(parsed?.active_pipeline || null);
+            } catch (err) {
+                console.error('Failed to fetch config', err);
+            }
+        };
+        fetchConfig();
+        // Refresh every 10 seconds
+        const interval = setInterval(fetchConfig, 10000);
+        return () => clearInterval(interval);
     }, []);
 
     // Queue a model change (doesn't apply until user confirms)
@@ -674,21 +695,68 @@ export const HealthWidget = () => {
                             </span>
                         </div>
 
+                        {/* Default Configuration */}
+                        <div>
+                            <div className="flex items-center gap-2 mb-3">
+                                <Star className="w-4 h-4 text-muted-foreground" />
+                                <h4 className="text-sm font-medium text-muted-foreground">Default Configuration</h4>
+                            </div>
+                            {activePipeline ? (
+                                <div className="flex justify-between items-center text-sm p-2 rounded hover:bg-muted/50 transition-colors">
+                                    <span>Active Pipeline</span>
+                                    <span className="text-xs px-2 py-0.5 rounded-full bg-green-500/10 text-green-500">
+                                        {activePipeline}
+                                    </span>
+                                </div>
+                            ) : defaultProvider ? (
+                                <div className="flex justify-between items-center text-sm p-2 rounded hover:bg-muted/50 transition-colors">
+                                    <span className="capitalize">Default Provider</span>
+                                    <span className="text-xs px-2 py-0.5 rounded-full bg-green-500/10 text-green-500 capitalize">
+                                        {defaultProvider.replace('_', ' ')}
+                                    </span>
+                                </div>
+                            ) : (
+                                <div className="text-xs text-muted-foreground italic p-2">No default configured</div>
+                            )}
+                        </div>
+
                         {/* Pipelines */}
                         <div>
                             <div className="flex items-center gap-2 mb-3">
                                 <Layers className="w-4 h-4 text-muted-foreground" />
                                 <h4 className="text-sm font-medium text-muted-foreground">Active Pipelines</h4>
                             </div>
-                            <div className="grid grid-cols-2 gap-2">
-                                {health.ai_engine.details.pipelines ? (
-                                    Object.keys(health.ai_engine.details.pipelines).map((pipelineName) => (
-                                        <div key={pipelineName} className="text-xs bg-muted/50 p-2 rounded border border-border/50 font-mono">
-                                            {pipelineName}
+                            <div className="space-y-3">
+                                {health.ai_engine.details.pipelines && Object.keys(health.ai_engine.details.pipelines).length > 0 ? (
+                                    Object.entries(health.ai_engine.details.pipelines).map(([pipelineName, pipelineInfo]: [string, any]) => (
+                                        <div key={pipelineName} className="bg-muted/30 rounded-lg border border-border/50 overflow-hidden">
+                                            <div className="px-3 py-2 bg-muted/50 border-b border-border/50">
+                                                <span className="text-sm font-medium font-mono">{pipelineName}</span>
+                                            </div>
+                                            <div className="p-2 space-y-1">
+                                                {pipelineInfo?.stt && (
+                                                    <div className="flex justify-between items-center text-xs px-2 py-1">
+                                                        <span className="text-muted-foreground">STT</span>
+                                                        <span className="font-mono bg-blue-500/10 text-blue-500 px-2 py-0.5 rounded">{pipelineInfo.stt}</span>
+                                                    </div>
+                                                )}
+                                                {pipelineInfo?.llm && (
+                                                    <div className="flex justify-between items-center text-xs px-2 py-1">
+                                                        <span className="text-muted-foreground">LLM</span>
+                                                        <span className="font-mono bg-purple-500/10 text-purple-500 px-2 py-0.5 rounded">{pipelineInfo.llm}</span>
+                                                    </div>
+                                                )}
+                                                {pipelineInfo?.tts && (
+                                                    <div className="flex justify-between items-center text-xs px-2 py-1">
+                                                        <span className="text-muted-foreground">TTS</span>
+                                                        <span className="font-mono bg-green-500/10 text-green-500 px-2 py-0.5 rounded">{pipelineInfo.tts}</span>
+                                                    </div>
+                                                )}
+                                            </div>
                                         </div>
                                     ))
                                 ) : (
-                                    <div className="text-xs text-muted-foreground italic col-span-2">No pipelines configured</div>
+                                    <div className="text-xs text-muted-foreground italic">No pipelines configured</div>
                                 )}
                             </div>
                         </div>

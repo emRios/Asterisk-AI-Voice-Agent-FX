@@ -47,14 +47,13 @@ class PlaybackManager:
         self.conversation_coordinator = conversation_coordinator
         
         # Ensure media directory exists
+        # Note: Directory should be set up with setgid bit by preflight.sh
+        # so files inherit group ownership from the directory (asterisk group)
         try:
             os.makedirs(media_dir, exist_ok=True)
             try:
-                os.chmod(media_dir, 0o755)
-            except Exception:
-                pass
-            try:
-                os.chown(media_dir, 995, 995)
+                # Group-writable so asterisk group members can access
+                os.chmod(media_dir, 0o775)
             except Exception:
                 pass
         except (PermissionError, OSError):
@@ -248,23 +247,12 @@ class PlaybackManager:
             with open(file_path, 'wb') as f:
                 f.write(audio_bytes)
             
-            # Set file ownership for Asterisk readability (UID:GID 995:995)
-            chowned = False
+            # Set file permissions for Asterisk readability via group
+            # Files inherit group ownership from setgid directory (set up by preflight.sh)
+            # No chown needed - appuser is member of asterisk group
             try:
-                os.chown(file_path, 995, 995)
-                chowned = True
-                logger.debug("Audio file ownership set for Asterisk",
-                            file_path=file_path)
-            except OSError as e:
-                logger.warning("Failed to set file ownership for Asterisk",
-                              file_path=file_path,
-                              error=str(e))
-            # Apply guarded permissions: prefer 0600 when owned by asterisk, else keep readable for availability
-            try:
-                if chowned:
-                    os.chmod(file_path, 0o600)
-                else:
-                    os.chmod(file_path, 0o644)
+                # Group-readable so asterisk group members can access
+                os.chmod(file_path, 0o664)
             except Exception:
                 pass
             
@@ -363,11 +351,11 @@ class PlaybackManager:
             is_pipeline = playback_id.startswith("pipeline-")
             fallback_delay = audio_duration + (2.5 if is_pipeline else 0.5)  # safety margin
             
-            logger.debug("Scheduling gating fallback",
+            logger.info("[TIMER] Scheduled: action=gating_fallback",
                         call_id=call_id,
                         playback_id=playback_id,
-                        audio_duration=audio_duration,
-                        fallback_delay=fallback_delay,
+                        delay_seconds=round(fallback_delay, 2),
+                        audio_duration=round(audio_duration, 2),
                         is_pipeline=is_pipeline,
                         safety_margin=2.5 if is_pipeline else 0.5)
             
@@ -408,14 +396,16 @@ class PlaybackManager:
                     )
                 else:
                     success = await self.session_store.clear_gating_token(call_id, playback_id)
-                logger.warning("🔊 GATING FALLBACK - Cleared gating token due to missing PlaybackFinished",
+                logger.warning("[TIMER] Executed: action=gating_fallback",
                               call_id=call_id,
                               playback_id=playback_id,
+                              result="gating_cleared",
                               success=success)
             else:
-                logger.debug("Gating fallback skipped - playback already finished",
+                logger.info("[TIMER] Skipped: action=gating_fallback",
                             call_id=call_id,
-                            playback_id=playback_id)
+                            playback_id=playback_id,
+                            reason="playback_already_finished")
                 
         except Exception as e:
             logger.error("Error in gating fallback task",

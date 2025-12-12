@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 import yaml from 'js-yaml';
-import { Plus, Settings, Trash2, Server, AlertCircle, CheckCircle2, Loader2, RefreshCw, Wand2 } from 'lucide-react';
+import { Plus, Settings, Trash2, Server, AlertCircle, CheckCircle2, Loader2, RefreshCw, Wand2, Star } from 'lucide-react';
 import { ConfigSection } from '../components/ui/ConfigSection';
 import { ConfigCard } from '../components/ui/ConfigCard';
 import { Modal } from '../components/ui/Modal';
@@ -24,6 +24,10 @@ const ProvidersPage: React.FC = () => {
     const [isNewProvider, setIsNewProvider] = useState(false);
     const [testingProvider, setTestingProvider] = useState<string | null>(null);
     const [testResults, setTestResults] = useState<{ [key: string]: { success: boolean; message: string } | undefined }>({});
+    const [showAddProvidersModal, setShowAddProvidersModal] = useState(false);
+    const [selectedTemplates, setSelectedTemplates] = useState<string[]>([]);
+    const [pendingRestart, setPendingRestart] = useState(false);
+    const [restartingEngine, setRestartingEngine] = useState(false);
 
     useEffect(() => {
         fetchConfig();
@@ -45,6 +49,7 @@ const ProvidersPage: React.FC = () => {
         try {
             await axios.post('/api/config/yaml', { content: yaml.dump(newConfig) });
             setConfig(newConfig);
+            setPendingRestart(true);
         } catch (err) {
             console.error('Failed to save config', err);
             alert('Failed to save configuration');
@@ -85,26 +90,133 @@ const ProvidersPage: React.FC = () => {
         setIsNewProvider(true);
     };
 
-    const handleCreateStarterProviders = async () => {
+    const handleOpenAddProvidersModal = () => {
+        setSelectedTemplates([]);
+        setShowAddProvidersModal(true);
+    };
+
+    const handleAddSelectedProviders = async () => {
+        if (selectedTemplates.length === 0) {
+            alert('Please select at least one provider template.');
+            return;
+        }
+
         const current = config.providers || {};
-        const starters: Record<string, any> = {
-            local_stt: { type: 'local', capabilities: ['stt'], enabled: true },
-            local_llm: { type: 'local', capabilities: ['llm'], enabled: true },
-            local_tts: { type: 'local', capabilities: ['tts'], enabled: true }
-        };
-        let changed = false;
         const nextProviders = { ...current };
-        Object.entries(starters).forEach(([key, value]) => {
-            if (!nextProviders[key]) {
-                nextProviders[key] = value;
+        let changed = false;
+
+        // Provider templates - added DISABLED so user must configure and enable
+        const templates: Record<string, any> = {
+            openai_realtime: {
+                enabled: false,
+                model: 'gpt-4o-realtime-preview-2024-12-17',
+                voice: 'alloy',
+                input_encoding: 'ulaw',
+                input_sample_rate_hz: 8000,
+                target_encoding: 'mulaw',
+                target_sample_rate_hz: 8000,
+                greeting: 'Hello, how can I help you today?',
+                instructions: 'You are a helpful AI assistant.',
+                turn_detection: { type: 'server_vad', threshold: 0.5, silence_duration_ms: 1000 }
+            },
+            deepgram: {
+                enabled: false,
+                model: 'nova-2-general',
+                tts_model: 'aura-asteria-en',
+                input_encoding: 'mulaw',
+                input_sample_rate_hz: 8000,
+                output_encoding: 'mulaw',
+                output_sample_rate_hz: 8000,
+                greeting: 'Hello, how can I help you today?',
+                instructions: 'You are a helpful AI assistant.'
+            },
+            google_live: {
+                enabled: false,
+                type: 'full',
+                capabilities: ['stt', 'llm', 'tts'],
+                api_key: '${GOOGLE_API_KEY}',
+                llm_model: 'gemini-2.0-flash-exp',
+                input_encoding: 'ulaw',
+                input_sample_rate_hz: 8000,
+                target_encoding: 'ulaw',
+                target_sample_rate_hz: 8000,
+                greeting: 'Hello, how can I help you today?',
+                instructions: 'You are a helpful AI assistant.'
+            },
+            elevenlabs_agent: {
+                enabled: false,
+                type: 'full',
+                capabilities: ['stt', 'llm', 'tts'],
+                api_key: '${ELEVENLABS_API_KEY}',
+                agent_id: '${ELEVENLABS_AGENT_ID}',
+                input_encoding: 'ulaw',
+                input_sample_rate_hz: 8000,
+                target_encoding: 'ulaw',
+                target_sample_rate_hz: 8000
+            },
+            local_modular: {
+                // This adds local_stt, local_llm, local_tts
+                local_stt: { type: 'local', capabilities: ['stt'], enabled: false, ws_url: '${LOCAL_WS_URL:-ws://127.0.0.1:8765}' },
+                local_llm: { type: 'local', capabilities: ['llm'], enabled: false },
+                local_tts: { type: 'local', capabilities: ['tts'], enabled: false, ws_url: '${LOCAL_WS_URL:-ws://127.0.0.1:8765}' }
+            }
+        };
+
+        selectedTemplates.forEach(templateKey => {
+            if (templateKey === 'local_modular') {
+                // Add multiple providers for local modular
+                const localProviders = templates.local_modular;
+                Object.entries(localProviders).forEach(([key, value]) => {
+                    if (!nextProviders[key]) {
+                        nextProviders[key] = value;
+                        changed = true;
+                    }
+                });
+            } else if (!nextProviders[templateKey]) {
+                nextProviders[templateKey] = templates[templateKey];
                 changed = true;
             }
         });
+
         if (!changed) {
-            alert('Starter providers already exist.');
+            alert('Selected providers already exist.');
+            setShowAddProvidersModal(false);
             return;
         }
+
         await saveConfig({ ...config, providers: nextProviders });
+        setShowAddProvidersModal(false);
+        setPendingRestart(true);
+    };
+
+    const handleSetAsDefault = async (name: string) => {
+        const newConfig = { ...config };
+        newConfig.default_provider = name;
+        // Clear active_pipeline for full agents
+        if (isFullAgentProvider(config.providers?.[name])) {
+            newConfig.active_pipeline = null;
+        }
+        // Auto-enable the provider when setting as default
+        if (newConfig.providers?.[name]) {
+            newConfig.providers[name].enabled = true;
+        }
+        await saveConfig(newConfig);
+        setPendingRestart(true);
+    };
+
+    const handleRestartAIEngine = async () => {
+        setRestartingEngine(true);
+        try {
+            const response = await axios.post('/api/system/containers/ai_engine/restart');
+            if (response.data.status === 'success') {
+                setPendingRestart(false);
+                alert('AI Engine restarted successfully. Changes are now active.');
+            }
+        } catch (error: any) {
+            alert(`Failed to restart AI Engine: ${error.response?.data?.detail || error.message}`);
+        } finally {
+            setRestartingEngine(false);
+        }
     };
 
     const handleDeleteProvider = async (name: string) => {
@@ -245,17 +357,26 @@ const ProvidersPage: React.FC = () => {
 
     return (
         <div className="space-y-6">
-            <div className="bg-yellow-500/10 border border-yellow-500/20 text-yellow-500 p-4 rounded-md flex items-center justify-between">
+            <div className={`${pendingRestart ? 'bg-orange-500/15 border-orange-500/30' : 'bg-yellow-500/10 border-yellow-500/20'} border text-yellow-600 dark:text-yellow-500 p-4 rounded-md flex items-center justify-between`}>
                 <div className="flex items-center">
                     <AlertCircle className="w-5 h-5 mr-2" />
-                    Changes to provider configurations require a system restart to take effect.
+                    Changes to provider configurations require an AI Engine restart to take effect.
                 </div>
                 <button
-                    onClick={() => window.location.reload()}
-                    className="flex items-center text-xs bg-yellow-500/20 hover:bg-yellow-500/30 px-3 py-1.5 rounded transition-colors"
+                    onClick={handleRestartAIEngine}
+                    disabled={restartingEngine}
+                    className={`flex items-center text-xs px-3 py-1.5 rounded transition-colors ${
+                        pendingRestart 
+                            ? 'bg-orange-500 text-white hover:bg-orange-600 font-medium' 
+                            : 'bg-yellow-500/20 hover:bg-yellow-500/30'
+                    } disabled:opacity-50`}
                 >
-                    <RefreshCw className="w-3 h-3 mr-1.5" />
-                    Reload UI
+                    {restartingEngine ? (
+                        <Loader2 className="w-3 h-3 mr-1.5 animate-spin" />
+                    ) : (
+                        <RefreshCw className="w-3 h-3 mr-1.5" />
+                    )}
+                    {restartingEngine ? 'Restarting...' : 'Reload AI Engine'}
                 </button>
             </div>
 
@@ -271,11 +392,11 @@ const ProvidersPage: React.FC = () => {
                 </div>
                 <div className="flex gap-2">
                     <button
-                        onClick={handleCreateStarterProviders}
+                        onClick={handleOpenAddProvidersModal}
                         className="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 border border-input bg-background shadow-sm hover:bg-accent hover:text-accent-foreground h-9 px-4 py-2"
                     >
                         <Wand2 className="w-4 h-4 mr-2" />
-                        Add Starter Providers
+                        Add Provider Templates
                     </button>
                     <button
                         onClick={handleAddProvider}
@@ -299,6 +420,12 @@ const ProvidersPage: React.FC = () => {
                                     <div>
                                         <div className="flex items-center gap-2">
                                             <h4 className={`font-semibold text-lg ${!providerData.enabled && 'text-muted-foreground'}`}>{name}</h4>
+                                            {config.default_provider === name && (
+                                                <span className="text-xs bg-green-500/10 text-green-600 dark:text-green-400 px-2 py-0.5 rounded-full flex items-center gap-1">
+                                                    <span className="w-1.5 h-1.5 bg-green-500 rounded-full"></span>
+                                                    Default
+                                                </span>
+                                            )}
                                             {!providerData.enabled && (
                                                 <span className="text-xs bg-muted text-muted-foreground px-2 py-0.5 rounded">Disabled</span>
                                             )}
@@ -368,6 +495,15 @@ const ProvidersPage: React.FC = () => {
                                         </label>
                                     </div>
                                     <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                                        {config.default_provider !== name && (
+                                            <button
+                                                onClick={() => handleSetAsDefault(name)}
+                                                className="p-2 hover:bg-accent rounded-md text-muted-foreground hover:text-foreground"
+                                                title="Set as Default"
+                                            >
+                                                <Star className="w-4 h-4" />
+                                            </button>
+                                        )}
                                         <button
                                             onClick={() => handleTestConnection(name, providerData)}
                                             disabled={testingProvider === name}
@@ -555,6 +691,99 @@ const ProvidersPage: React.FC = () => {
                 }
             >
                 {renderProviderForm()}
+            </Modal>
+
+            {/* Add Provider Templates Modal */}
+            <Modal
+                isOpen={showAddProvidersModal}
+                onClose={() => setShowAddProvidersModal(false)}
+                title="Add Provider Templates"
+                size="md"
+                footer={
+                    <div className="flex justify-end gap-2">
+                        <button
+                            onClick={() => setShowAddProvidersModal(false)}
+                            className="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 border border-input bg-background shadow-sm hover:bg-accent hover:text-accent-foreground h-9 px-4 py-2"
+                        >
+                            Cancel
+                        </button>
+                        <button
+                            onClick={handleAddSelectedProviders}
+                            disabled={selectedTemplates.length === 0}
+                            className="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 bg-primary text-primary-foreground shadow hover:bg-primary/90 h-9 px-4 py-2"
+                        >
+                            Add Selected
+                        </button>
+                    </div>
+                }
+            >
+                <div className="space-y-4">
+                    <p className="text-sm text-muted-foreground">
+                        Select provider templates to add. Templates are added <strong>disabled</strong> by default.
+                        Configure API keys in the Environment page, then enable the provider.
+                    </p>
+                    <div className="space-y-2">
+                        <h4 className="text-sm font-medium">Full Agents (Cloud)</h4>
+                        {[
+                            { id: 'openai_realtime', name: 'OpenAI Realtime', desc: 'GPT-4o real-time voice agent' },
+                            { id: 'deepgram', name: 'Deepgram', desc: 'Nova-2 STT + Aura TTS voice agent' },
+                            { id: 'google_live', name: 'Google Live', desc: 'Gemini 2.0 Flash real-time agent' },
+                            { id: 'elevenlabs_agent', name: 'ElevenLabs Agent', desc: 'ElevenLabs conversational AI' },
+                        ].map(template => (
+                            <label key={template.id} className="flex items-start gap-3 p-3 border rounded-lg hover:bg-accent/50 cursor-pointer">
+                                <input
+                                    type="checkbox"
+                                    checked={selectedTemplates.includes(template.id)}
+                                    onChange={(e) => {
+                                        if (e.target.checked) {
+                                            setSelectedTemplates([...selectedTemplates, template.id]);
+                                        } else {
+                                            setSelectedTemplates(selectedTemplates.filter(t => t !== template.id));
+                                        }
+                                    }}
+                                    disabled={!!config.providers?.[template.id]}
+                                    className="mt-1"
+                                />
+                                <div className="flex-1">
+                                    <div className="flex items-center gap-2">
+                                        <span className="font-medium">{template.name}</span>
+                                        {config.providers?.[template.id] && (
+                                            <span className="text-xs bg-muted text-muted-foreground px-2 py-0.5 rounded">Already exists</span>
+                                        )}
+                                    </div>
+                                    <p className="text-xs text-muted-foreground">{template.desc}</p>
+                                </div>
+                            </label>
+                        ))}
+                    </div>
+                    <div className="space-y-2">
+                        <h4 className="text-sm font-medium">Modular Providers (Local)</h4>
+                        <label className="flex items-start gap-3 p-3 border rounded-lg hover:bg-accent/50 cursor-pointer">
+                            <input
+                                type="checkbox"
+                                checked={selectedTemplates.includes('local_modular')}
+                                onChange={(e) => {
+                                    if (e.target.checked) {
+                                        setSelectedTemplates([...selectedTemplates, 'local_modular']);
+                                    } else {
+                                        setSelectedTemplates(selectedTemplates.filter(t => t !== 'local_modular'));
+                                    }
+                                }}
+                                disabled={!!(config.providers?.local_stt && config.providers?.local_llm && config.providers?.local_tts)}
+                                className="mt-1"
+                            />
+                            <div className="flex-1">
+                                <div className="flex items-center gap-2">
+                                    <span className="font-medium">Local Modular (STT + LLM + TTS)</span>
+                                    {config.providers?.local_stt && config.providers?.local_llm && config.providers?.local_tts && (
+                                        <span className="text-xs bg-muted text-muted-foreground px-2 py-0.5 rounded">Already exists</span>
+                                    )}
+                                </div>
+                                <p className="text-xs text-muted-foreground">Adds local_stt, local_llm, local_tts for pipeline use</p>
+                            </div>
+                        </label>
+                    </div>
+                </div>
             </Modal>
         </div>
     );

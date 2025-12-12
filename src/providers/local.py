@@ -47,6 +47,11 @@ class LocalProvider(AIProviderInterface):
     def supported_codecs(self) -> List[str]:
         return ["ulaw"]
 
+    def is_ready(self) -> bool:
+        """Check if provider is properly configured with WebSocket URL."""
+        ws_url = getattr(self, 'ws_url', None) or ""
+        return bool(ws_url and str(ws_url).strip())
+
     async def _connect_ws(self):
         # Use conservative client settings; server will drive pings if needed
         return await asyncio.wait_for(

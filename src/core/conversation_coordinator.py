@@ -157,8 +157,18 @@ class ConversationCoordinator:
         await self._session_store.upsert_call(session)
         self._set_state_metric(call_id, state)
 
+    def get_pending_timer_count(self) -> int:
+        """Return the number of pending fallback timers."""
+        return len([t for t in self._capture_fallback_tasks.values() if not t.done()])
+
     async def schedule_capture_fallback(self, call_id: str, delay: float) -> None:
         """Ensure audio capture is eventually re-enabled after a delay."""
+        logger.info(
+            "[TIMER] Scheduled: action=capture_fallback",
+            call_id=call_id,
+            delay_seconds=delay,
+            pending_timers=self.get_pending_timer_count() + 1,
+        )
         await self._cancel_capture_fallback(call_id)
 
         async def _task():
@@ -172,9 +182,17 @@ class ConversationCoordinator:
                 session.audio_capture_enabled = True
                 await self._session_store.upsert_call(session)
                 _AUDIO_CAPTURE_GAUGE.labels(call_id).set(1)
-                logger.info("🎤 ConversationCoordinator fallback re-enabled capture", call_id=call_id)
+                logger.info(
+                    "[TIMER] Executed: action=capture_fallback",
+                    call_id=call_id,
+                    result="capture_re_enabled",
+                )
             except asyncio.CancelledError:
-                logger.debug("ConversationCoordinator capture fallback cancelled", call_id=call_id)
+                logger.info(
+                    "[TIMER] Cancelled: action=capture_fallback",
+                    call_id=call_id,
+                    reason="task_cancelled",
+                )
             except Exception:  # pragma: no cover - defensive logging
                 logger.exception("ConversationCoordinator capture fallback failed", call_id=call_id)
 

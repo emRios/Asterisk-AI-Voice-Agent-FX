@@ -601,6 +601,8 @@ class SingleModelDownload(BaseModel):
     type: str  # stt, tts, llm
     download_url: str
     model_path: Optional[str] = None
+    config_url: Optional[str] = None  # For TTS models that need JSON config
+    voice_files: Optional[Dict[str, str]] = None  # For Kokoro TTS voice files
 
 
 @router.post("/local/download-model")
@@ -720,7 +722,12 @@ async def download_single_model(request: SingleModelDownload):
                 _download_output.append("🧹 Cleaned up archive file")
             else:
                 # Single file - rename to model_path or keep original name
-                if request.model_path:
+                # Special handling for Kokoro which uses a directory structure
+                if request.model_id == "kokoro_82m":
+                    kokoro_dir = os.path.join(target_dir, "kokoro")
+                    os.makedirs(kokoro_dir, exist_ok=True)
+                    final_path = os.path.join(kokoro_dir, "kokoro-v1_0.pth")
+                elif request.model_path:
                     final_path = os.path.join(target_dir, request.model_path)
                 else:
                     final_path = os.path.join(target_dir, os.path.basename(request.download_url))
@@ -728,6 +735,35 @@ async def download_single_model(request: SingleModelDownload):
                 if temp_file != final_path:
                     shutil.move(temp_file, final_path)
                 _download_output.append(f"✅ Saved to {final_path}")
+                
+                # Download config file for TTS models (e.g., Piper .onnx.json)
+                if request.config_url and request.type == "tts":
+                    # For Kokoro, config goes in the model directory; for Piper, next to .onnx
+                    if request.model_id == "kokoro_82m":
+                        kokoro_dir = os.path.dirname(final_path)
+                        config_dest = os.path.join(kokoro_dir, "config.json")
+                    else:
+                        config_dest = final_path + ".json"
+                    _download_output.append(f"📥 Downloading config file...")
+                    try:
+                        urllib.request.urlretrieve(request.config_url, config_dest)
+                        _download_output.append(f"✅ Config saved to {config_dest}")
+                    except Exception as config_err:
+                        _download_output.append(f"⚠️ Config download failed: {config_err}")
+                
+                # Download voice files for Kokoro TTS
+                if request.voice_files and request.type == "tts":
+                    kokoro_dir = os.path.dirname(final_path)
+                    voices_dir = os.path.join(kokoro_dir, "voices")
+                    os.makedirs(voices_dir, exist_ok=True)
+                    _download_output.append(f"📥 Downloading voice files...")
+                    for voice_name, voice_url in request.voice_files.items():
+                        try:
+                            voice_dest = os.path.join(voices_dir, f"{voice_name}.pt")
+                            urllib.request.urlretrieve(voice_url, voice_dest)
+                            _download_output.append(f"✅ Voice '{voice_name}' saved")
+                        except Exception as voice_err:
+                            _download_output.append(f"⚠️ Voice '{voice_name}' download failed: {voice_err}")
             
             _download_status["running"] = False
             _download_status["completed"] = True
@@ -1297,6 +1333,102 @@ async def get_local_server_status():
         return {"running": False, "healthy": False, "error": str(e)}
 
 
+class ModelSwitchRequest(BaseModel):
+    stt_backend: Optional[str] = None  # vosk, sherpa, kroko
+    stt_model_path: Optional[str] = None
+    llm_model_path: Optional[str] = None
+    tts_backend: Optional[str] = None  # piper, kokoro
+    tts_model_path: Optional[str] = None
+    kokoro_voice: Optional[str] = None
+
+
+@router.post("/local/switch-model")
+async def switch_local_model(request: ModelSwitchRequest):
+    """Switch models on the running local-ai-server without restart.
+    
+    Sends a WebSocket message to the local AI server to switch models dynamically.
+    Also updates .env for persistence across restarts.
+    """
+    import websockets
+    import json
+    from settings import PROJECT_ROOT
+    
+    # Build the switch request
+    switch_data = {"type": "switch_model"}
+    env_updates = []
+    
+    if request.stt_backend:
+        switch_data["stt_backend"] = request.stt_backend
+        env_updates.append(f"LOCAL_STT_BACKEND={request.stt_backend}")
+    
+    if request.stt_model_path:
+        switch_data["stt_model_path"] = request.stt_model_path
+        env_updates.append(f"LOCAL_STT_MODEL_PATH={request.stt_model_path}")
+    
+    if request.llm_model_path:
+        switch_data["llm_model_path"] = request.llm_model_path
+        env_updates.append(f"LOCAL_LLM_MODEL_PATH={request.llm_model_path}")
+    
+    if request.tts_backend:
+        switch_data["tts_backend"] = request.tts_backend
+        env_updates.append(f"LOCAL_TTS_BACKEND={request.tts_backend}")
+    
+    if request.tts_model_path:
+        switch_data["tts_model_path"] = request.tts_model_path
+        env_updates.append(f"LOCAL_TTS_MODEL_PATH={request.tts_model_path}")
+    
+    if request.kokoro_voice:
+        switch_data["kokoro_voice"] = request.kokoro_voice
+        env_updates.append(f"KOKORO_VOICE={request.kokoro_voice}")
+    
+    # Update .env for persistence
+    if env_updates:
+        try:
+            env_path = os.path.join(PROJECT_ROOT, ".env")
+            env_content = ""
+            if os.path.exists(env_path):
+                with open(env_path, "r") as f:
+                    env_content = f.read()
+            
+            import re
+            for update in env_updates:
+                key = update.split("=")[0]
+                env_content = re.sub(f"^{key}=.*$", "", env_content, flags=re.MULTILINE)
+            
+            with open(env_path, "a") as f:
+                f.write("\n# Model switch from Dashboard\n")
+                for update in env_updates:
+                    f.write(f"{update}\n")
+        except Exception as e:
+            return {"success": False, "message": f"Failed to update .env: {e}"}
+    
+    # Send switch command to local AI server via WebSocket
+    try:
+        async with websockets.connect("ws://127.0.0.1:8765", ping_interval=None) as ws:
+            await ws.send(json.dumps(switch_data))
+            response = await ws.recv()
+            result = json.loads(response)
+            
+            if result.get("status") == "success":
+                return {
+                    "success": True,
+                    "message": result.get("message", "Models switched successfully"),
+                    "changed": result.get("changed", []),
+                    "env_updated": env_updates
+                }
+            else:
+                return {
+                    "success": False,
+                    "message": result.get("message", "Switch failed"),
+                }
+    except Exception as e:
+        return {
+            "success": False, 
+            "message": f"Could not connect to local AI server: {e}. Restart the server for changes to take effect.",
+            "env_updated": env_updates
+        }
+
+
 class ApiKeyValidation(BaseModel):
     provider: str
     api_key: str
@@ -1565,92 +1697,156 @@ async def save_setup_config(config: SetupConfig):
             for key, val in current_env.items():
                 f.write(f"{key}={val}\n")
 
-        # 2. Update ai-agent.yaml
+        # 2. Update ai-agent.yaml - APPEND MODE
+        # If provider already exists, just enable it and update greeting
+        # If provider doesn't exist, create full config
+        # Don't auto-disable other providers (user manages via Dashboard)
         if os.path.exists(CONFIG_PATH):
             with open(CONFIG_PATH, "r") as f:
                 yaml_config = yaml.safe_load(f)
             
-            # Update default provider based on provider selection
-            # CRITICAL: Monolithic providers (openai_realtime, deepgram, google_live, elevenlabs_agent)
-            # must have active_pipeline cleared/disabled to avoid pipeline mode taking over
+            yaml_config.setdefault("providers", {})
+            providers = yaml_config["providers"]
+            
+            # Helper to check if provider already exists with config
+            def provider_exists(name: str) -> bool:
+                return name in providers and len(providers[name]) > 1  # More than just 'enabled'
+            
+            # Full agent providers - clear active_pipeline when setting as default
+            if config.provider in ["openai_realtime", "deepgram", "google_live", "elevenlabs_agent", "local"]:
+                yaml_config["default_provider"] = config.provider
+                yaml_config["active_pipeline"] = None  # Full agents don't use pipelines
+            
             if config.provider == "openai_realtime":
-                yaml_config["default_provider"] = "openai_realtime"
-                yaml_config["active_pipeline"] = None  # Disable pipeline mode for monolithic provider
-                yaml_config.setdefault("providers", {})
-                yaml_config["providers"].setdefault("openai_realtime", {})["enabled"] = True
-                yaml_config["providers"]["openai_realtime"]["greeting"] = config.greeting
-                # Set essential config for OpenAI Realtime
-                yaml_config["providers"]["openai_realtime"]["model"] = "gpt-4o-realtime-preview-2024-12-17"
-                yaml_config["providers"]["openai_realtime"]["voice"] = "alloy"
-                yaml_config["providers"]["openai_realtime"]["instructions"] = f"You are {config.ai_name}, a {config.ai_role}. Be helpful and concise. Always speak your responses out loud."
-                # Audio format config for telephony
-                yaml_config["providers"]["openai_realtime"]["input_encoding"] = "ulaw"
-                yaml_config["providers"]["openai_realtime"]["input_sample_rate_hz"] = 8000
-                yaml_config["providers"]["openai_realtime"]["target_encoding"] = "mulaw"
-                yaml_config["providers"]["openai_realtime"]["target_sample_rate_hz"] = 8000
-                # Turn detection for natural conversation
-                yaml_config["providers"]["openai_realtime"]["turn_detection"] = {
-                    "type": "server_vad",
-                    "threshold": 0.5,
-                    "silence_duration_ms": 1000,
-                    "prefix_padding_ms": 300,
-                    "create_response": True
-                }
-                yaml_config["providers"].setdefault("deepgram", {})["enabled"] = False
-                yaml_config["providers"].setdefault("local", {})["enabled"] = False
-                yaml_config["providers"].setdefault("google_live", {})["enabled"] = False
+                providers.setdefault("openai_realtime", {})["enabled"] = True
+                # Only set full config if provider doesn't exist yet
+                if not provider_exists("openai_realtime"):
+                    providers["openai_realtime"].update({
+                        "model": "gpt-4o-realtime-preview-2024-12-17",
+                        "voice": "alloy",
+                        "input_encoding": "ulaw",
+                        "input_sample_rate_hz": 8000,
+                        "target_encoding": "mulaw",
+                        "target_sample_rate_hz": 8000,
+                        "turn_detection": {
+                            "type": "server_vad",
+                            "threshold": 0.5,
+                            "silence_duration_ms": 1000,
+                            "prefix_padding_ms": 300,
+                            "create_response": True
+                        }
+                    })
+                # Always update greeting and instructions
+                providers["openai_realtime"]["greeting"] = config.greeting
+                providers["openai_realtime"]["instructions"] = f"You are {config.ai_name}, a {config.ai_role}. Be helpful and concise. Always speak your responses out loud."
                 
             elif config.provider == "deepgram":
-                yaml_config["default_provider"] = "deepgram"
-                yaml_config["active_pipeline"] = None  # Disable pipeline mode for monolithic provider
-                yaml_config.setdefault("providers", {})
-                yaml_config["providers"].setdefault("deepgram", {})["enabled"] = True
-                yaml_config["providers"]["deepgram"]["greeting"] = config.greeting
-                yaml_config["providers"]["deepgram"]["instructions"] = f"You are {config.ai_name}, a {config.ai_role}. Be helpful and concise."
-                # Deepgram Voice Agent config
-                yaml_config["providers"]["deepgram"]["model"] = "nova-2-general"
-                yaml_config["providers"]["deepgram"]["tts_model"] = "aura-asteria-en"
-                # Audio format for telephony
-                yaml_config["providers"]["deepgram"]["input_encoding"] = "mulaw"
-                yaml_config["providers"]["deepgram"]["input_sample_rate_hz"] = 8000
-                yaml_config["providers"]["deepgram"]["output_encoding"] = "mulaw"
-                yaml_config["providers"]["deepgram"]["output_sample_rate_hz"] = 8000
-                yaml_config["providers"].setdefault("openai_realtime", {})["enabled"] = False
-                yaml_config["providers"].setdefault("local", {})["enabled"] = False
-                yaml_config["providers"].setdefault("google_live", {})["enabled"] = False
+                providers.setdefault("deepgram", {})["enabled"] = True
+                if not provider_exists("deepgram"):
+                    providers["deepgram"].update({
+                        "model": "nova-2-general",
+                        "tts_model": "aura-asteria-en",
+                        "input_encoding": "mulaw",
+                        "input_sample_rate_hz": 8000,
+                        "output_encoding": "mulaw",
+                        "output_sample_rate_hz": 8000
+                    })
+                providers["deepgram"]["greeting"] = config.greeting
+                providers["deepgram"]["instructions"] = f"You are {config.ai_name}, a {config.ai_role}. Be helpful and concise."
                 
+            elif config.provider == "google_live":
+                providers.setdefault("google_live", {})["enabled"] = True
+                if not provider_exists("google_live"):
+                    providers["google_live"].update({
+                        "api_key": "${GOOGLE_API_KEY}",
+                        "llm_model": "gemini-2.0-flash-exp",
+                        "input_encoding": "ulaw",
+                        "input_sample_rate_hz": 8000,
+                        "provider_input_encoding": "linear16",
+                        "provider_input_sample_rate_hz": 16000,
+                        "target_encoding": "ulaw",
+                        "target_sample_rate_hz": 8000,
+                        "response_modalities": "audio",
+                        "type": "full",
+                        "capabilities": ["stt", "llm", "tts"]
+                    })
+                providers["google_live"]["greeting"] = config.greeting
+                providers["google_live"]["instructions"] = f"You are {config.ai_name}, a {config.ai_role}. Be helpful and concise."
+
+            elif config.provider == "elevenlabs_agent":
+                providers.setdefault("elevenlabs_agent", {})["enabled"] = True
+                if not provider_exists("elevenlabs_agent"):
+                    providers["elevenlabs_agent"].update({
+                        "api_key": "${ELEVENLABS_API_KEY}",
+                        "agent_id": "${ELEVENLABS_AGENT_ID}",
+                        "type": "full",
+                        "capabilities": ["stt", "llm", "tts"],
+                        "input_encoding": "ulaw",
+                        "input_sample_rate_hz": 8000,
+                        "target_encoding": "ulaw",
+                        "target_sample_rate_hz": 8000
+                    })
+
+            elif config.provider == "local":
+                providers.setdefault("local", {})["enabled"] = True
+                if not provider_exists("local"):
+                    providers["local"].update({
+                        "type": "full",
+                        "capabilities": ["stt", "llm", "tts"],
+                        "base_url": "${LOCAL_WS_URL:-ws://127.0.0.1:8765}",
+                        "connect_timeout_sec": 2.0,
+                        "response_timeout_sec": 10.0,
+                        "chunk_ms": 320
+                    })
+                providers["local"]["greeting"] = config.greeting
+                providers["local"]["instructions"] = f"You are {config.ai_name}, a {config.ai_role}. Be helpful and concise."
+                # Start local-ai-server container
+                try:
+                    client = docker.from_env()
+                    try:
+                        container = client.containers.get("local_ai_server")
+                        if container.status != "running":
+                            container.start()
+                    except docker.errors.NotFound:
+                        print("Warning: local_ai_server container not found")
+                except Exception as e:
+                    print(f"Error starting local_ai_server: {e}")
+
             elif config.provider == "local_hybrid":
                 # local_hybrid is a PIPELINE (Local STT + OpenAI LLM + Local TTS)
                 yaml_config["active_pipeline"] = "local_hybrid"
                 yaml_config["default_provider"] = "local"  # Fallback provider
-                yaml_config.setdefault("providers", {})
                 
-                # Configure local provider for STT and TTS
-                yaml_config["providers"].setdefault("local", {})["enabled"] = True
-                yaml_config["providers"]["local"]["type"] = "full"
-                yaml_config["providers"]["local"]["capabilities"] = ["stt", "llm", "tts"]
-                yaml_config["providers"]["local"]["base_url"] = "${LOCAL_WS_URL:-ws://127.0.0.1:8765}"
-                yaml_config["providers"]["local"]["connect_timeout_sec"] = 2.0
-                yaml_config["providers"]["local"]["response_timeout_sec"] = 10.0
-                yaml_config["providers"]["local"]["chunk_ms"] = 320
+                # Configure local provider
+                providers.setdefault("local", {})["enabled"] = True
+                if not provider_exists("local"):
+                    providers["local"].update({
+                        "type": "full",
+                        "capabilities": ["stt", "llm", "tts"],
+                        "base_url": "${LOCAL_WS_URL:-ws://127.0.0.1:8765}",
+                        "connect_timeout_sec": 2.0,
+                        "response_timeout_sec": 10.0,
+                        "chunk_ms": 320
+                    })
                 
-                # Configure local_stt and local_tts for pipeline
-                yaml_config["providers"].setdefault("local_stt", {})["enabled"] = True
-                yaml_config["providers"]["local_stt"]["ws_url"] = "${LOCAL_WS_URL:-ws://127.0.0.1:8765}"
-                yaml_config["providers"]["local_stt"]["stt_backend"] = "vosk"
+                # Configure pipeline components
+                providers.setdefault("local_stt", {})["enabled"] = True
+                if not provider_exists("local_stt"):
+                    providers["local_stt"].update({
+                        "ws_url": "${LOCAL_WS_URL:-ws://127.0.0.1:8765}",
+                        "stt_backend": "vosk"
+                    })
                 
-                yaml_config["providers"].setdefault("local_tts", {})["enabled"] = True
-                yaml_config["providers"]["local_tts"]["ws_url"] = "${LOCAL_WS_URL:-ws://127.0.0.1:8765}"
+                providers.setdefault("local_tts", {})["enabled"] = True
+                if not provider_exists("local_tts"):
+                    providers["local_tts"]["ws_url"] = "${LOCAL_WS_URL:-ws://127.0.0.1:8765}"
                 
-                # Configure OpenAI LLM for pipeline
-                yaml_config["providers"].setdefault("openai_llm", {})["enabled"] = True
-                yaml_config["providers"]["openai_llm"]["chat_base_url"] = "https://api.openai.com/v1"
-                yaml_config["providers"]["openai_llm"]["chat_model"] = "gpt-4o-mini"
-                
-                # Ensure monolithic providers are disabled
-                yaml_config["providers"].setdefault("openai_realtime", {})["enabled"] = False
-                yaml_config["providers"].setdefault("deepgram", {})["enabled"] = False
-                yaml_config["providers"].setdefault("google_live", {})["enabled"] = False
+                providers.setdefault("openai_llm", {})["enabled"] = True
+                if not provider_exists("openai_llm"):
+                    providers["openai_llm"].update({
+                        "chat_base_url": "https://api.openai.com/v1",
+                        "chat_model": "gpt-4o-mini"
+                    })
                 
                 # Define the pipeline
                 yaml_config.setdefault("pipelines", {})["local_hybrid"] = {
@@ -1662,92 +1858,12 @@ async def save_setup_config(config: SetupConfig):
                 # Start local-ai-server container
                 try:
                     client = docker.from_env()
-                    # Check if container exists
                     try:
                         container = client.containers.get("local_ai_server")
                         if container.status != "running":
                             container.start()
                     except docker.errors.NotFound:
-                        print("Warning: local_ai_server container not found. Please run 'docker compose up -d local-ai-server'")
-                except Exception as e:
-                    print(f"Error starting local_ai_server: {e}")
-                    # Don't fail the wizard if docker fails, just log it
-
-
-            elif config.provider == "google_live":
-                yaml_config["default_provider"] = "google_live"
-                yaml_config["active_pipeline"] = None  # Disable pipeline mode for monolithic provider
-                yaml_config.setdefault("providers", {})
-                yaml_config["providers"].setdefault("google_live", {})["enabled"] = True
-                yaml_config["providers"]["google_live"]["greeting"] = config.greeting
-                yaml_config["providers"]["google_live"]["api_key"] = "${GOOGLE_API_KEY}"  # Reference env var
-                yaml_config["providers"]["google_live"]["instructions"] = f"You are {config.ai_name}, a {config.ai_role}. Be helpful and concise."
-                # CRITICAL: Set correct model for Google Live API
-                # Only models with bidiGenerateContent support work with Live API
-                # gemini-2.0-flash-exp is widely available; gemini-2.0-flash-live may not be
-                yaml_config["providers"]["google_live"]["llm_model"] = "gemini-2.0-flash-exp"
-                # Audio format for telephony (matches server config)
-                yaml_config["providers"]["google_live"]["input_encoding"] = "ulaw"
-                yaml_config["providers"]["google_live"]["input_sample_rate_hz"] = 8000
-                yaml_config["providers"]["google_live"]["provider_input_encoding"] = "linear16"
-                yaml_config["providers"]["google_live"]["provider_input_sample_rate_hz"] = 16000
-                yaml_config["providers"]["google_live"]["target_encoding"] = "ulaw"
-                yaml_config["providers"]["google_live"]["target_sample_rate_hz"] = 8000
-                yaml_config["providers"]["google_live"]["response_modalities"] = "audio"
-                yaml_config["providers"]["google_live"]["type"] = "full"
-                yaml_config["providers"]["google_live"]["capabilities"] = ["stt", "llm", "tts"]
-                yaml_config["providers"].setdefault("openai_realtime", {})["enabled"] = False
-                yaml_config["providers"].setdefault("deepgram", {})["enabled"] = False
-                yaml_config["providers"].setdefault("local", {})["enabled"] = False
-
-            elif config.provider == "elevenlabs_agent":
-                yaml_config["default_provider"] = "elevenlabs_agent"
-                yaml_config["active_pipeline"] = None  # Disable pipeline mode for monolithic provider
-                yaml_config.setdefault("providers", {})
-                yaml_config["providers"].setdefault("elevenlabs_agent", {})["enabled"] = True
-                yaml_config["providers"]["elevenlabs_agent"]["api_key"] = "${ELEVENLABS_API_KEY}"
-                yaml_config["providers"]["elevenlabs_agent"]["agent_id"] = "${ELEVENLABS_AGENT_ID}"
-                # ElevenLabs greeting/instructions are configured in the ElevenLabs dashboard
-                yaml_config["providers"]["elevenlabs_agent"]["type"] = "full"
-                yaml_config["providers"]["elevenlabs_agent"]["capabilities"] = ["stt", "llm", "tts"]
-                # Audio format for telephony
-                yaml_config["providers"]["elevenlabs_agent"]["input_encoding"] = "ulaw"
-                yaml_config["providers"]["elevenlabs_agent"]["input_sample_rate_hz"] = 8000
-                yaml_config["providers"]["elevenlabs_agent"]["target_encoding"] = "ulaw"
-                yaml_config["providers"]["elevenlabs_agent"]["target_sample_rate_hz"] = 8000
-                yaml_config["providers"].setdefault("openai_realtime", {})["enabled"] = False
-                yaml_config["providers"].setdefault("deepgram", {})["enabled"] = False
-                yaml_config["providers"].setdefault("google_live", {})["enabled"] = False
-                yaml_config["providers"].setdefault("local", {})["enabled"] = False
-
-            elif config.provider == "local":
-                # Local Full: 100% on-premises using Local AI Server as full agent
-                yaml_config["default_provider"] = "local"
-                yaml_config["active_pipeline"] = None  # Disable pipeline mode for monolithic provider
-                yaml_config.setdefault("providers", {})
-                yaml_config["providers"].setdefault("local", {})["enabled"] = True
-                yaml_config["providers"]["local"]["greeting"] = config.greeting
-                yaml_config["providers"]["local"]["instructions"] = f"You are {config.ai_name}, a {config.ai_role}. Be helpful and concise."
-                yaml_config["providers"]["local"]["type"] = "full"
-                yaml_config["providers"]["local"]["capabilities"] = ["stt", "llm", "tts"]
-                yaml_config["providers"]["local"]["base_url"] = "${LOCAL_WS_URL:-ws://127.0.0.1:8765}"
-                # Timeouts for local server
-                yaml_config["providers"]["local"]["connect_timeout_sec"] = 2.0
-                yaml_config["providers"]["local"]["response_timeout_sec"] = 10.0
-                yaml_config["providers"]["local"]["chunk_ms"] = 320
-                yaml_config["providers"].setdefault("openai_realtime", {})["enabled"] = False
-                yaml_config["providers"].setdefault("deepgram", {})["enabled"] = False
-                yaml_config["providers"].setdefault("google_live", {})["enabled"] = False
-                
-                # Start local-ai-server container
-                try:
-                    client = docker.from_env()
-                    try:
-                        container = client.containers.get("local_ai_server")
-                        if container.status != "running":
-                            container.start()
-                    except docker.errors.NotFound:
-                        print("Warning: local_ai_server container not found. Please run 'docker compose up -d local-ai-server'")
+                        print("Warning: local_ai_server container not found")
                 except Exception as e:
                     print(f"Error starting local_ai_server: {e}")
 

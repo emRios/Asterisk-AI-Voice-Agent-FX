@@ -104,6 +104,7 @@ const Wizard = () => {
         existingModels: { stt: string[]; llm: string[]; tts: string[] };
         downloading: boolean;
         downloadOutput: string[];
+        downloadProgress: { bytes_downloaded: number; total_bytes: number; percent: number; speed_bps: number; eta_seconds: number | null; current_file: string } | null;
         downloadCompleted: boolean;
         serverStarted: boolean;
         serverLogs: string[];
@@ -120,6 +121,7 @@ const Wizard = () => {
         systemDetected: false,
         downloading: false,
         downloadOutput: [] as string[],
+        downloadProgress: null,
         downloadCompleted: false,
         serverStarted: false,
         serverLogs: [] as string[],
@@ -1197,7 +1199,15 @@ const Wizard = () => {
                                                                 const res = await axios.get('/api/wizard/local/download-progress');
                                                                 setLocalAIStatus(prev => ({
                                                                     ...prev,
-                                                                    downloadOutput: res.data.output || []
+                                                                    downloadOutput: res.data.output || [],
+                                                                    downloadProgress: res.data.running ? {
+                                                                        bytes_downloaded: res.data.bytes_downloaded || 0,
+                                                                        total_bytes: res.data.total_bytes || 0,
+                                                                        percent: res.data.percent || 0,
+                                                                        speed_bps: res.data.speed_bps || 0,
+                                                                        eta_seconds: res.data.eta_seconds,
+                                                                        current_file: res.data.current_file || ''
+                                                                    } : null
                                                                 }));
 
                                                                 if (res.data.completed) {
@@ -1205,16 +1215,17 @@ const Wizard = () => {
                                                                         ...prev,
                                                                         downloading: false,
                                                                         downloadCompleted: true,
-                                                                        modelsReady: true
+                                                                        modelsReady: true,
+                                                                        downloadProgress: null
                                                                     }));
                                                                 } else if (res.data.error) {
                                                                     setError('Download failed: ' + res.data.error);
-                                                                    setLocalAIStatus(prev => ({ ...prev, downloading: false }));
+                                                                    setLocalAIStatus(prev => ({ ...prev, downloading: false, downloadProgress: null }));
                                                                 } else if (res.data.running) {
-                                                                    setTimeout(pollProgress, 2000);
+                                                                    setTimeout(pollProgress, 1000);
                                                                 }
                                                             } catch (err) {
-                                                                setTimeout(pollProgress, 3000);
+                                                                setTimeout(pollProgress, 2000);
                                                             }
                                                         };
                                                         pollProgress();
@@ -1244,6 +1255,33 @@ const Wizard = () => {
                                                 )}
                                             </button>
                                         </div>
+
+                                        {/* Download Progress Bar */}
+                                        {localAIStatus.downloadProgress && localAIStatus.downloadProgress.total_bytes > 0 && (
+                                            <div className="mt-4 space-y-2">
+                                                <div className="flex justify-between text-xs text-gray-600 dark:text-gray-400">
+                                                    <span>{localAIStatus.downloadProgress.current_file}</span>
+                                                    <span>
+                                                        {(localAIStatus.downloadProgress.bytes_downloaded / (1024 * 1024)).toFixed(1)} / {(localAIStatus.downloadProgress.total_bytes / (1024 * 1024)).toFixed(1)} MB
+                                                    </span>
+                                                </div>
+                                                <div className="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-3">
+                                                    <div 
+                                                        className="bg-blue-600 h-3 rounded-full transition-all duration-300"
+                                                        style={{ width: `${localAIStatus.downloadProgress.percent}%` }}
+                                                    />
+                                                </div>
+                                                <div className="flex justify-between text-xs text-gray-500 dark:text-gray-400">
+                                                    <span>{localAIStatus.downloadProgress.percent}%</span>
+                                                    <span>
+                                                        {(localAIStatus.downloadProgress.speed_bps / (1024 * 1024)).toFixed(2)} MB/s
+                                                        {localAIStatus.downloadProgress.eta_seconds && (
+                                                            <> • ETA: {Math.floor(localAIStatus.downloadProgress.eta_seconds / 60)}m {localAIStatus.downloadProgress.eta_seconds % 60}s</>
+                                                        )}
+                                                    </span>
+                                                </div>
+                                            </div>
+                                        )}
 
                                         {/* Download Output */}
                                         {localAIStatus.downloadOutput.length > 0 && (

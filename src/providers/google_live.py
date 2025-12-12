@@ -149,6 +149,11 @@ class GoogleLiveProvider(AIProviderInterface):
         """Return list of supported audio codecs (μ-law for telephony)."""
         return ["ulaw"]
 
+    def is_ready(self) -> bool:
+        """Check if provider is properly configured with required API key."""
+        api_key = getattr(self.config, 'api_key', None) or ""
+        return bool(api_key and str(api_key).strip())
+
     async def start_session(
         self,
         call_id: str,

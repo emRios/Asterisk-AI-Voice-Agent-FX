@@ -204,6 +204,11 @@ class DeepgramProvider(AIProviderInterface):
     def supported_codecs(self) -> List[str]:
         return ["ulaw"]
 
+    def is_ready(self) -> bool:
+        """Check if provider is properly configured with required API key."""
+        api_key = self._get_config_value('api_key', '')
+        return bool(api_key and str(api_key).strip())
+
     # P1: Static capability hints for orchestrator
     def get_capabilities(self) -> ProviderCapabilities:
         return ProviderCapabilities(

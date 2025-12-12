@@ -269,3 +269,8 @@ AVA.mdc
 
 # Vite cache
 .vite/
+
+# Development artifacts (not for main branch)
+.agent/
+walkthrough.md
+admin_ui/RELEASE_SUMMARY.md
