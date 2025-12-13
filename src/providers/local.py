@@ -36,6 +36,42 @@ class LocalProvider(AIProviderInterface):
         self._initial_greeting: Optional[str] = None
         # Mode for local_ai_server: "full" or "stt" (for hybrid pipelines with cloud LLM)
         self._mode: str = getattr(config, 'mode', 'full') or 'full'
+        # Track if server port is unavailable (not running at all)
+        self._server_unavailable: bool = False
+        # Parse host/port from ws_url for port checking
+        self._server_host, self._server_port = self._parse_ws_url(self.ws_url)
+
+    def _parse_ws_url(self, ws_url: str) -> tuple:
+        """Parse host and port from WebSocket URL."""
+        try:
+            # ws://127.0.0.1:8765 or ws://127.0.0.1:8765/ws
+            url = ws_url.replace('ws://', '').replace('wss://', '')
+            host_port = url.split('/')[0]
+            if ':' in host_port:
+                host, port = host_port.split(':')
+                return host, int(port)
+            return host_port, 8765  # default port
+        except Exception:
+            return '127.0.0.1', 8765
+
+    async def _is_port_open(self, timeout: float = 0.5) -> bool:
+        """Quick TCP check if local AI server port is listening.
+        
+        Returns True if port is open (server container is running).
+        Returns False if port is closed (server not running/not set up).
+        """
+        try:
+            _, writer = await asyncio.wait_for(
+                asyncio.open_connection(self._server_host, self._server_port),
+                timeout=timeout
+            )
+            writer.close()
+            await writer.wait_closed()
+            return True
+        except (ConnectionRefusedError, OSError, asyncio.TimeoutError):
+            return False
+        except Exception:
+            return False
 
     def set_initial_greeting(self, text: Optional[str]) -> None:
         try:
@@ -87,6 +123,31 @@ class LocalProvider(AIProviderInterface):
             raise RuntimeError(f"Auth rejected: {data}")
 
     async def _reconnect(self):
+        # HYBRID APPROACH: Quick port check first
+        # If port is closed, server is not running at all - skip immediately
+        # If port is open, server is starting/running - use retry logic
+        
+        port_open = await self._is_port_open(timeout=0.5)
+        
+        if not port_open:
+            # Port closed = server container not running = not set up
+            logger.info(
+                "⏭️ Local AI Server port not open - skipping connection",
+                host=self._server_host,
+                port=self._server_port,
+                note="Start local-ai-server container if you want to use local STT/TTS/LLM"
+            )
+            self._server_unavailable = True
+            return False
+        
+        # Port is open - server is running, proceed with retry logic for warmup
+        logger.info(
+            "🔄 Local AI Server port is open, connecting...",
+            host=self._server_host,
+            port=self._server_port
+        )
+        self._server_unavailable = False
+        
         # Exponential backoff up to 30s, total ~3 minutes to cover LLM warmup (~111s)
         backoff_schedule = [2, 5, 10, 20, 30, 30, 30, 30]  # Total: ~157s
         total_elapsed = 0
@@ -129,7 +190,17 @@ class LocalProvider(AIProviderInterface):
                 return True
                 
             except (ConnectionRefusedError, OSError) as e:
-                # Common during startup - don't spam logs with full error
+                # Port was open but connection failed - server might be restarting
+                # Re-check if port is still open before retrying
+                if not await self._is_port_open(timeout=0.3):
+                    logger.info(
+                        "⏭️ Local AI Server port closed during retry - stopping",
+                        note="Server may have stopped"
+                    )
+                    self._server_unavailable = True
+                    return False
+                
+                # Port still open, continue retrying
                 if attempt < len(backoff_schedule):
                     logger.debug(
                         f"Connection attempt {attempt} failed (likely warmup)",
@@ -157,18 +228,33 @@ class LocalProvider(AIProviderInterface):
         return False
 
     async def initialize(self):
-        """Initialize persistent connection to Local AI Server."""
+        """Initialize persistent connection to Local AI Server.
+        
+        If the server port is not open (server not running), this will
+        mark the provider as unavailable and return gracefully without error.
+        """
         try:
             if self.websocket and not self.websocket.closed:
                 logger.debug("WebSocket already connected, skipping initialization")
                 return
             
             logger.info("Initializing connection to Local AI Server...", url=self.ws_url)
-            # Use _reconnect method which has retry logic
+            # Use _reconnect method which has port check + retry logic
             success = await self._reconnect()
             if not success:
-                raise RuntimeError("Failed to connect to Local AI Server after retries")
+                if self._server_unavailable:
+                    # Port was not open - server not set up, this is OK
+                    logger.info(
+                        "Local AI Server not available - provider will be inactive",
+                        note="This is normal if you haven't set up local-ai-server"
+                    )
+                    return  # Don't raise, just mark as unavailable
+                else:
+                    # Port was open but connection failed after retries
+                    raise RuntimeError("Failed to connect to Local AI Server after retries")
             logger.info("✅ Successfully connected to Local AI Server.")
+        except RuntimeError:
+            raise
         except Exception:
             logger.error("Failed to initialize connection to Local AI Server", exc_info=True)
             raise
