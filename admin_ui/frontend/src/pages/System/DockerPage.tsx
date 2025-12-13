@@ -57,10 +57,17 @@ const DockerPage = () => {
     const handleRestart = async (id: string, name: string) => {
         setActionLoading(id);
         try {
-            await axios.post(`/api/system/containers/${id}/restart`);
+            await axios.post(`/api/system/containers/${id}/restart`, {}, { timeout: 30000 });
             showToast(`Container "${name}" restarted successfully`, 'success');
             await fetchContainers();
         } catch (err: any) {
+            // Network error when restarting admin_ui is expected - the container restarts before response
+            if (name === 'admin_ui' && (err.message === 'Network Error' || err.code === 'ECONNABORTED')) {
+                showToast('Admin UI is restarting... Page will reload shortly.', 'success');
+                // Wait for container to come back up, then reload
+                setTimeout(() => window.location.reload(), 5000);
+                return;
+            }
             showToast('Failed to restart: ' + (err.response?.data?.detail || err.message), 'error');
         } finally {
             setActionLoading(null);
