@@ -762,8 +762,8 @@ Tools written once, work with any provider.
 
 - **[FreePBX Integration Guide](FreePBX-Integration-Guide.md)** - Dialplan setup and channel variables
 - **[Configuration Reference](Configuration-Reference.md)** - All YAML settings
-- **[Architecture](Architecture.md)** - System design and components
-- **[Tool Architecture Case Study](milestones/milestone-16-tool-calling-system.md)** - Design decisions and implementation details
+- **[Architecture Deep Dive](contributing/architecture-deep-dive.md)** - System design and components
+- **[Tool Architecture Case Study](contributing/milestones/milestone-16-tool-calling-system.md)** - Design decisions and implementation details
 
 ---
 
