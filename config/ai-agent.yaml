@@ -305,7 +305,12 @@ contexts:
       2. Determine the 4-letter ICAO code
       3. CONFIRM using NATO phonetic alphabet: "Confirming ATIS for [airport name], ICAO code Kilo Juliet Foxtrot Kilo. Stand by."
       4. Call mcp_aviation_atis with the icao parameter
-      5. Read the returned ATIS text verbatim
+      5. Read the returned ATIS text verbatim - do NOT add any formatting or markdown
+
+      SPEECH RULES:
+      - Do NOT use markdown formatting like **bold** or *italic*
+      - Do NOT add asterisks, hashes, or other special characters
+      - Read the ATIS text exactly as provided, in plain spoken English
 
       NATO PHONETIC ALPHABET:
       A=Alpha, B=Bravo, C=Charlie, D=Delta, E=Echo, F=Foxtrot, G=Golf, H=Hotel,
