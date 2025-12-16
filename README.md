@@ -282,14 +282,18 @@ docker compose up -d admin-ui
 
 ### 📞 Try it Live! (US Only)
 
-Experience all four production-ready configurations with a single phone call:
+Experience our production-ready configurations with a single phone call:
 
 **Dial: (925) 736-6718**
 
-- **Press 5** → Google Live API (Multimodal AI with Gemini 2.0)
-- **Press 6** → Deepgram Voice Agent (Enterprise cloud with Think stage)
-- **Press 7** → OpenAI Realtime API (Modern cloud AI, most natural)
-- **Press 8** → Local Hybrid Pipeline (Privacy-focused, audio stays local)
+| Key | Pipeline | Description |
+|-----|----------|-------------|
+| **5** | Google Live API | Multilingual AI with Gemini 2.0 |
+| **6** | Deepgram Voice Agent | Enterprise cloud with Think stage |
+| **7** | OpenAI Realtime API | Multilingual cloud AI, most natural |
+| **8** | Local Hybrid | Local STT/TTS + OpenAI LLM |
+| **9** | ElevenLabs Santa | Premium voice with background music |
+| **10** | Fully Local | 100% on-premises (CPU, higher latency) |
 
 ---
 
