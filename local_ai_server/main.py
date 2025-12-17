@@ -20,8 +20,19 @@ from websockets.exceptions import ConnectionClosed, ConnectionClosedError, Conne
 from websockets.asyncio.server import serve
 import websockets.client as ws_client
 
-# Suppress noisy websockets handshake errors (health checks, scanners, incomplete connections)
-logging.getLogger("websockets.server").setLevel(logging.WARNING)
+# Filter noisy websockets handshake errors (health checks, scanners, incomplete connections)
+# Only filters "opening handshake failed" - other websockets errors remain visible
+class _WebSocketHandshakeFilter(logging.Filter):
+    """Filter out noisy websockets handshake failures from health checks/probes."""
+    def filter(self, record):
+        # In DEBUG mode, show everything
+        if os.getenv("LOCAL_LOG_LEVEL", "INFO").upper() == "DEBUG":
+            return True
+        # Filter out "opening handshake failed" messages
+        msg = record.getMessage() if hasattr(record, 'getMessage') else str(record.msg)
+        return "opening handshake failed" not in msg
+
+logging.getLogger("websockets.server").addFilter(_WebSocketHandshakeFilter())
 
 from constants import (
     _level_name,
