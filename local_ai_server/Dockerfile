@@ -82,7 +82,7 @@ RUN apt-get update && apt-get install -y \
 # ─────────────────────────────────────────────────────────────────────────────
 # Known checksums - update these when upgrading versions
 # ONNX Runtime 1.17.1 Linux x64: https://github.com/microsoft/onnxruntime/releases/tag/v1.17.1
-ARG ONNX_RUNTIME_SHA256="8e4c0b5d68c2c5e1c9da3dc2d1cb4c4f8c5b5a4c3b2a1f0e9d8c7b6a5f4e3d2c1"
+ARG ONNX_RUNTIME_SHA256="89b153af88746665909c758a06797175ae366280cbf25502c41eb5955f9a555e"
 # Kroko server: Obtain from official Kroko release notes or contact vendor
 # IMPORTANT: Set via --build-arg KROKO_SERVER_SHA256=<hash> or update this default
 ARG KROKO_SERVER_SHA256=""

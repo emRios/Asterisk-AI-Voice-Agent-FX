@@ -2958,13 +2958,18 @@ async def main():
         port = int(os.getenv("LOCAL_WS_PORT", "8765"))
         
         # SECURITY: Fail-closed for non-localhost bind without auth token
+        # Treat 0.0.0.0, ::, ::0, and any non-localhost as remote-accessible
         auth_token = os.getenv("LOCAL_WS_AUTH_TOKEN", "").strip()
-        if host != "127.0.0.1" and host != "localhost" and not auth_token:
+        loopback_addresses = ("127.0.0.1", "localhost", "::1")
+        is_loopback = host in loopback_addresses
+        
+        if not is_loopback and not auth_token:
             logging.error(
-                "🚨 SECURITY: LOCAL_WS_HOST=%s (non-localhost) but LOCAL_WS_AUTH_TOKEN is not set. "
-                "All connections will be REJECTED until LOCAL_WS_AUTH_TOKEN is configured.",
+                "🚨 SECURITY: LOCAL_WS_HOST=%s (non-loopback) but LOCAL_WS_AUTH_TOKEN is not set. "
+                "Refusing to start - set LOCAL_WS_AUTH_TOKEN or bind to 127.0.0.1.",
                 host
             )
+            sys.exit(1)
 
         async with serve(
             server.handler,
