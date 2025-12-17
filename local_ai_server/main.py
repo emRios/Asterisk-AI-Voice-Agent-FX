@@ -2913,7 +2913,7 @@ class LocalAIServer:
 
     async def handler(self, websocket):
         """Enhanced WebSocket handler with MVP pipeline and hot reloading"""
-        logging.debug("🔌 New connection established: %s", websocket.remote_address)
+        logging.info("🔌 Client connected: %s", websocket.remote_address)
         
         # SECURITY: Fail-closed for remote connections without auth token configured
         # If server is bound to non-localhost AND no auth token is set, reject all connections
@@ -3001,4 +3001,6 @@ async def main():
 
 
 if __name__ == "__main__":
+    # Suppress noisy websockets handshake errors (e.g., health checks, scanners)
+    logging.getLogger("websockets.server").setLevel(logging.WARNING)
     asyncio.run(main())
