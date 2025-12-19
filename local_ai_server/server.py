@@ -1973,11 +1973,18 @@ class LocalAIServer:
         updates: List[Dict[str, Any]] = []
         
         try:
+            # Reset backend's internal buffer since we manage our own buffer
+            await asyncio.to_thread(self.faster_whisper_backend.reset)
+            
             # Process buffered audio with Faster-Whisper
-            result = await asyncio.to_thread(
+            await asyncio.to_thread(
                 self.faster_whisper_backend.process_audio,
                 session.fw_audio_buffer
             )
+            
+            # Call finalize() to get the final transcript
+            # (Whisper is a batch model, each chunk is effectively final)
+            result = await asyncio.to_thread(self.faster_whisper_backend.finalize)
             
             if result and result.get("text"):
                 transcript = result["text"].strip()
