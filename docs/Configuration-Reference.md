@@ -94,6 +94,17 @@ Controls interruption of TTS playback when the caller speaks.
 - barge_in.energy_threshold: 1000–3000. RMS energy threshold; raise on noisy lines.
 - barge_in.cooldown_ms: 500–1500 ms. Ignore new barge‑ins after one triggers.
 - barge_in.post_tts_end_protection_ms: 250–500 ms. Short guard to avoid clipping the start of the next caller utterance.
+- barge_in.pipeline_min_ms: 80–250 ms. Pipeline-only (local file playback) minimum talk duration before triggering barge-in.
+- barge_in.pipeline_energy_threshold: 200–1200. Pipeline-only RMS threshold (more sensitive than full-agent mode).
+- barge_in.pipeline_talk_detect_enabled: true/false. Pipeline-only; uses Asterisk `TALK_DETECT` (ARI `ChannelTalkingStarted`) to trigger barge-in during channel playback.
+- barge_in.pipeline_talk_detect_silence_ms: 800–2000. Pipeline-only; `TALK_DETECT(set)` silence window.
+- barge_in.pipeline_talk_detect_talking_threshold: 64–256. Pipeline-only; `TALK_DETECT(set)` talking threshold.
+
+Notes (pipelines / `local_hybrid`):
+
+- Pipelines play TTS locally (file playback), so the platform can flush playback on barge-in without colliding with provider-owned VAD/cancellation.
+- With ExternalMedia, Asterisk channel playback may pause/alter the inbound RTP stream; `TALK_DETECT` is the preferred trigger source for pipeline barge-in.
+- Prereqs: Asterisk must have talk detection available (`app_talkdetect.so` / `func_talkdetect.so`). Verify with `asterisk -rx 'module show like talkdetect'` and `asterisk -rx 'core show function TALK_DETECT'`.
 
 Tuning guidance:
 
