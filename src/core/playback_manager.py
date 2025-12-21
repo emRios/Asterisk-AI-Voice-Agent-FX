@@ -224,6 +224,42 @@ class PlaybackManager:
                         error=str(e),
                         exc_info=True)
             return False
+
+    async def wait_for_playback_end(
+        self,
+        call_id: str,
+        playback_id: str,
+        *,
+        timeout_sec: float,
+        poll_interval_sec: float = 0.05,
+    ) -> bool:
+        """Wait until a playback is no longer considered active.
+
+        This is used by pipelines so that sleeps can be interrupted by barge-in
+        (which stops playback and clears gating tokens).
+
+        Completion conditions:
+        - PlaybackRef removed from SessionStore, OR
+        - Gating token cleared for this playback_id.
+        """
+        try:
+            deadline = time.time() + max(0.0, float(timeout_sec))
+            while time.time() < deadline:
+                playback_ref = await self.session_store.get_playback(playback_id)
+                if not playback_ref:
+                    return True
+                session = await self.session_store.get_by_call_id(call_id)
+                if session:
+                    try:
+                        if playback_id not in (getattr(session, "tts_tokens", set()) or set()):
+                            return True
+                    except Exception:
+                        pass
+                await asyncio.sleep(max(0.01, float(poll_interval_sec)))
+            return False
+        except Exception:
+            logger.debug("wait_for_playback_end failed", call_id=call_id, playback_id=playback_id, exc_info=True)
+            return False
     
     def _generate_playback_id(self, call_id: str, playback_type: str) -> str:
         """Generate deterministic, unique playback ID with ns resolution and sequence."""
@@ -271,45 +307,67 @@ class PlaybackManager:
     
     async def _play_via_ari(self, session: CallSession, audio_file: str, 
                            playback_id: str) -> bool:
-        """Play audio file via ARI bridge."""
+        """Play audio file via ARI.
+
+        For pipeline playbacks we prefer channel-scoped playback (caller channel) to avoid
+        leaking TTS into ExternalMedia capture (which causes false barge-in triggers).
+        """
         try:
-            if not session.bridge_id:
-                logger.error("Cannot play audio - no bridge ID",
-                           call_id=session.call_id,
-                           playback_id=playback_id)
-                return False
-            
             # Create sound URI (remove .ulaw extension - Asterisk adds it)
             sound_uri = f"sound:ai-generated/{os.path.basename(audio_file).replace('.ulaw', '')}"
-            
-            # Play via bridge. Prefer deterministic ID method to correlate PlaybackFinished.
-            play_basic = getattr(self.ari_client, "play_audio_via_bridge", None)
-            play_with_id = getattr(self.ari_client, "play_media_on_bridge_with_id", None)
 
             success = False
-            if play_with_id and callable(play_with_id):
-                result = play_with_id(session.bridge_id, sound_uri, playback_id)
-                if inspect.isawaitable(result):
-                    result = await result
-                success = bool(result)
-            elif play_basic and callable(play_basic):
-                result = play_basic(session.bridge_id, sound_uri)
-                if inspect.isawaitable(result):
-                    result = await result
-                success = bool(result)
+            is_pipeline = playback_id.startswith("pipeline-")
+            if is_pipeline and getattr(session, "caller_channel_id", None):
+                play_chan_with_id = getattr(self.ari_client, "play_media_on_channel_with_id", None)
+                if play_chan_with_id and callable(play_chan_with_id):
+                    result = play_chan_with_id(session.caller_channel_id, sound_uri, playback_id)
+                    if inspect.isawaitable(result):
+                        result = await result
+                    success = bool(result)
+                else:
+                    raise AttributeError("ARI client missing channel playback method")
             else:
-                raise AttributeError("ARI client missing playback method")
+                if not session.bridge_id:
+                    logger.error(
+                        "Cannot play audio - no bridge ID",
+                        call_id=session.call_id,
+                        playback_id=playback_id,
+                    )
+                    return False
+                play_basic = getattr(self.ari_client, "play_audio_via_bridge", None)
+                play_with_id = getattr(self.ari_client, "play_media_on_bridge_with_id", None)
+                if play_with_id and callable(play_with_id):
+                    result = play_with_id(session.bridge_id, sound_uri, playback_id)
+                    if inspect.isawaitable(result):
+                        result = await result
+                    success = bool(result)
+                elif play_basic and callable(play_basic):
+                    result = play_basic(session.bridge_id, sound_uri)
+                    if inspect.isawaitable(result):
+                        result = await result
+                    success = bool(result)
+                else:
+                    raise AttributeError("ARI client missing bridge playback method")
             
             if success:
-                logger.info("Bridge playback started",
-                           bridge_id=session.bridge_id,
-                           media_uri=sound_uri,
-                           playback_id=playback_id)
+                logger.info(
+                    "Playback started",
+                    bridge_id=session.bridge_id,
+                    channel_id=getattr(session, "caller_channel_id", None),
+                    media_uri=sound_uri,
+                    playback_id=playback_id,
+                    target="channel" if is_pipeline else "bridge",
+                )
             else:
-                logger.error("Failed to start bridge playback",
-                           bridge_id=session.bridge_id,
-                           media_uri=sound_uri,
-                           playback_id=playback_id)
+                logger.error(
+                    "Failed to start playback",
+                    bridge_id=session.bridge_id,
+                    channel_id=getattr(session, "caller_channel_id", None),
+                    media_uri=sound_uri,
+                    playback_id=playback_id,
+                    target="channel" if is_pipeline else "bridge",
+                )
             return success
             
         except Exception as e:

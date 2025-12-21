@@ -456,6 +456,10 @@ class Engine:
         self.ari_client.on_event("ChannelDestroyed", self._handle_channel_destroyed)
         self.ari_client.on_event("ChannelDtmfReceived", self._handle_dtmf_received)
         self.ari_client.on_event("ChannelVarset", self._handle_channel_varset)
+        # Pipelines (local_hybrid): use Asterisk talk detection to trigger barge-in during
+        # channel playback, where ExternalMedia RTP can be paused/altered.
+        self.ari_client.on_event("ChannelTalkingStarted", self._handle_channel_talking_started)
+        self.ari_client.on_event("ChannelTalkingFinished", self._handle_channel_talking_finished)
 
     async def on_rtp_packet(self, packet: bytes, addr: tuple):
         """Handle incoming RTP packets from the UDP server."""
@@ -2059,6 +2063,158 @@ class Engine:
         except Exception as exc:
             logger.error("Error handling ChannelVarset", error=str(exc), exc_info=True)
 
+    async def _enable_pipeline_talk_detect(self, session: CallSession) -> None:
+        """Enable Asterisk talk detection (TALK_DETECT) on the caller channel for pipelines."""
+        try:
+            cfg = getattr(self.config, "barge_in", None)
+            if not cfg or not bool(getattr(cfg, "pipeline_talk_detect_enabled", False)):
+                return
+            call_id = session.call_id
+            if not bool(self._pipeline_forced.get(call_id)):
+                return
+            channel_id = getattr(session, "caller_channel_id", None)
+            if not channel_id:
+                return
+            if not getattr(session, "vad_state", None):
+                session.vad_state = {}
+            td = session.vad_state.setdefault("pipeline_talk_detect", {})
+            if bool(td.get("enabled", False)):
+                return
+            silence_ms = int(getattr(cfg, "pipeline_talk_detect_silence_ms", 1200))
+            talking_thr = int(getattr(cfg, "pipeline_talk_detect_talking_threshold", 128))
+            value = f"{silence_ms},{talking_thr}"
+            ok = await self.ari_client.set_channel_var(channel_id, "TALK_DETECT(set)", value)
+            td.update(
+                {
+                    "enabled": bool(ok),
+                    "channel_id": channel_id,
+                    "set_ts": time.time(),
+                    "silence_ms": silence_ms,
+                    "talking_threshold": talking_thr,
+                }
+            )
+            await self._save_session(session)
+            if ok:
+                logger.info(
+                    "Enabled TALK_DETECT for pipeline",
+                    call_id=call_id,
+                    channel_id=channel_id,
+                    silence_ms=silence_ms,
+                    talking_threshold=talking_thr,
+                )
+            else:
+                logger.warning("Failed to enable TALK_DETECT for pipeline", call_id=call_id, channel_id=channel_id)
+        except Exception:
+            logger.debug("Enable TALK_DETECT failed", call_id=getattr(session, "call_id", None), exc_info=True)
+
+    async def _disable_pipeline_talk_detect(self, session: CallSession) -> None:
+        """Disable Asterisk talk detection (TALK_DETECT) on the caller channel for pipelines."""
+        try:
+            cfg = getattr(self.config, "barge_in", None)
+            if not cfg or not bool(getattr(cfg, "pipeline_talk_detect_enabled", False)):
+                return
+            call_id = session.call_id
+            channel_id = getattr(session, "caller_channel_id", None)
+            if not channel_id:
+                return
+            td_enabled = False
+            if getattr(session, "vad_state", None):
+                td = session.vad_state.get("pipeline_talk_detect", {}) or {}
+                td_enabled = bool(td.get("enabled", False))
+            if not td_enabled:
+                return
+            await self.ari_client.set_channel_var(channel_id, "TALK_DETECT(remove)", "")
+            try:
+                td = session.vad_state.get("pipeline_talk_detect", {}) or {}
+                td["enabled"] = False
+                td["remove_ts"] = time.time()
+                session.vad_state["pipeline_talk_detect"] = td
+                await self._save_session(session)
+            except Exception:
+                pass
+            logger.info("Disabled TALK_DETECT for pipeline", call_id=call_id, channel_id=channel_id)
+        except Exception:
+            logger.debug("Disable TALK_DETECT failed", call_id=getattr(session, "call_id", None), exc_info=True)
+
+    async def _handle_channel_talking_started(self, event: dict) -> None:
+        """Trigger pipeline barge-in when Asterisk detects caller speech during TTS playback."""
+        try:
+            channel = event.get("channel", {}) or {}
+            channel_id = channel.get("id")
+            if not channel_id:
+                return
+
+            session = await self.session_store.get_by_channel_id(channel_id)
+            if not session:
+                return
+            call_id = session.call_id
+
+            if not bool(self._pipeline_forced.get(call_id)):
+                return
+
+            # Only act when local playback/gating is active; otherwise this is just "caller is talking".
+            if bool(getattr(session, "audio_capture_enabled", True)) and not bool(getattr(session, "tts_playing", False)):
+                return
+
+            cfg = getattr(self.config, "barge_in", None)
+            if not cfg or not getattr(cfg, "enabled", True):
+                return
+
+            now = time.time()
+            tts_elapsed_ms = 0
+            try:
+                if getattr(session, "tts_started_ts", 0.0) > 0:
+                    tts_elapsed_ms = int((now - float(session.tts_started_ts)) * 1000)
+            except Exception:
+                tts_elapsed_ms = 0
+
+            initial_protect = int(getattr(cfg, "initial_protection_ms", 200))
+            try:
+                if getattr(session, "conversation_state", None) == "greeting":
+                    greet_ms = int(getattr(cfg, "greeting_protection_ms", 0))
+                    if greet_ms > initial_protect:
+                        initial_protect = greet_ms
+            except Exception:
+                pass
+            if tts_elapsed_ms < initial_protect:
+                return
+
+            cooldown_ms = int(getattr(cfg, "cooldown_ms", 500))
+            last_barge_in_ts = float(getattr(session, "last_barge_in_ts", 0.0) or 0.0)
+            if last_barge_in_ts and (now - last_barge_in_ts) * 1000 < cooldown_ms:
+                return
+
+            # Treat talk detection as sufficient evidence of an active media path for platform flush.
+            try:
+                if not bool(getattr(session, "media_rx_confirmed", False)):
+                    session.media_rx_confirmed = True
+                    session.first_media_rx_ts = now
+                    await self._save_session(session)
+            except Exception:
+                pass
+
+            await self._apply_barge_in_action(call_id, source="talkdetect", reason="ChannelTalkingStarted")
+            logger.info("🎧 BARGE-IN (TalkDetect) triggered", call_id=call_id, channel_id=channel_id)
+        except Exception:
+            logger.debug("ChannelTalkingStarted handler failed", ari_event=event, exc_info=True)
+
+    async def _handle_channel_talking_finished(self, event: dict) -> None:
+        """Informational handler for talk detection end events (pipelines)."""
+        try:
+            channel = event.get("channel", {}) or {}
+            channel_id = channel.get("id")
+            if not channel_id:
+                return
+            session = await self.session_store.get_by_channel_id(channel_id)
+            if not session:
+                return
+            call_id = session.call_id
+            if not bool(self._pipeline_forced.get(call_id)):
+                return
+            logger.debug("TalkDetect finished", call_id=call_id, channel_id=channel_id)
+        except Exception:
+            logger.debug("ChannelTalkingFinished handler failed", ari_event=event, exc_info=True)
+
     async def _cleanup_call(self, channel_or_call_id: str) -> None:
         """Shared cleanup for StasisEnd/ChannelDestroyed paths."""
         try:
@@ -2194,6 +2350,10 @@ class Engine:
                         q.put_nowait(None)
                     except Exception:
                         pass
+                try:
+                    await self._disable_pipeline_talk_detect(session)
+                except Exception:
+                    logger.debug("Pipeline talk detect disable failed", call_id=call_id, exc_info=True)
                 self._pipeline_forced.pop(call_id, None)
             except Exception:
                 logger.debug("Pipeline cleanup failed", call_id=call_id, exc_info=True)
@@ -2871,8 +3031,103 @@ class Engine:
             if self._pipeline_forced.get(caller_channel_id):
                 # AAVA-28: Check gating to prevent agent from hearing its own TTS output
                 if not session.audio_capture_enabled:
-                    # Drop audio during TTS playback (gating active)
-                    return
+                    # Pipelines: allow barge-in detection during TTS gating, but do not forward audio until triggered.
+                    cfg = getattr(self.config, "barge_in", None)
+                    if not cfg or not getattr(cfg, "enabled", True):
+                        return
+                    # If TALK_DETECT is enabled for this pipeline, prefer it over local energy checks
+                    # to avoid double-triggering and false positives on AudioSocket.
+                    try:
+                        td = (session.vad_state or {}).get("pipeline_talk_detect", {}) or {}
+                        if bool(td.get("enabled", False)):
+                            return
+                    except Exception:
+                        pass
+                    now = time.time()
+                    tts_elapsed_ms = 0
+                    try:
+                        if getattr(session, "tts_started_ts", 0.0) > 0:
+                            tts_elapsed_ms = int((now - float(session.tts_started_ts)) * 1000)
+                    except Exception:
+                        tts_elapsed_ms = 0
+                    initial_protect = int(getattr(cfg, "initial_protection_ms", 200))
+                    try:
+                        if getattr(session, "conversation_state", None) == "greeting":
+                            greet_ms = int(getattr(cfg, "greeting_protection_ms", 0))
+                            if greet_ms > initial_protect:
+                                initial_protect = greet_ms
+                    except Exception:
+                        pass
+                    if tts_elapsed_ms < initial_protect:
+                        return
+                    try:
+                        energy = audioop.rms(pcm_bytes, 2)
+                    except Exception:
+                        energy = 0
+                    threshold = int(getattr(cfg, "pipeline_energy_threshold", 0) or getattr(cfg, "energy_threshold", 1000))
+                    try:
+                        frame_ms = int((len(pcm_bytes) / float(2 * max(1, int(pcm_rate)))) * 1000)
+                        if frame_ms <= 0:
+                            frame_ms = 20
+                    except Exception:
+                        frame_ms = 20
+                    if energy >= threshold:
+                        if int(getattr(session, "barge_in_candidate_ms", 0)) == 0:
+                            try:
+                                session.barge_start_ts = now
+                            except Exception:
+                                session.barge_start_ts = 0.0
+                        session.barge_in_candidate_ms = int(getattr(session, "barge_in_candidate_ms", 0)) + frame_ms
+                    else:
+                        session.barge_in_candidate_ms = 0
+
+                    # Debug monitor (rate-limited) so we can see why pipeline barge-in is/isn't firing.
+                    try:
+                        mon = session.vad_state.setdefault("pipeline_barge_mon", {})
+                        last = float(mon.get("last_ts", 0.0) or 0.0)
+                        if now - last >= 1.0:
+                            mon["last_ts"] = now
+                            logger.debug(
+                                "Pipeline barge-in monitor (AudioSocket)",
+                                call_id=caller_channel_id,
+                                tts_elapsed_ms=tts_elapsed_ms,
+                                energy=energy,
+                                threshold=threshold,
+                                candidate_ms=int(getattr(session, "barge_in_candidate_ms", 0) or 0),
+                                audio_capture_enabled=session.audio_capture_enabled,
+                            )
+                    except Exception:
+                        pass
+
+                    cooldown_ms = int(getattr(cfg, "cooldown_ms", 500))
+                    last_barge_in_ts = float(getattr(session, "last_barge_in_ts", 0.0) or 0.0)
+                    in_cooldown = (now - last_barge_in_ts) * 1000 < cooldown_ms if last_barge_in_ts else False
+                    min_ms = int(getattr(cfg, "pipeline_min_ms", 0) or getattr(cfg, "min_ms", 250))
+                    if not in_cooldown and int(getattr(session, "barge_in_candidate_ms", 0)) >= min_ms:
+                        try:
+                            try:
+                                if float(getattr(session, "barge_start_ts", 0.0) or 0.0) > 0.0:
+                                    reaction_s = max(0.0, now - float(session.barge_start_ts))
+                                    _BARGE_REACTION_SECONDS.labels(caller_channel_id).observe(reaction_s)
+                                    session.barge_start_ts = 0.0
+                            except Exception:
+                                pass
+                            await self._apply_barge_in_action(
+                                caller_channel_id,
+                                source="local_vad",
+                                reason="pipeline_tts_overlap",
+                            )
+                            session.audio_capture_enabled = True
+                            logger.info("🎧 BARGE-IN (AudioSocket/pipeline) triggered", call_id=caller_channel_id)
+                        except Exception:
+                            logger.error("Error triggering AudioSocket pipeline barge-in", call_id=caller_channel_id, exc_info=True)
+                    else:
+                        if energy > 0 and self.conversation_coordinator:
+                            try:
+                                self.conversation_coordinator.note_audio_during_tts(caller_channel_id)
+                            except Exception:
+                                pass
+                        return
                 
                 q = self._pipeline_queues.get(caller_channel_id)
                 if q:
@@ -4145,8 +4400,97 @@ class Engine:
             if pipeline_forced:
                 # AAVA-28: Check gating to prevent agent from hearing its own TTS output
                 if not session.audio_capture_enabled:
-                    # Drop audio during TTS playback (gating active)
-                    return
+                    # Pipelines: allow barge-in detection during TTS gating, but do not forward audio until triggered.
+                    cfg = getattr(self.config, "barge_in", None)
+                    if not cfg or not getattr(cfg, "enabled", True):
+                        return
+                    # If TALK_DETECT is enabled for this pipeline, prefer it over local energy checks.
+                    try:
+                        td = (session.vad_state or {}).get("pipeline_talk_detect", {}) or {}
+                        if bool(td.get("enabled", False)):
+                            return
+                    except Exception:
+                        pass
+                    now = time.time()
+                    tts_elapsed_ms = 0
+                    try:
+                        if getattr(session, "tts_started_ts", 0.0) > 0:
+                            tts_elapsed_ms = int((now - float(session.tts_started_ts)) * 1000)
+                    except Exception:
+                        tts_elapsed_ms = 0
+                    initial_protect = int(getattr(cfg, "initial_protection_ms", 200))
+                    try:
+                        if getattr(session, "conversation_state", None) == "greeting":
+                            greet_ms = int(getattr(cfg, "greeting_protection_ms", 0))
+                            if greet_ms > initial_protect:
+                                initial_protect = greet_ms
+                    except Exception:
+                        pass
+                    if tts_elapsed_ms < initial_protect:
+                        return
+                    try:
+                        energy = audioop.rms(pcm_16k, 2)
+                    except Exception:
+                        energy = 0
+                    threshold = int(getattr(cfg, "pipeline_energy_threshold", 0) or getattr(cfg, "energy_threshold", 1000))
+                    frame_ms = 20
+                    if energy >= threshold:
+                        if int(getattr(session, "barge_in_candidate_ms", 0)) == 0:
+                            try:
+                                session.barge_start_ts = now
+                            except Exception:
+                                session.barge_start_ts = 0.0
+                        session.barge_in_candidate_ms = int(getattr(session, "barge_in_candidate_ms", 0)) + frame_ms
+                    else:
+                        session.barge_in_candidate_ms = 0
+
+                    # Debug monitor (rate-limited) so we can see why pipeline barge-in is/isn't firing.
+                    try:
+                        mon = session.vad_state.setdefault("pipeline_barge_mon", {})
+                        last = float(mon.get("last_ts", 0.0) or 0.0)
+                        if now - last >= 1.0:
+                            mon["last_ts"] = now
+                            logger.debug(
+                                "Pipeline barge-in monitor (RTP)",
+                                call_id=caller_channel_id,
+                                tts_elapsed_ms=tts_elapsed_ms,
+                                energy=energy,
+                                threshold=threshold,
+                                candidate_ms=int(getattr(session, "barge_in_candidate_ms", 0) or 0),
+                                audio_capture_enabled=session.audio_capture_enabled,
+                            )
+                    except Exception:
+                        pass
+
+                    cooldown_ms = int(getattr(cfg, "cooldown_ms", 500))
+                    last_barge_in_ts = float(getattr(session, "last_barge_in_ts", 0.0) or 0.0)
+                    in_cooldown = (now - last_barge_in_ts) * 1000 < cooldown_ms if last_barge_in_ts else False
+                    min_ms = int(getattr(cfg, "pipeline_min_ms", 0) or getattr(cfg, "min_ms", 250))
+                    if not in_cooldown and int(getattr(session, "barge_in_candidate_ms", 0)) >= min_ms:
+                        try:
+                            try:
+                                if float(getattr(session, "barge_start_ts", 0.0) or 0.0) > 0.0:
+                                    reaction_s = max(0.0, now - float(session.barge_start_ts))
+                                    _BARGE_REACTION_SECONDS.labels(caller_channel_id).observe(reaction_s)
+                                    session.barge_start_ts = 0.0
+                            except Exception:
+                                pass
+                            await self._apply_barge_in_action(
+                                caller_channel_id,
+                                source="local_vad",
+                                reason="pipeline_tts_overlap",
+                            )
+                            session.audio_capture_enabled = True
+                            logger.info("🎧 BARGE-IN (RTP/pipeline) triggered", call_id=caller_channel_id)
+                        except Exception:
+                            logger.error("Error triggering RTP pipeline barge-in", call_id=caller_channel_id, exc_info=True)
+                    else:
+                        if energy > 0 and self.conversation_coordinator:
+                            try:
+                                self.conversation_coordinator.note_audio_during_tts(caller_channel_id)
+                            except Exception:
+                                pass
+                        return
                 
                 q = self._pipeline_queues.get(caller_channel_id)
                 if q:
@@ -5648,6 +5992,12 @@ class Engine:
         q: asyncio.Queue = asyncio.Queue(maxsize=200)
         self._pipeline_queues[call_id] = q
         self._pipeline_forced[call_id] = bool(forced)
+        # Pipelines: enable Asterisk talk detection so barge-in can trigger even when
+        # ExternalMedia RTP delivery is paused/altered during channel playback.
+        try:
+            await self._enable_pipeline_talk_detect(session)
+        except Exception:
+            logger.debug("Pipeline talk detect enable failed", call_id=call_id, exc_info=True)
         task = asyncio.create_task(self._pipeline_runner(call_id))
         self._pipeline_tasks[call_id] = task
         logger.info("Pipeline runner started", call_id=call_id, pipeline=session.pipeline_name)
@@ -6242,8 +6592,13 @@ class Engine:
                                                     if chunk:
                                                         wait_bytes.extend(chunk)
                                                 if wait_bytes:
-                                                    await self.playback_manager.play_audio(call_id, bytes(wait_bytes), "pipeline-wait")
-                                                    await asyncio.sleep(len(wait_bytes) / 8000.0 + 0.2)
+                                                    wait_pid = await self.playback_manager.play_audio(call_id, bytes(wait_bytes), "pipeline-wait")
+                                                    if wait_pid:
+                                                        await self.playback_manager.wait_for_playback_end(
+                                                            call_id,
+                                                            wait_pid,
+                                                            timeout_sec=(len(wait_bytes) / 8000.0 + 3.0),
+                                                        )
                                             except Exception:
                                                 logger.debug("Failed to speak slow-response message", call_id=call_id, exc_info=True)
                                     result = await tool_task
@@ -6269,8 +6624,13 @@ class Engine:
                                                     pid = await self.playback_manager.play_audio(call_id, bytes(fw_bytes), "pipeline-farewell")
                                                     # Calculate actual duration: mulaw 8kHz = 8000 bytes/sec
                                                     duration_sec = len(fw_bytes) / 8000.0
-                                                    # Wait for farewell + small buffer to ensure completion
-                                                    await asyncio.sleep(duration_sec + 0.5)
+                                                    # Wait for farewell (interruptible by barge-in) + small buffer
+                                                    if pid:
+                                                        await self.playback_manager.wait_for_playback_end(
+                                                            call_id,
+                                                            pid,
+                                                            timeout_sec=(duration_sec + 3.0),
+                                                        )
                                                     logger.info("Farewell playback completed", duration_sec=duration_sec, call_id=call_id)
                                             except Exception as e:
                                                 logger.error("Farewell TTS failed", error=str(e))
@@ -6328,9 +6688,14 @@ class Engine:
                                                             if chunk:
                                                                 tts_bytes.extend(chunk)
                                                         if tts_bytes:
-                                                            await self.playback_manager.play_audio(call_id, bytes(tts_bytes), "pipeline-tts")
+                                                            pid = await self.playback_manager.play_audio(call_id, bytes(tts_bytes), "pipeline-tts")
                                                             duration_sec = len(tts_bytes) / 8000.0
-                                                            await asyncio.sleep(duration_sec + 0.3)
+                                                            if pid:
+                                                                await self.playback_manager.wait_for_playback_end(
+                                                                    call_id,
+                                                                    pid,
+                                                                    timeout_sec=(duration_sec + 3.0),
+                                                                )
                                                 
                                                 # Handle tool calls (with or without text)
                                                 if getattr(llm_response, 'tool_calls', None):
@@ -6355,8 +6720,13 @@ class Engine:
                                                                             if chunk:
                                                                                 wait_bytes.extend(chunk)
                                                                         if wait_bytes:
-                                                                            await self.playback_manager.play_audio(call_id, bytes(wait_bytes), "pipeline-wait")
-                                                                            await asyncio.sleep(len(wait_bytes) / 8000.0 + 0.2)
+                                                                            wait_pid = await self.playback_manager.play_audio(call_id, bytes(wait_bytes), "pipeline-wait")
+                                                                            if wait_pid:
+                                                                                await self.playback_manager.wait_for_playback_end(
+                                                                                    call_id,
+                                                                                    wait_pid,
+                                                                                    timeout_sec=(len(wait_bytes) / 8000.0 + 3.0),
+                                                                                )
                                                                     except Exception:
                                                                         logger.debug("Failed to speak slow-response message", call_id=call_id, exc_info=True)
                                                             next_result = await next_task
@@ -6369,8 +6739,13 @@ class Engine:
                                                                 async for chunk in pipeline.tts_adapter.synthesize(call_id, farewell, pipeline.tts_options):
                                                                     fw_bytes.extend(chunk)
                                                                 if fw_bytes:
-                                                                    await self.playback_manager.play_audio(call_id, bytes(fw_bytes), "pipeline-farewell")
-                                                                    await asyncio.sleep(len(fw_bytes) / 8000.0 + 0.5)
+                                                                    fw_pid = await self.playback_manager.play_audio(call_id, bytes(fw_bytes), "pipeline-farewell")
+                                                                    if fw_pid:
+                                                                        await self.playback_manager.wait_for_playback_end(
+                                                                            call_id,
+                                                                            fw_pid,
+                                                                            timeout_sec=(len(fw_bytes) / 8000.0 + 3.0),
+                                                                        )
                                                                 await self.ari_client.hangup_channel(getattr(session, 'channel_id', call_id))
                                                                 return
                                         except Exception as e:

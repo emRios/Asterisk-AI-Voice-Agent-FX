@@ -317,6 +317,16 @@ class BargeInConfig(BaseModel):
     min_ms: int = Field(default=250)
     energy_threshold: int = Field(default=1000)
     cooldown_ms: int = Field(default=500)
+    # Pipeline (hybrid/local) barge-in tuning: pipelines play TTS locally (file playback),
+    # so we can use a more sensitive detector without colliding with provider-owned VAD.
+    pipeline_min_ms: int = Field(default=120)
+    pipeline_energy_threshold: int = Field(default=300)
+    # Pipelines: prefer Asterisk-side talk detection (TALK_DETECT) for robust barge-in,
+    # because ExternalMedia RTP can be paused/altered during channel playback.
+    pipeline_talk_detect_enabled: bool = Field(default=True)
+    # TALK_DETECT(set)=<dsp_silence_threshold_ms>,<dsp_talking_threshold>
+    pipeline_talk_detect_silence_ms: int = Field(default=1200)
+    pipeline_talk_detect_talking_threshold: int = Field(default=128)
     # New: short guard window after TTS ends to avoid self-echo re-capture
     post_tts_end_protection_ms: int = Field(default=250)
     # Extra protection during the first greeting turn
