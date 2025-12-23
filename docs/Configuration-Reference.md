@@ -4,7 +4,7 @@ This document explains every major option in `config/ai-agent.yaml`, the precede
 
 ## Configuration Architecture (v4.5)
 
-v4.0 introduces a **modular pipeline architecture** alongside monolithic provider support:
+Starting in v4.0, the project added a **modular pipeline architecture** alongside monolithic provider support:
 
 ### Monolithic Providers
 - **Single provider** handles STT, LLM, and TTS internally
