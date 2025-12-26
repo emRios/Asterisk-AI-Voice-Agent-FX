@@ -42,10 +42,12 @@ interface BackendCapabilities {
         sherpa: { available: boolean; reason: string };
         kroko_embedded: { available: boolean; reason: string };
         kroko_cloud: { available: boolean; reason: string };
+        faster_whisper: { available: boolean; reason: string };
     };
     tts: {
         piper: { available: boolean; reason: string };
         kokoro: { available: boolean; reason: string };
+        melotts: { available: boolean; reason: string };
     };
     llm: { available: boolean; reason: string };
 }
@@ -63,6 +65,8 @@ export const HealthWidget = () => {
     const [startingAIEngine, setStartingAIEngine] = useState(false);
     const [defaultProvider, setDefaultProvider] = useState<string | null>(null);
     const [activePipeline, setActivePipeline] = useState<string | null>(null);
+    const [rebuilding, setRebuilding] = useState(false);
+    const [rebuildProgress, setRebuildProgress] = useState<string>('');
 
     const handleStartContainer = async (containerName: string, setStarting: (v: boolean) => void) => {
         setStarting(true);
@@ -280,6 +284,57 @@ export const HealthWidget = () => {
         setPendingChanges({});
     };
 
+    // Check if pending changes require a rebuild (Faster-Whisper or MeloTTS when not available)
+    const needsRebuild = () => {
+        const needsFasterWhisper = pendingChanges.stt?.backend === 'faster_whisper' && 
+            capabilities && !capabilities.stt?.faster_whisper?.available;
+        const needsMeloTTS = pendingChanges.tts?.backend === 'melotts' && 
+            capabilities && !capabilities.tts?.melotts?.available;
+        return { needsFasterWhisper, needsMeloTTS, any: needsFasterWhisper || needsMeloTTS };
+    };
+
+    // Rebuild and enable new backends
+    const rebuildAndEnable = async () => {
+        const rebuild = needsRebuild();
+        if (!rebuild.any) return;
+
+        setRebuilding(true);
+        setRebuildProgress('Starting Docker rebuild... This may take 5-10 minutes.');
+
+        try {
+            const res = await axios.post('/api/local-ai/rebuild', {
+                include_faster_whisper: rebuild.needsFasterWhisper,
+                include_melotts: rebuild.needsMeloTTS,
+                stt_backend: pendingChanges.stt?.backend,
+                stt_model: pendingChanges.stt?.modelPath || 'base',
+                tts_backend: pendingChanges.tts?.backend,
+                tts_voice: pendingChanges.tts?.modelPath || 'EN-US',
+            });
+
+            if (res.data.success) {
+                setRebuildProgress('✅ ' + res.data.message);
+                // Clear pending changes
+                setPendingChanges({});
+                // Wait a moment then clear progress
+                setTimeout(() => {
+                    setRebuilding(false);
+                    setRebuildProgress('');
+                }, 3000);
+            } else {
+                setRebuildProgress('❌ ' + res.data.message);
+                setTimeout(() => {
+                    setRebuilding(false);
+                }, 5000);
+            }
+        } catch (err: any) {
+            console.error('Rebuild failed', err);
+            setRebuildProgress('❌ Rebuild failed: ' + (err.response?.data?.message || err.message));
+            setTimeout(() => {
+                setRebuilding(false);
+            }, 5000);
+        }
+    };
+
 
     if (loading) return <div className="animate-pulse h-48 bg-muted rounded-lg mb-6"></div>;
 
@@ -394,6 +449,61 @@ export const HealthWidget = () => {
 
                 {health.local_ai_server.status === 'connected' && (
                     <div className="space-y-4">
+                        {/* Degraded / mock-mode banner */}
+                        {(() => {
+                            const degraded = !!health?.local_ai_server?.details?.config?.degraded;
+                            const mockModels = !!health?.local_ai_server?.details?.config?.mock_models;
+                            const startupErrors = health?.local_ai_server?.details?.config?.startup_errors || {};
+                            const startupErrorEntries = Object.entries(startupErrors || {});
+
+                            if (!degraded && !mockModels) return null;
+
+                            return (
+                                <div className="space-y-2">
+                                    {mockModels && (
+                                        <div className="p-3 bg-blue-500/10 border border-blue-500/30 rounded-lg text-sm text-blue-700 dark:text-blue-300 flex items-start gap-2">
+                                            <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />
+                                            <div>
+                                                <div className="font-medium">Mock models enabled</div>
+                                                <div className="text-xs opacity-80">
+                                                    `LOCAL_AI_MOCK_MODELS=1` is set; status may not reflect real model loading.
+                                                </div>
+                                            </div>
+                                        </div>
+                                    )}
+
+                                    {degraded && (
+                                        <div className="p-3 bg-yellow-500/10 border border-yellow-500/30 rounded-lg text-sm text-yellow-700 dark:text-yellow-300">
+                                            <div className="flex items-start gap-2">
+                                                <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />
+                                                <div className="flex-1">
+                                                    <div className="font-medium">Degraded mode</div>
+                                                    <div className="text-xs opacity-80">
+                                                        Local AI Server started but some components failed to initialize.
+                                                    </div>
+                                                </div>
+                                            </div>
+                                            {startupErrorEntries.length > 0 && (
+                                                <details className="mt-2">
+                                                    <summary className="cursor-pointer text-xs opacity-90">
+                                                        Startup errors ({startupErrorEntries.length})
+                                                    </summary>
+                                                    <ul className="mt-2 space-y-1 text-xs opacity-90">
+                                                        {startupErrorEntries.map(([k, v]) => (
+                                                            <li key={k} className="flex gap-2">
+                                                                <span className="font-mono">{k}:</span>
+                                                                <span className="break-words">{String(v)}</span>
+                                                            </li>
+                                                        ))}
+                                                    </ul>
+                                                </details>
+                                            )}
+                                        </div>
+                                    )}
+                                </div>
+                            );
+                        })()}
+
                         {/* STT Section */}
                         <div className="space-y-2">
                             <div className="flex justify-between items-center text-sm">
@@ -475,6 +585,18 @@ export const HealthWidget = () => {
                                             // Only show Sherpa if available and has models
                                             if (!capabilities?.stt?.sherpa?.available || models.length === 0) return null;
                                         }
+                                        if (backend === 'faster_whisper') {
+                                            // Show Faster-Whisper option (requires rebuild)
+                                            return (
+                                                <optgroup key="faster_whisper" label="Faster-Whisper">
+                                                    <option key="faster_whisper_base" value="faster_whisper:base">Whisper Base (Recommended)</option>
+                                                    <option key="faster_whisper_tiny" value="faster_whisper:tiny">Whisper Tiny (Fast)</option>
+                                                    <option key="faster_whisper_small" value="faster_whisper:small">Whisper Small</option>
+                                                    <option key="faster_whisper_medium" value="faster_whisper:medium">Whisper Medium</option>
+                                                    <option key="faster_whisper_large" value="faster_whisper:large-v3">Whisper Large v3</option>
+                                                </optgroup>
+                                            );
+                                        }
                                         // Show individual models in optgroup by backend (only if models exist)
                                         return models.length > 0 && (
                                             <optgroup key={backend} label={backend.charAt(0).toUpperCase() + backend.slice(1)}>
@@ -486,6 +608,14 @@ export const HealthWidget = () => {
                                             </optgroup>
                                         );
                                     })}
+                                    {/* Always show Faster-Whisper option even if not in availableModels */}
+                                    {!availableModels?.stt?.faster_whisper && (
+                                        <optgroup key="faster_whisper" label="Faster-Whisper (Requires Rebuild)">
+                                            <option key="faster_whisper_base" value="faster_whisper:base">Whisper Base (Recommended)</option>
+                                            <option key="faster_whisper_tiny" value="faster_whisper:tiny">Whisper Tiny (Fast)</option>
+                                            <option key="faster_whisper_small" value="faster_whisper:small">Whisper Small</option>
+                                        </optgroup>
+                                    )}
                                 </select>
                             </div>
                             <div className="text-xs text-muted-foreground bg-muted/50 p-2 rounded border border-border/50 truncate flex justify-between">
@@ -507,6 +637,19 @@ export const HealthWidget = () => {
                                     </div>
                                     <code className="block bg-black/20 dark:bg-white/10 px-2 py-1 rounded text-[10px] font-mono select-all">
                                         echo "INCLUDE_KROKO_EMBEDDED=true" &gt;&gt; .env && docker compose build --no-cache local-ai-server && docker compose up -d local-ai-server
+                                    </code>
+                                </div>
+                            )}
+                            {/* Warning when Faster-Whisper selected but not available */}
+                            {(pendingChanges.stt?.backend === 'faster_whisper' || getDisplayedBackend('stt').startsWith('faster_whisper')) && 
+                             capabilities && !capabilities.stt?.faster_whisper?.available && (
+                                <div className="text-xs p-2 rounded bg-amber-500/10 border border-amber-500/20 text-amber-600 dark:text-amber-400 space-y-1">
+                                    <div>
+                                        <span className="font-medium">⚠️ Faster-Whisper requires Docker rebuild.</span>
+                                        <span className="opacity-75"> Models auto-download from HuggingFace on first use. Run:</span>
+                                    </div>
+                                    <code className="block bg-black/20 dark:bg-white/10 px-2 py-1 rounded text-[10px] font-mono select-all">
+                                        docker compose build --build-arg INCLUDE_FASTER_WHISPER=true local-ai-server && docker compose up -d local-ai-server
                                     </code>
                                 </div>
                             )}
@@ -635,6 +778,17 @@ export const HealthWidget = () => {
                                                 </optgroup>
                                             );
                                         }
+                                        if (backend === 'melotts') {
+                                            // Show MeloTTS option (requires rebuild)
+                                            return (
+                                                <optgroup key="melotts" label="MeloTTS">
+                                                    <option key="melotts_en_us" value="melotts:EN-US">MeloTTS American English</option>
+                                                    <option key="melotts_en_br" value="melotts:EN-BR">MeloTTS British English</option>
+                                                    <option key="melotts_en_au" value="melotts:EN-AU">MeloTTS Australian English</option>
+                                                    <option key="melotts_en_in" value="melotts:EN-IN">MeloTTS Indian English</option>
+                                                </optgroup>
+                                            );
+                                        }
                                         // Show individual models in optgroup by backend (only if models exist)
                                         return models.length > 0 && (
                                             <optgroup key={backend} label={backend.charAt(0).toUpperCase() + backend.slice(1)}>
@@ -646,6 +800,14 @@ export const HealthWidget = () => {
                                             </optgroup>
                                         );
                                     })}
+                                    {/* Always show MeloTTS option even if not in availableModels */}
+                                    {!availableModels?.tts?.melotts && (
+                                        <optgroup key="melotts" label="MeloTTS (Requires Rebuild)">
+                                            <option key="melotts_en_us" value="melotts:EN-US">MeloTTS American English</option>
+                                            <option key="melotts_en_br" value="melotts:EN-BR">MeloTTS British English</option>
+                                            <option key="melotts_en_au" value="melotts:EN-AU">MeloTTS Australian</option>
+                                        </optgroup>
+                                    )}
                                 </select>
                             </div>
                             <div className="text-xs text-muted-foreground bg-muted/50 p-2 rounded border border-border/50 truncate flex justify-between">
@@ -666,13 +828,39 @@ export const HealthWidget = () => {
                                         Kokoro Cloud/API requires `KOKORO_API_KEY`. Configure it in <Link to="/env" className="underline">Env</Link>.
                                     </div>
                                 )}
+                            {/* Warning when MeloTTS selected but not available */}
+                            {(pendingChanges.tts?.backend === 'melotts' || getDisplayedBackend('tts').startsWith('melotts')) && 
+                             capabilities && !capabilities.tts?.melotts?.available && (
+                                <div className="text-xs p-2 rounded bg-amber-500/10 border border-amber-500/20 text-amber-600 dark:text-amber-400 space-y-1">
+                                    <div>
+                                        <span className="font-medium">⚠️ MeloTTS requires Docker rebuild.</span>
+                                        <span className="opacity-75"> Lightweight CPU-optimized TTS. Run:</span>
+                                    </div>
+                                    <code className="block bg-black/20 dark:bg-white/10 px-2 py-1 rounded text-[10px] font-mono select-all">
+                                        docker compose build --build-arg INCLUDE_MELOTTS=true local-ai-server && docker compose up -d local-ai-server
+                                    </code>
+                                </div>
+                            )}
                         </div>
 
                         {/* Apply Changes Banner */}
-                        {(hasPendingChanges || restarting) && (
-                            <div className={`border rounded-lg p-3 space-y-2 ${restarting ? 'bg-blue-500/10 border-blue-500/30' : 'bg-yellow-500/10 border-yellow-500/30'}`}>
-                                <div className={`flex items-center gap-2 text-sm font-medium ${restarting ? 'text-blue-600 dark:text-blue-400' : 'text-yellow-600 dark:text-yellow-400'}`}>
-                                    {restarting ? (
+                        {(hasPendingChanges || restarting || rebuilding) && (
+                            <div className={`border rounded-lg p-3 space-y-2 ${
+                                rebuilding ? 'bg-purple-500/10 border-purple-500/30' :
+                                restarting ? 'bg-blue-500/10 border-blue-500/30' : 
+                                'bg-yellow-500/10 border-yellow-500/30'
+                            }`}>
+                                <div className={`flex items-center gap-2 text-sm font-medium ${
+                                    rebuilding ? 'text-purple-600 dark:text-purple-400' :
+                                    restarting ? 'text-blue-600 dark:text-blue-400' : 
+                                    'text-yellow-600 dark:text-yellow-400'
+                                }`}>
+                                    {rebuilding ? (
+                                        <>
+                                            <RefreshCw className="w-4 h-4 animate-spin" />
+                                            {rebuildProgress || 'Rebuilding Docker image...'}
+                                        </>
+                                    ) : restarting ? (
                                         <>
                                             <RefreshCw className="w-4 h-4 animate-spin" />
                                             Restarting Local AI Server...
@@ -681,31 +869,43 @@ export const HealthWidget = () => {
                                         <>
                                             <AlertCircle className="w-4 h-4" />
                                             {Object.keys(pendingChanges).length} change(s) pending
+                                            {needsRebuild().any && <span className="text-amber-500 ml-1">(requires rebuild)</span>}
                                         </>
                                     )}
                                 </div>
-                                {!restarting && (
+                                {!restarting && !rebuilding && (
                                     <div className="flex gap-2">
-                                        <button
-                                            onClick={applyChanges}
-                                            disabled={applyingChanges}
-                                            className="flex-1 flex items-center justify-center gap-2 px-3 py-2 bg-green-600 text-white rounded text-sm font-medium hover:bg-green-700 disabled:opacity-50 transition-colors"
-                                        >
-                                            {applyingChanges ? (
-                                                <>
-                                                    <RefreshCw className="w-4 h-4 animate-spin" />
-                                                    Applying...
-                                                </>
-                                            ) : (
-                                                <>
-                                                    <CheckCircle2 className="w-4 h-4" />
-                                                    Apply & Restart
-                                                </>
-                                            )}
-                                        </button>
+                                        {needsRebuild().any ? (
+                                            <button
+                                                onClick={rebuildAndEnable}
+                                                disabled={applyingChanges}
+                                                className="flex-1 flex items-center justify-center gap-2 px-3 py-2 bg-purple-600 text-white rounded text-sm font-medium hover:bg-purple-700 disabled:opacity-50 transition-colors"
+                                            >
+                                                <Box className="w-4 h-4" />
+                                                Rebuild & Enable (~5-10 min)
+                                            </button>
+                                        ) : (
+                                            <button
+                                                onClick={applyChanges}
+                                                disabled={applyingChanges}
+                                                className="flex-1 flex items-center justify-center gap-2 px-3 py-2 bg-green-600 text-white rounded text-sm font-medium hover:bg-green-700 disabled:opacity-50 transition-colors"
+                                            >
+                                                {applyingChanges ? (
+                                                    <>
+                                                        <RefreshCw className="w-4 h-4 animate-spin" />
+                                                        Applying...
+                                                    </>
+                                                ) : (
+                                                    <>
+                                                        <CheckCircle2 className="w-4 h-4" />
+                                                        Apply & Restart
+                                                    </>
+                                                )}
+                                            </button>
+                                        )}
                                         <button
                                             onClick={cancelChanges}
-                                            disabled={applyingChanges}
+                                            disabled={applyingChanges || rebuilding}
                                             className="flex items-center gap-1 px-3 py-2 bg-muted text-muted-foreground rounded text-sm font-medium hover:bg-muted/80 disabled:opacity-50 transition-colors"
                                         >
                                             <XCircle className="w-4 h-4" />
@@ -716,6 +916,11 @@ export const HealthWidget = () => {
                                 {restarting && (
                                     <div className="text-xs text-muted-foreground">
                                         Please wait, this may take 10-15 seconds...
+                                    </div>
+                                )}
+                                {rebuilding && (
+                                    <div className="text-xs text-muted-foreground">
+                                        ⚠️ Do not close this page. Building Docker image with new packages...
                                     </div>
                                 )}
                             </div>

@@ -3,30 +3,32 @@ from fastapi.middleware.cors import CORSMiddleware
 import settings
 from dotenv import load_dotenv
 import os
-import sys
 import logging
+import secrets
 
 # Load environment variables (wizard will create .env from .env.example on first Next click)
 load_dotenv(settings.ENV_PATH)
 
-from api import config, system, wizard, logs, local_ai, ollama, mcp
-import auth
-
-# SECURITY: Enforce JWT_SECRET when binding to non-localhost
-_uvicorn_host = os.getenv("UVICORN_HOST", "127.0.0.1")
+# SECURITY: Admin UI binds to 0.0.0.0 by default (DX-first).
+# If JWT_SECRET is missing/placeholder, generate an ephemeral secret so tokens
+# aren't signed with a known insecure key. Scripts (preflight/install) should
+# persist a strong JWT_SECRET into .env for stable restarts.
+_uvicorn_host = os.getenv("UVICORN_HOST", "0.0.0.0")
 _is_remote_bind = _uvicorn_host not in ("127.0.0.1", "localhost", "::1")
-_using_default_secret = auth.SECRET_KEY == "dev-secret-key-change-in-prod"
+_placeholder_secrets = {"", "change-me-please", "changeme"}
+_raw_jwt_secret = (os.getenv("JWT_SECRET", "") or "").strip()
 
-if _is_remote_bind and _using_default_secret:
-    logging.getLogger(__name__).critical(
-        "🚨 SECURITY ERROR: Admin UI is bound to %s (remote accessible) but JWT_SECRET is not set. "
-        "This is a critical security risk. Either:\n"
-        "  1. Set JWT_SECRET in .env to a strong random value (recommended: openssl rand -hex 32)\n"
-        "  2. Or bind to localhost only by removing UVICORN_HOST=0.0.0.0\n"
-        "Refusing to start.",
-        _uvicorn_host
+if _is_remote_bind and _raw_jwt_secret in _placeholder_secrets:
+    os.environ["JWT_SECRET"] = secrets.token_hex(32)
+    logging.getLogger(__name__).warning(
+        "JWT_SECRET is missing/placeholder while Admin UI is remote-accessible on %s. "
+        "Generated an ephemeral JWT_SECRET for this process. For production, set a strong "
+        "JWT_SECRET in .env and restrict port 3003 (firewall/VPN/reverse proxy).",
+        _uvicorn_host,
     )
-    sys.exit(1)
+
+from api import config, system, wizard, logs, local_ai, ollama, mcp, calls  # noqa: E402
+import auth  # noqa: E402
 
 app = FastAPI(title="Asterisk AI Voice Agent Admin API")
 
@@ -34,10 +36,10 @@ app = FastAPI(title="Asterisk AI Voice Agent Admin API")
 auth.load_users()
 
 # Warn if JWT_SECRET isn't set (localhost-only is okay for dev)
-if _using_default_secret:
+if getattr(auth, "USING_PLACEHOLDER_SECRET", False):
     logging.getLogger(__name__).warning(
-        "JWT_SECRET is not set; Admin UI is using the default dev secret. "
-        "Set JWT_SECRET in .env for production."
+        "JWT_SECRET is missing/placeholder; Admin UI is using an insecure secret. "
+        "Set JWT_SECRET in .env for production (recommended: openssl rand -hex 32)."
     )
 
 # Configure CORS
@@ -75,6 +77,7 @@ app.include_router(logs.router, prefix="/api/logs", tags=["logs"], dependencies=
 app.include_router(local_ai.router, prefix="/api/local-ai", tags=["local-ai"], dependencies=[Depends(auth.get_current_user)])
 app.include_router(mcp.router, dependencies=[Depends(auth.get_current_user)])
 app.include_router(ollama.router, tags=["ollama"], dependencies=[Depends(auth.get_current_user)])
+app.include_router(calls.router, prefix="/api", tags=["calls"], dependencies=[Depends(auth.get_current_user)])
 
 @app.get("/health")
 async def health_check():

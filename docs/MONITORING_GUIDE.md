@@ -1,6 +1,9 @@
 # Monitoring Guide
 
-Complete guide to production monitoring for Asterisk AI Voice Agent v4.0 using Prometheus and Grafana.
+Production observability guide for Asterisk AI Voice Agent `v4.5+` using Prometheus and Grafana.
+
+> **Important (v4.5.3+)**: Prometheus metrics are intentionally **low-cardinality** and **do not include per-call labels** (e.g., no `call_id`).  
+> Use **Admin UI → Call History** for per-call debugging, and use Prometheus/Grafana for aggregate health/latency/quality trends and alerting.
 
 ## Overview
 
@@ -12,64 +15,57 @@ The monitoring stack provides real-time observability into call quality, system 
 - **ai-engine**: Metrics source via `/metrics` endpoint (port 15000)
 
 **Key Benefits**:
-- 📊 **50+ Metrics**: Comprehensive call quality and system health data
-- 🎯 **Real-time Insights**: 1-second resolution for call quality analysis
-- 🚨 **Proactive Alerts**: Critical and warning alerts for issues
-- 📈 **5 Pre-built Dashboards**: System, call quality, providers, audio, conversation flow
-- 🔍 **Root Cause Analysis**: Historical data for troubleshooting
+- **Aggregate health + quality signals**: latency histograms, underruns, bytes, and session counts
+- **Alerting**: catch systemic regressions quickly (provider outages, underruns, timeouts)
+- **Operational trends**: capacity planning and tuning over time
+
+**Not a goal** (by design):
+- **Per-call correlation in Prometheus** (no `call_id` label)
 
 ---
 
 ## Quick Start
 
-### 1. Deploy Monitoring Stack
+### 1. Configure Prometheus (Bring Your Own)
 
 ```bash
 cd /path/to/Asterisk-AI-Voice-Agent
-
-# Start Prometheus and Grafana
-docker-compose -f docker-compose.monitoring.yml up -d
-
-# Verify containers are running
-docker ps | grep -E "prometheus|grafana"
 ```
 
-**Expected output**:
+Add a scrape target for `ai-engine`:
+
+```yaml
+scrape_configs:
+  - job_name: 'ai-engine'
+    metrics_path: '/metrics'
+    static_configs:
+      - targets: ['127.0.0.1:15000']
 ```
-CONTAINER ID   IMAGE                    STATUS          PORTS
-abc123...      prom/prometheus:latest   Up 10 seconds   0.0.0.0:9090->9090/tcp
-def456...      grafana/grafana:latest   Up 10 seconds   0.0.0.0:3000->3000/tcp
-```
 
-### 2. Access Dashboards
-
-**Grafana** (Primary Interface): http://localhost:3000
-- **Default credentials**: `admin` / `admin`
-- Change password on first login
-- Dashboards automatically loaded in "AI Voice Agent" folder
-
-**Prometheus** (Direct Metrics): http://localhost:9090
-- Query metrics using PromQL
-- View scrape targets status
-- Check active alerts
-
-### 3. Verify Metrics Collection
+### 2. Verify Metrics Collection
 
 ```bash
 # Check ai-engine health endpoint is responding
 curl http://localhost:15000/health
-
-# Check Prometheus is scraping metrics
-curl http://localhost:9090/api/v1/targets | jq '.data.activeTargets[] | select(.labels.job=="ai-engine")'
 
 # View sample metrics
 curl http://localhost:15000/metrics | head -30
 ```
 
 **Healthy output includes**:
-- `ai_agent_streaming_active` - Active call count
+- `ai_agent_streaming_active` - Active streaming sessions (not a global “active calls” gauge)
 - `ai_agent_turn_response_seconds` - Latency metrics
 - `ai_agent_stream_underflow_events_total` - Audio quality
+
+---
+
+## Per-call Debugging (recommended)
+
+For “what happened on *this* call?” debugging, use **Call History**:
+
+- **Admin UI**: navigate to `/history` (Call History) and search/filter by time/provider/outcome.
+- **Database**: stored under the mounted `./data` volume by default (`CALL_HISTORY_DB_PATH`, default `/app/data/call_history.db`).
+- **Logs correlation**: Call History entries include the `call_id`; search structured logs for that `call_id`.
 
 ---
 
@@ -121,7 +117,7 @@ curl http://localhost:15000/metrics | head -30
 
 **When to Use**: Daily operations monitoring, capacity tracking
 
-**Screenshot Location**: `monitoring/grafana/screenshots/system-overview.png` *(placeholder)*
+**Screenshots**: Not shipped (bring-your-own Grafana dashboards)
 
 ---
 
@@ -251,7 +247,7 @@ rate(ai_agent_gating_toggle_total[5m])
 
 ### Alert Configuration
 
-Alerts defined in `monitoring/alerts/ai-engine.yml`
+This project no longer ships a bundled Prometheus/Grafana alert stack. Define alert rules in your own Prometheus config, and keep label cardinality low (no `call_id`, caller number/name, etc.).
 
 ### Critical Alerts (Immediate Action Required)
 
@@ -457,21 +453,14 @@ curl 'http://localhost:9090/api/v1/query?query=up{job="ai-engine"}'
 
 **Diagnosis**:
 ```bash
-# Check dashboard files exist
-ls -lh monitoring/grafana/dashboards/
-
 # Check Grafana provisioning logs
 docker logs grafana | grep -i provision
-
-# Verify file permissions
-ls -l monitoring/grafana/dashboards/*.json
 ```
 
 **Solutions**:
-1. **Files missing**: Re-pull from repository
-2. **Permission denied**: `chmod 644 monitoring/grafana/dashboards/*.json`
-3. **Grafana not provisioned**: Restart Grafana container
-4. **Path misconfigured**: Check `monitoring/grafana/provisioning/dashboards/dashboard.yml`
+1. **Dashboards not provisioned**: Ensure your Grafana provisioning mounts are correct
+2. **Data source missing**: Ensure Prometheus data source URL is correct and reachable
+3. **Grafana not provisioned**: Restart Grafana container and re-check provisioning logs
 
 ---
 
@@ -513,10 +502,10 @@ docker exec prometheus du -sh /prometheus
 ```
 
 **Solutions**:
-1. **Long retention period**: Reduce in docker-compose.monitoring.yml
+1. **Long retention period**: Reduce your Prometheus retention window
 2. **High cardinality metrics**: Review metric labels
 3. **Too frequent scraping**: Increase scrape_interval (not recommended)
-4. **Increase container memory limit**: Edit docker-compose.monitoring.yml
+4. **Increase memory**: Allocate more RAM to Prometheus (container limit or host)
 
 ---
 
@@ -565,7 +554,7 @@ scrape_configs:
 
 **1. Enable Authentication**:
 ```yaml
-# In docker-compose.monitoring.yml
+# In your Grafana configuration
 environment:
   - GF_AUTH_BASIC_ENABLED=true
   - GF_AUTH_ANONYMOUS_ENABLED=false
@@ -665,7 +654,7 @@ docker run --rm \
 ### Log Aggregation (Loki)
 
 ```yaml
-# Add Loki to docker-compose.monitoring.yml
+# Add Loki to your monitoring stack
   loki:
     image: grafana/loki:latest
     ports:
@@ -674,7 +663,7 @@ docker run --rm \
       - ./loki-config.yaml:/etc/loki/local-config.yaml
 
 # Configure Grafana to use Loki as data source
-# Correlate metrics with logs by call_id
+# Correlate logs with Call History using call_id (Prometheus metrics intentionally do not use per-call labels)
 ```
 
 ### Tracing (Tempo)
@@ -731,11 +720,7 @@ receivers:
 ./backup-grafana.sh
 docker run --rm --volumes-from prometheus -v $(pwd)/backups:/backup alpine tar czf /backup/prometheus.tar.gz /prometheus
 
-# Pull new images
-docker-compose -f docker-compose.monitoring.yml pull
-
-# Recreate containers
-docker-compose -f docker-compose.monitoring.yml up -d --force-recreate
+# Upgrade your Prometheus/Grafana stack per your deployment approach.
 
 # Verify
 curl http://localhost:9090/-/healthy

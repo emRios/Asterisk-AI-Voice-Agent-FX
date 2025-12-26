@@ -4,6 +4,16 @@ Deliver an opt-in monitoring and analytics experience that works out of the box,
 
 ---
 
+## Status (Deprecated)
+
+As of `v4.5.3`, the project moved to a **Call History–first** debugging model and enforces **low-cardinality metrics** (no per-call labels like `call_uuid`/`call_id` in Prometheus).
+
+The bundled Prometheus/Grafana stack and `monitoring/` assets described below are **not shipped** in the main repo path anymore. Treat this document as historical planning notes only; if reintroducing observability work, update the design to:
+
+- Keep Prometheus labelsets bounded (no per-call identifiers).
+- Store per-call artifacts in Call History and/or logs, not time-series labels.
+- Avoid depending on repository-shipped dashboards/compose files.
+
 ## 1. Objectives & Success Criteria
 
 - **One-command enablement**: `make monitor-up` (or helper script) launches Prometheus + Grafana with provisioning; stack is opt-in and dormant by default.

@@ -70,6 +70,8 @@ class CallSession:
     pipeline_name: Optional[str] = None
     pipeline_components: Dict[str, str] = field(default_factory=dict)
     context_name: Optional[str] = None  # AI_CONTEXT from dialplan (for pipeline greeting/prompt resolution)
+    # Per-call provider config overrides (do NOT mutate global provider templates).
+    provider_overrides: Dict[str, Any] = field(default_factory=dict)
     conversation_state: str = "greeting"  # greeting | listening | processing
     status: str = "initializing"
     last_transcript: Optional[str] = None
@@ -127,6 +129,9 @@ class CallSession:
     streaming_response: bool = False
     streaming_started: bool = False
     current_stream_id: Optional[str] = None
+    # Media path confirmation (first inbound audio frame observed)
+    media_rx_confirmed: bool = False
+    first_media_rx_ts: float = 0.0
     streaming_bytes_sent: int = 0
     streaming_fallback_count: int = 0
     streaming_jitter_buffer_depth: int = 0
@@ -144,6 +149,13 @@ class CallSession:
     pending_actions: list = field(default_factory=list)  # Queue of pending actions
     current_action: Optional[Dict[str, Any]] = None      # Currently executing action
     transfer_context: Optional[Dict[str, Any]] = None    # Context to pass to transfer target
+    
+    # Call history tracking (Milestone 21)
+    tool_calls: List[Dict[str, Any]] = field(default_factory=list)  # [{name, params, result, timestamp, duration_ms}]
+    turn_latencies_ms: List[float] = field(default_factory=list)    # Per-turn latency tracking
+    barge_in_count: int = 0                                          # Total barge-in attempts
+    error_message: Optional[str] = None                              # Error if call failed
+    transfer_destination: Optional[str] = None                       # Transfer target if transferred
 
     def __post_init__(self):
         """Initialize default VAD and fallback state."""

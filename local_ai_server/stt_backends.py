@@ -333,3 +333,390 @@ class SherpaONNXSTTBackend:
         self._initialized = False
         logging.info("🛑 SHERPA - Recognizer shutdown")
 
+
+class FasterWhisperSTTBackend:
+    """
+    Faster-Whisper STT backend using CTranslate2-optimized Whisper.
+    
+    Provides high-accuracy transcription with good performance on both CPU and GPU.
+    Uses chunked processing for pseudo-streaming (Whisper is not natively streaming).
+    
+    Model sizes: tiny, base, small, medium, large-v2, large-v3
+    """
+    
+    def __init__(
+        self,
+        model_size: str = "base",
+        device: str = "cpu",
+        compute_type: str = "int8",
+        language: str = "en",
+        sample_rate: int = 16000,
+    ):
+        """
+        Initialize Faster-Whisper backend.
+        
+        Args:
+            model_size: Model size (tiny, base, small, medium, large-v2, large-v3)
+            device: Device to use (cpu, cuda, auto)
+            compute_type: Computation type (int8, float16, float32)
+            language: Language code for transcription
+            sample_rate: Audio sample rate (default 16000 Hz)
+        """
+        self.model_size = model_size
+        self.device = device
+        self.compute_type = compute_type
+        self.language = language
+        self.sample_rate = sample_rate
+        self.model = None
+        self._initialized = False
+        # Audio buffer for chunked processing
+        self._audio_buffer = np.array([], dtype=np.float32)
+        # Minimum audio length for processing (1.5 seconds)
+        self._min_audio_length = int(sample_rate * 1.5)
+        # Last transcript to detect changes
+        self._last_text = ""
+    
+    def initialize(self) -> bool:
+        """Initialize the Faster-Whisper model."""
+        try:
+            from faster_whisper import WhisperModel
+            
+            logging.info(
+                "🎤 FASTER-WHISPER - Loading model=%s device=%s compute=%s",
+                self.model_size, self.device, self.compute_type
+            )
+            
+            # Auto-detect device if set to auto
+            device = self.device
+            if device == "auto":
+                try:
+                    import torch
+                    device = "cuda" if torch.cuda.is_available() else "cpu"
+                except ImportError:
+                    device = "cpu"
+            
+            self.model = WhisperModel(
+                self.model_size,
+                device=device,
+                compute_type=self.compute_type,
+            )
+            
+            self._initialized = True
+            logging.info("✅ FASTER-WHISPER - Model loaded successfully")
+            return True
+            
+        except ImportError:
+            logging.error("❌ FASTER-WHISPER - faster-whisper not installed")
+            return False
+        except Exception as exc:
+            logging.error("❌ FASTER-WHISPER - Failed to initialize: %s", exc)
+            return False
+    
+    def process_audio(self, pcm16_audio: bytes) -> Optional[Dict[str, Any]]:
+        """
+        Process PCM16 audio and return transcript.
+        
+        Buffers audio and processes when enough has accumulated.
+        Returns partial results during buffering, final on silence detection.
+        
+        Args:
+            pcm16_audio: Audio in PCM16 format, 16kHz mono
+            
+        Returns:
+            Dict with keys: type ("partial"|"final"), text
+            None if no result yet
+        """
+        if not self._initialized or self.model is None:
+            return None
+        
+        try:
+            # Convert PCM16 to float32
+            samples = np.frombuffer(pcm16_audio, dtype=np.int16)
+            float_samples = samples.astype(np.float32) / 32768.0
+            
+            # Add to buffer
+            self._audio_buffer = np.concatenate([self._audio_buffer, float_samples])
+            
+            # Only process if we have enough audio
+            if len(self._audio_buffer) < self._min_audio_length:
+                return None
+            
+            # Transcribe the buffered audio
+            # Disable VAD for telephony audio - it often filters out speech
+            segments, info = self.model.transcribe(
+                self._audio_buffer,
+                language=self.language,
+                beam_size=1,  # Faster decoding
+                vad_filter=False,  # Disabled - telephony audio often misdetected as silence
+            )
+            
+            # Collect all segment texts
+            text = " ".join(segment.text.strip() for segment in segments)
+            
+            if not text:
+                return None
+            
+            # Check if text changed (indicates ongoing speech)
+            if text != self._last_text:
+                self._last_text = text
+                return {"type": "partial", "text": text}
+            
+            return None
+            
+        except Exception as exc:
+            logging.error("❌ FASTER-WHISPER - Transcription error: %s", exc)
+            return None
+    
+    def finalize(self) -> Optional[Dict[str, Any]]:
+        """
+        Finalize transcription and return final result.
+        
+        Called when speech ends (silence detected).
+        Clears the buffer and returns final transcript.
+        """
+        if not self._initialized or self.model is None:
+            return None
+        
+        if len(self._audio_buffer) == 0:
+            return None
+        
+        try:
+            # Transcribe remaining audio
+            segments, info = self.model.transcribe(
+                self._audio_buffer,
+                language=self.language,
+                beam_size=5,  # Better quality for final
+                vad_filter=True,
+            )
+            
+            text = " ".join(segment.text.strip() for segment in segments)
+            
+            # Clear buffer
+            self._audio_buffer = np.array([], dtype=np.float32)
+            self._last_text = ""
+            
+            if text:
+                return {"type": "final", "text": text}
+            return None
+            
+        except Exception as exc:
+            logging.error("❌ FASTER-WHISPER - Finalize error: %s", exc)
+            self._audio_buffer = np.array([], dtype=np.float32)
+            return None
+    
+    def reset(self) -> None:
+        """Reset the audio buffer."""
+        self._audio_buffer = np.array([], dtype=np.float32)
+        self._last_text = ""
+    
+    def shutdown(self) -> None:
+        """Shutdown the model."""
+        self.model = None
+        self._initialized = False
+        self._audio_buffer = np.array([], dtype=np.float32)
+        logging.info("🛑 FASTER-WHISPER - Model shutdown")
+
+
+class WhisperCppSTTBackend:
+    """
+    Whisper.cpp STT backend using ggml-optimized Whisper.
+    
+    Uses the same ggml backend as llama-cpp-python, avoiding library conflicts
+    that cause segfaults with CTranslate2 (faster-whisper).
+    
+    Model sizes: tiny, base, small, medium, large
+    """
+    
+    def __init__(
+        self,
+        model_path: str = "/app/models/stt/ggml-base.en.bin",
+        language: str = "en",
+        sample_rate: int = 16000,
+    ):
+        """
+        Initialize Whisper.cpp backend.
+        
+        Args:
+            model_path: Path to ggml Whisper model file (.bin)
+            language: Language code for transcription
+            sample_rate: Audio sample rate (default 16000 Hz)
+        """
+        self.model_path = model_path
+        self.language = language
+        self.sample_rate = sample_rate
+        self.model = None
+        self._initialized = False
+        # Audio buffer for chunked processing
+        self._audio_buffer = np.array([], dtype=np.float32)
+        # Minimum audio length for processing (1.5 seconds)
+        self._min_audio_length = int(sample_rate * 1.5)
+        # Last transcript to detect changes
+        self._last_text = ""
+    
+    def initialize(self) -> bool:
+        """Initialize the Whisper.cpp model."""
+        try:
+            from pywhispercpp.model import Model
+            
+            logging.info(
+                "🎤 WHISPER.CPP - Loading model from %s",
+                self.model_path
+            )
+            
+            if not os.path.exists(self.model_path):
+                logging.error("❌ WHISPER.CPP - Model file not found: %s", self.model_path)
+                return False
+            
+            self.model = Model(self.model_path, n_threads=4)
+            
+            self._initialized = True
+            logging.info("✅ WHISPER.CPP - Model loaded successfully")
+            return True
+            
+        except ImportError:
+            logging.error("❌ WHISPER.CPP - pywhispercpp not installed")
+            return False
+        except Exception as exc:
+            logging.error("❌ WHISPER.CPP - Failed to initialize: %s", exc)
+            return False
+    
+    # Known Whisper hallucinations to filter out
+    HALLUCINATION_PATTERNS = {
+        "[BLANK_AUDIO]", "[MUSIC]", "[APPLAUSE]", "[LAUGHTER]",
+        "you", "You", "YOU", "Thank you.", "Thanks for watching.",
+        "Bye.", "Goodbye.", "See you.", "Subscribe.",
+    }
+    
+    def _compute_energy(self, samples: np.ndarray) -> float:
+        """Compute RMS energy of audio samples."""
+        return float(np.sqrt(np.mean(samples ** 2)))
+    
+    def _is_hallucination(self, text: str) -> bool:
+        """Check if text is a known Whisper hallucination."""
+        text_clean = text.strip()
+        # Exact match hallucinations
+        if text_clean in self.HALLUCINATION_PATTERNS:
+            return True
+        # Short repetitive patterns (e.g., "you you you")
+        words = text_clean.lower().split()
+        if len(words) >= 2 and len(set(words)) == 1:
+            return True
+        return False
+    
+    def process_audio(self, pcm16_audio: bytes) -> Optional[Dict[str, Any]]:
+        """
+        Process PCM16 audio and return transcript.
+        
+        Args:
+            pcm16_audio: Audio in PCM16 format, 16kHz mono
+            
+        Returns:
+            Dict with keys: type ("partial"|"final"), text
+            None if no result yet
+        """
+        if not self._initialized or self.model is None:
+            return None
+        
+        try:
+            # Convert PCM16 to float32
+            samples = np.frombuffer(pcm16_audio, dtype=np.int16)
+            float_samples = samples.astype(np.float32) / 32768.0
+            
+            # Energy-based VAD: skip silence
+            energy = self._compute_energy(float_samples)
+            if energy < 0.01:  # Silence threshold
+                return None
+            
+            # Add to buffer
+            self._audio_buffer = np.concatenate([self._audio_buffer, float_samples])
+            
+            # Only process if we have enough audio
+            if len(self._audio_buffer) < self._min_audio_length:
+                return None
+            
+            # Check buffer energy before processing
+            buffer_energy = self._compute_energy(self._audio_buffer)
+            if buffer_energy < 0.02:  # Buffer too quiet
+                self._audio_buffer = np.array([], dtype=np.float32)
+                return None
+            
+            # Transcribe the buffered audio
+            segments = self.model.transcribe(self._audio_buffer)
+            
+            # Collect all segment texts
+            text = " ".join(seg.text.strip() for seg in segments if seg.text)
+            
+            if not text:
+                return None
+            
+            # Filter out hallucinations
+            if self._is_hallucination(text):
+                logging.debug("🔇 WHISPER.CPP - Filtered hallucination: '%s'", text)
+                return None
+            
+            # Check if text changed (indicates ongoing speech)
+            if text != self._last_text:
+                self._last_text = text
+                return {"type": "partial", "text": text}
+            
+            return None
+            
+        except Exception as exc:
+            logging.error("❌ WHISPER.CPP - Transcription error: %s", exc)
+            return None
+    
+    def finalize(self) -> Optional[Dict[str, Any]]:
+        """
+        Finalize transcription and return final result.
+        
+        Called when speech ends (silence detected).
+        Clears the buffer and returns final transcript.
+        """
+        if not self._initialized or self.model is None:
+            return None
+        
+        if len(self._audio_buffer) == 0:
+            return None
+        
+        try:
+            # Check buffer energy - skip if too quiet
+            buffer_energy = self._compute_energy(self._audio_buffer)
+            if buffer_energy < 0.02:
+                self._audio_buffer = np.array([], dtype=np.float32)
+                self._last_text = ""
+                return None
+            
+            # Transcribe remaining audio
+            segments = self.model.transcribe(self._audio_buffer)
+            
+            text = " ".join(seg.text.strip() for seg in segments if seg.text)
+            
+            # Clear buffer
+            self._audio_buffer = np.array([], dtype=np.float32)
+            self._last_text = ""
+            
+            if text:
+                # Filter out hallucinations
+                if self._is_hallucination(text):
+                    logging.debug("🔇 WHISPER.CPP - Filtered hallucination in finalize: '%s'", text)
+                    return None
+                return {"type": "final", "text": text}
+            return None
+            
+        except Exception as exc:
+            logging.error("❌ WHISPER.CPP - Finalize error: %s", exc)
+            self._audio_buffer = np.array([], dtype=np.float32)
+            return None
+    
+    def reset(self) -> None:
+        """Reset the audio buffer."""
+        self._audio_buffer = np.array([], dtype=np.float32)
+        self._last_text = ""
+    
+    def shutdown(self) -> None:
+        """Shutdown the model."""
+        self.model = None
+        self._initialized = False
+        self._audio_buffer = np.array([], dtype=np.float32)
+        logging.info("🛑 WHISPER.CPP - Model shutdown")
+

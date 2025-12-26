@@ -74,6 +74,59 @@ setup_media_paths() {
     fi
 }
 
+# --- Data directory setup (for call history DB) ---
+setup_data_directory() {
+    print_info "Setting up data directory for call history..."
+    
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    DATA_DIR="$SCRIPT_DIR/data"
+    
+    if [ -d "$DATA_DIR" ] && [ -w "$DATA_DIR" ]; then
+        print_success "Data directory ready: $DATA_DIR"
+    else
+        if [ ! -d "$DATA_DIR" ]; then
+            mkdir -p "$DATA_DIR"
+            chmod 775 "$DATA_DIR"
+            print_success "Created data directory: $DATA_DIR"
+        else
+            chmod 775 "$DATA_DIR"
+            print_success "Fixed data directory permissions: $DATA_DIR"
+        fi
+    fi
+    
+    # Ensure .gitkeep exists to maintain directory in git
+    if [ ! -f "$DATA_DIR/.gitkeep" ]; then
+        touch "$DATA_DIR/.gitkeep"
+        print_info "Created .gitkeep placeholder in data directory"
+    fi
+    
+    # Handle SELinux context on RHEL-family systems (Sangoma/FreePBX)
+    if command -v getenforce &>/dev/null; then
+        SELINUX_MODE=$(getenforce 2>/dev/null || echo "Disabled")
+        if [ "$SELINUX_MODE" = "Enforcing" ]; then
+            print_info "SELinux is Enforcing - setting container context for data directory..."
+            if command -v semanage &>/dev/null; then
+                # Add SELinux context for container access
+                $SUDO semanage fcontext -a -t container_file_t "$DATA_DIR(/.*)?" 2>/dev/null || true
+                $SUDO restorecon -Rv "$DATA_DIR" 2>/dev/null || true
+                print_success "SELinux context applied to data directory"
+            else
+                print_warning "semanage not found - SELinux context not set"
+                print_info "  Install with: $SUDO yum install -y policycoreutils-python-utils"
+                print_info "  Then run: $SUDO semanage fcontext -a -t container_file_t '$DATA_DIR(/.*)?'"
+                print_info "            $SUDO restorecon -Rv '$DATA_DIR'"
+            fi
+        fi
+    fi
+    
+    # Verify
+    if [ -d "$DATA_DIR" ] && [ -w "$DATA_DIR" ]; then
+        print_success "Data directory ready for call history DB"
+    else
+        print_warning "Data directory may not be writable; call history will NOT be recorded!"
+    fi
+}
+
 print_success() {
     echo -e "${COLOR_GREEN}SUCCESS: $1${COLOR_RESET}"
 }
@@ -519,6 +572,26 @@ configure_env() {
     print_info "Starting interactive configuration (.env updates)..."
     ensure_env_file
 
+    # Ensure JWT_SECRET exists for remotely accessible Admin UI (binds to 0.0.0.0 by default).
+    local CURRENT_JWT_SECRET
+    CURRENT_JWT_SECRET=$(grep -E '^[# ]*JWT_SECRET=' .env 2>/dev/null | tail -n1 | sed -E 's/^[# ]*JWT_SECRET=//')
+    if [ -z "$CURRENT_JWT_SECRET" ] || [ "$CURRENT_JWT_SECRET" = "change-me-please" ] || [ "$CURRENT_JWT_SECRET" = "changeme" ]; then
+        local NEW_JWT_SECRET=""
+        if command -v openssl >/dev/null 2>&1; then
+            NEW_JWT_SECRET=$(openssl rand -hex 32 2>/dev/null || true)
+        fi
+        if [ -z "$NEW_JWT_SECRET" ] && command -v python3 >/dev/null 2>&1; then
+            NEW_JWT_SECRET=$(python3 -c 'import secrets; print(secrets.token_hex(32))' 2>/dev/null || true)
+        fi
+        if [ -n "$NEW_JWT_SECRET" ]; then
+            upsert_env JWT_SECRET "$NEW_JWT_SECRET"
+            print_success "Generated JWT_SECRET for Admin UI"
+            print_warning "SECURITY: Admin UI is accessible on :3003 by default; change admin password on first login and restrict port 3003 (firewall/VPN)"
+        else
+            print_warning "Could not auto-generate JWT_SECRET; set it in .env (openssl rand -hex 32)"
+        fi
+    fi
+
     # Prefill from existing .env if present
     local ASTERISK_HOST_DEFAULT="" ASTERISK_ARI_USERNAME_DEFAULT="" ASTERISK_ARI_PASSWORD_DEFAULT=""
     # API key defaults need to be GLOBAL so prompt_required_api_keys() can access them
@@ -606,7 +679,7 @@ configure_env() {
 select_config_template() {
     echo ""
     echo "╔═══════════════════════════════════════════════════════════╗"
-    echo "║   Asterisk AI Voice Agent v4.1 - Configuration Setup     ║"
+    echo "║   Asterisk AI Voice Agent v4.5.3 - Configuration Setup   ║"
     echo "╚═══════════════════════════════════════════════════════════╝"
     echo ""
     echo "✨ ALL 3 AI voice pipelines will be enabled:"
@@ -617,7 +690,7 @@ select_config_template() {
     echo ""
     echo "Select which pipeline should be ACTIVE by default:"
     echo ""
-    echo "  [1] OpenAI Realtime (Recommended)"
+    echo "  [1] OpenAI Realtime"
     echo "      • Fastest setup, natural conversations"
     echo "      • Uses: OPENAI_API_KEY"
     echo ""
@@ -625,13 +698,13 @@ select_config_template() {
     echo "      • Enterprise-grade with Think stage"
     echo "      • Uses: DEEPGRAM_API_KEY + OPENAI_API_KEY"
     echo ""
-    echo "  [3] Local Hybrid"
+    echo "  [3] Local Hybrid (Default for v4.5.3)"
     echo "      • Audio privacy, cost control"
-    echo "      • Uses: OPENAI_API_KEY + local AI server"
+    echo "      • Uses: OPENAI_API_KEY + local-ai-server"
     echo ""
     echo "💡 You can switch pipelines anytime by editing ai-agent.yaml"
     echo ""
-    read -p "Enter your default pipeline [1]: " cfg_choice
+    read -p "Enter your default pipeline [3]: " cfg_choice
     
     # Map choices to profiles and config files
     CFG_DST="config/ai-agent.yaml"
@@ -641,7 +714,7 @@ select_config_template() {
     NEEDS_LOCAL=0
     
     case "$cfg_choice" in
-        1|"")
+        1)
             PROFILE="openai_realtime"
             ACTIVE_PROVIDER="openai_realtime"
             print_info "Default pipeline: OpenAI Realtime"
@@ -651,7 +724,7 @@ select_config_template() {
             ACTIVE_PROVIDER="deepgram"
             print_info "Default pipeline: Deepgram Voice Agent"
             ;;
-        3)
+        3|"")
             PROFILE="local_hybrid"
             ACTIVE_PROVIDER="local_hybrid"
             NEEDS_LOCAL=1  # Need local AI server setup
@@ -1084,6 +1157,34 @@ start_services() {
         echo "   $COMPOSE ps"
         echo "   docker stats --no-stream ai_engine"
         echo ""
+
+        echo "🖥️ Admin UI (recommended):"
+        if [ "${INSTALL_NONINTERACTIVE:-0}" = "1" ]; then
+            start_admin_ui="y"
+        else
+            read -p "Start Admin UI now? [Y/n]: " start_admin_ui
+        fi
+
+        if [[ "$start_admin_ui" =~ ^[Yy]$|^$ ]]; then
+            print_info "Starting Admin UI..."
+            $COMPOSE up -d --build admin-ui
+        else
+            print_info "Skipped starting Admin UI. You can start it later with:"
+            print_info "  $COMPOSE up -d admin-ui"
+        fi
+
+        echo ""
+        if [ -n "${SSH_CONNECTION:-}" ] || [ -n "${SSH_TTY:-}" ]; then
+            echo "Admin UI access (remote server):"
+            echo "  - SSH tunnel: ssh -L 3003:127.0.0.1:3003 <user>@<server>"
+            echo "    then open: http://localhost:3003"
+            echo "  - Or set UVICORN_HOST=0.0.0.0 + a strong JWT_SECRET (and firewall)"
+        else
+            echo "Admin UI access:"
+            echo "  http://localhost:3003"
+        fi
+        echo "Login: admin / admin (change on first login)"
+        echo ""
         
         if [ "${LOCAL_AI_SETUP:-0}" -eq 1 ]; then
             echo "🤖 Local AI Models:"
@@ -1351,12 +1452,23 @@ print_final_summary() {
     
     print_success "Installation complete! 🎉"
     echo ""
+    echo "╔═══════════════════════════════════════════════════════════════════════════╗"
+    echo "║  ⚠️  SECURITY NOTICE                                                       ║"
+    echo "╠═══════════════════════════════════════════════════════════════════════════╣"
+    echo "║  Admin UI binds to 0.0.0.0:3003 by default (accessible on network).       ║"
+    echo "║                                                                           ║"
+    echo "║  REQUIRED ACTIONS:                                                        ║"
+    echo "║    1. Change default password (admin/admin) on first login                ║"
+    echo "║    2. Restrict port 3003 via firewall, VPN, or reverse proxy              ║"
+    echo "╚═══════════════════════════════════════════════════════════════════════════╝"
+    echo ""
     print_info "🔍 Next steps:"
-    print_info "  1. Configure dialplan (see snippet above or run: agent dialplan)"
-    print_info "  2. Make a test call to verify everything works"
-    print_info "  3. Check logs: docker-compose logs -f ai-engine"
-    print_info "  4. Switch pipelines: Edit config/ai-agent.yaml (change default_provider)"
-    print_info "  5. Optional: Set up monitoring (see instructions above)"
+    print_info "  1. Access Admin UI: http://<server-ip>:3003"
+    print_info "  2. Configure dialplan (see snippet above or run: agent dialplan)"
+    print_info "  3. Make a test call to verify everything works"
+    print_info "  4. Check logs: docker compose logs -f ai-engine"
+    print_info "  5. Switch pipelines: Edit config/ai-agent.yaml (change default_provider)"
+    print_info "  6. Optional: Set up monitoring (see instructions above)"
 }
 
 # --- Main ---
@@ -1371,6 +1483,7 @@ main() {
     configure_env
     select_config_template
     setup_media_paths
+    setup_data_directory
     start_services
 }
 

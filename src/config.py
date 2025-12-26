@@ -73,6 +73,12 @@ class ExternalMediaConfig(BaseModel):
     # Note: jitter_buffer_ms removed - RTP has built-in buffering, not configurable
     # streaming.jitter_buffer_ms controls StreamingPlaybackManager buffering instead
 
+    # Security / deployment hardening:
+    # - If set, only accept inbound RTP packets from these source IPs/hosts.
+    # - If lock_remote_endpoint is True, do not update remote endpoint mid-call.
+    allowed_remote_hosts: Optional[List[str]] = Field(default=None)
+    lock_remote_endpoint: bool = Field(default=True)
+
 
 class AudioSocketConfig(BaseModel):
     host: str = Field(default="127.0.0.1")
@@ -331,10 +337,30 @@ class BargeInConfig(BaseModel):
     min_ms: int = Field(default=250)
     energy_threshold: int = Field(default=1000)
     cooldown_ms: int = Field(default=500)
+    # Pipeline (hybrid/local) barge-in tuning: pipelines play TTS locally (file playback),
+    # so we can use a more sensitive detector without colliding with provider-owned VAD.
+    pipeline_min_ms: int = Field(default=120)
+    pipeline_energy_threshold: int = Field(default=300)
+    # Pipelines: prefer Asterisk-side talk detection (TALK_DETECT) for robust barge-in,
+    # because ExternalMedia RTP can be paused/altered during channel playback.
+    pipeline_talk_detect_enabled: bool = Field(default=True)
+    # TALK_DETECT(set)=<dsp_silence_threshold_ms>,<dsp_talking_threshold>
+    pipeline_talk_detect_silence_ms: int = Field(default=1200)
+    pipeline_talk_detect_talking_threshold: int = Field(default=128)
     # New: short guard window after TTS ends to avoid self-echo re-capture
     post_tts_end_protection_ms: int = Field(default=250)
     # Extra protection during the first greeting turn
     greeting_protection_ms: int = Field(default=0)
+    # Provider-owned mode: local VAD fallback only for providers that don't emit explicit interruption events.
+    provider_fallback_enabled: bool = Field(default=True)
+    provider_fallback_providers: List[str] = Field(default_factory=lambda: ["google_live", "deepgram"])
+    # Provider-owned mode: suppress outbound provider audio locally after barge-in so continuing provider audio
+    # doesn't immediately restart streaming playback.
+    provider_output_suppress_ms: int = Field(default=1200)
+    provider_output_suppress_extend_ms: int = Field(default=600)
+    # While suppressed, extend the suppression window when provider chunks keep arriving.
+    # This prevents "tail resume" if a provider keeps streaming already-generated audio after barge-in.
+    provider_output_suppress_chunk_extend_ms: int = Field(default=250)
 
 
 class LLMConfig(BaseModel):
@@ -791,6 +817,42 @@ def validate_production_config(config: AppConfig) -> tuple[list[str], list[str]]
                         "audio_transport=externalmedia but neither monolithic providers "
                         "nor pipelines are configured; ExternalMedia requires at least one provider type"
                     )
+
+                # ExternalMedia RTP security: require explicit allowlist when ASTERISK host is not an IP literal.
+                try:
+                    if getattr(config, "external_media", None):
+                        allowed = getattr(config.external_media, "allowed_remote_hosts", None)
+                        allowed_list = [str(x).strip() for x in (allowed or []) if str(x).strip()]
+                        asterisk_host = str(getattr(getattr(config, "asterisk", None), "host", "") or "").strip()
+
+                        import ipaddress  # local import to avoid global dependency assumptions
+
+                        asterisk_host_is_ip = False
+                        try:
+                            ipaddress.ip_address(asterisk_host)
+                            asterisk_host_is_ip = True
+                        except Exception:
+                            asterisk_host_is_ip = False
+
+                        # If `asterisk.host` is a hostname, we cannot safely auto-allowlist (DNS changes / ambiguity).
+                        # Require explicit IP allowlist to prevent first-packet hijack.
+                        if not asterisk_host_is_ip and not allowed_list:
+                            errors.append(
+                                "external_media.allowed_remote_hosts is required when asterisk.host is a hostname; "
+                                "set it to one or more IP addresses allowed to send RTP (e.g., your Asterisk server IP)."
+                            )
+
+                        # Validate allowlist entries are IP literals (RTP source address is always an IP).
+                        for entry in allowed_list:
+                            try:
+                                ipaddress.ip_address(entry)
+                            except Exception:
+                                errors.append(
+                                    f"external_media.allowed_remote_hosts contains non-IP entry '{entry}'; "
+                                    "use IP literals only (e.g., '192.0.2.10')."
+                                )
+                except Exception as e:
+                    logger.debug("ExternalMedia allowlist validation failed", error=str(e))
                 
                 # Optional: downstream_mode hint for ExternalMedia + pipelines
                 if has_pipelines:

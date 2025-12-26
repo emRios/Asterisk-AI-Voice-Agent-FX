@@ -438,6 +438,18 @@ install_docker_debian() {
 }
 
 # ============================================================================
+# Podman Detection
+# ============================================================================
+is_podman() {
+    # Check if docker command is actually Podman
+    if command -v docker &>/dev/null; then
+        docker --version 2>/dev/null | grep -qi "podman" && return 0
+        docker version 2>/dev/null | grep -qi "podman" && return 0
+    fi
+    return 1
+}
+
+# ============================================================================
 # Docker Checks
 # ============================================================================
 check_docker() {
@@ -515,11 +527,23 @@ check_docker() {
         fi
         return 1
     fi
-    
+
+    # Detect Podman - skip Docker-specific version checks
+    if is_podman; then
+        PODMAN_VERSION=$(docker --version 2>/dev/null | sed -n 's/.*podman version \([0-9.]*\).*/\1/ip' || echo "unknown")
+        [ -z "$PODMAN_VERSION" ] && PODMAN_VERSION="unknown"
+        log_warn "Podman detected (version $PODMAN_VERSION) - Docker checks skipped"
+        log_info "  Podman compatibility is community-supported"
+        log_info "  Some Docker-specific features may not work as expected"
+        log_info "  If you encounter issues, consider using Docker instead"
+        # Skip version checks for Podman
+        return 0
+    fi
+
     # Version check (HARD FAIL below minimum)
     DOCKER_VERSION=$(docker version --format '{{.Server.Version}}' 2>/dev/null || echo "0.0.0")
     DOCKER_MAJOR=$(echo "$DOCKER_VERSION" | cut -d. -f1)
-    
+
     if [ "$DOCKER_MAJOR" -lt 20 ]; then
         log_fail "Docker $DOCKER_VERSION too old (minimum: 20.10) - upgrade required"
         local DOCKER_INSTALL_CMD
@@ -601,12 +625,20 @@ docker compose "$@"' > /usr/local/bin/docker-compose
     # Parse version (e.g., "2.20.0" -> major=2, minor=20)
     COMPOSE_MAJOR=$(echo "$COMPOSE_VER" | cut -d. -f1)
     COMPOSE_MINOR=$(echo "$COMPOSE_VER" | cut -d. -f2)
-    
-    if [ "$COMPOSE_MAJOR" -eq 2 ] && [ "$COMPOSE_MINOR" -lt 20 ]; then
-        log_warn "Compose $COMPOSE_VER - upgrade to 2.20+ recommended (missing profiles, watch)"
-        log_info "  Docs: $COMPOSE_AAVA_DOCS_URL"
+
+    # Validate that version components are numeric before comparison
+    if [[ "$COMPOSE_MAJOR" =~ ^[0-9]+$ ]] && [[ "$COMPOSE_MINOR" =~ ^[0-9]+$ ]]; then
+        if [ "$COMPOSE_MAJOR" -eq 2 ] && [ "$COMPOSE_MINOR" -lt 20 ]; then
+            log_warn "Compose $COMPOSE_VER - upgrade to 2.20+ recommended (missing profiles, watch)"
+            log_info "  Docs: $COMPOSE_AAVA_DOCS_URL"
+        else
+            log_ok "Docker Compose: $COMPOSE_VER"
+        fi
     else
-        log_ok "Docker Compose: $COMPOSE_VER"
+        # Non-standard version (e.g., "dev") - skip validation
+        log_warn "Docker Compose version non-standard: $COMPOSE_VER"
+        log_info "  Skipping version check - ensure you have Compose 2.20+ features"
+        log_info "  Docs: $COMPOSE_AAVA_DOCS_URL"
     fi
     
     # Check buildx version (required >= 0.17 for compose build)
@@ -614,14 +646,21 @@ docker compose "$@"' > /usr/local/bin/docker-compose
         BUILDX_VER=$(docker buildx version 2>/dev/null | grep -oP 'v?\K[0-9]+\.[0-9]+' | head -1)
         BUILDX_MAJOR=$(echo "$BUILDX_VER" | cut -d. -f1)
         BUILDX_MINOR=$(echo "$BUILDX_VER" | cut -d. -f2)
-        
-        if [ "$BUILDX_MAJOR" -eq 0 ] && [ "$BUILDX_MINOR" -lt 17 ]; then
-            log_warn "Docker Buildx $BUILDX_VER - requires 0.17+ for compose build"
-            log_info "  Fix: curl -L https://github.com/docker/buildx/releases/download/v0.17.1/buildx-v0.17.1.linux-amd64 -o /usr/local/lib/docker/cli-plugins/docker-buildx && chmod +x /usr/local/lib/docker/cli-plugins/docker-buildx"
-            log_info "  Docs: $COMPOSE_AAVA_DOCS_URL"
-            FIX_CMDS+=("curl -L https://github.com/docker/buildx/releases/download/v0.17.1/buildx-v0.17.1.linux-amd64 -o /usr/local/lib/docker/cli-plugins/docker-buildx && chmod +x /usr/local/lib/docker/cli-plugins/docker-buildx")
-        else
-            log_ok "Docker Buildx: $BUILDX_VER"
+
+        # Validate that version components are numeric before comparison
+        if [[ "$BUILDX_MAJOR" =~ ^[0-9]+$ ]] && [[ "$BUILDX_MINOR" =~ ^[0-9]+$ ]]; then
+            if [ "$BUILDX_MAJOR" -eq 0 ] && [ "$BUILDX_MINOR" -lt 17 ]; then
+                log_warn "Docker Buildx $BUILDX_VER - requires 0.17+ for compose build"
+                log_info "  Fix: curl -L https://github.com/docker/buildx/releases/download/v0.17.1/buildx-v0.17.1.linux-amd64 -o /usr/local/lib/docker/cli-plugins/docker-buildx && chmod +x /usr/local/lib/docker/cli-plugins/docker-buildx"
+                log_info "  Docs: $COMPOSE_AAVA_DOCS_URL"
+                FIX_CMDS+=("curl -L https://github.com/docker/buildx/releases/download/v0.17.1/buildx-v0.17.1.linux-amd64 -o /usr/local/lib/docker/cli-plugins/docker-buildx && chmod +x /usr/local/lib/docker/cli-plugins/docker-buildx")
+            else
+                log_ok "Docker Buildx: $BUILDX_VER"
+            fi
+        elif [ -n "$BUILDX_VER" ]; then
+            # Version detected but non-standard format
+            log_warn "Docker Buildx version non-standard: $BUILDX_VER"
+            log_info "  Skipping version check - ensure you have Buildx 0.17+ features"
         fi
     fi
 }
@@ -632,25 +671,56 @@ docker compose "$@"' > /usr/local/bin/docker-compose
 check_directories() {
     # Use AST_MEDIA_DIR (matches .env.example) with repo-local default (matches docker-compose.yml)
     MEDIA_DIR="${AST_MEDIA_DIR:-$SCRIPT_DIR/asterisk_media/ai-generated}"
+    DATA_DIR="$SCRIPT_DIR/data"
     
+    # Check media directory
     if [ -d "$MEDIA_DIR" ] && [ -w "$MEDIA_DIR" ]; then
         log_ok "Media directory: $MEDIA_DIR"
-        return 0
+    else
+        if [ ! -d "$MEDIA_DIR" ]; then
+            log_warn "Media directory missing: $MEDIA_DIR"
+        else
+            log_warn "Media directory not writable: $MEDIA_DIR"
+        fi
+        
+        # Rootless-aware fix commands
+        if [ "$DOCKER_ROOTLESS" = true ]; then
+            FIX_CMDS+=("mkdir -p $MEDIA_DIR")
+            log_info "  Rootless tip: Use volume with :Z suffix for SELinux compatibility"
+        else
+            FIX_CMDS+=("mkdir -p $MEDIA_DIR")
+            FIX_CMDS+=("chown -R \$(id -u):\$(id -g) $MEDIA_DIR")
+        fi
     fi
     
-    if [ ! -d "$MEDIA_DIR" ]; then
-        log_warn "Media directory missing: $MEDIA_DIR"
+    # Check data directory (for call history SQLite DB)
+    if [ -d "$DATA_DIR" ] && [ -w "$DATA_DIR" ]; then
+        log_ok "Data directory: $DATA_DIR"
     else
-        log_warn "Media directory not writable: $MEDIA_DIR"
-    fi
-    
-    # Rootless-aware fix commands
-    if [ "$DOCKER_ROOTLESS" = true ]; then
-        FIX_CMDS+=("mkdir -p $MEDIA_DIR")
-        log_info "  Rootless tip: Use volume with :Z suffix for SELinux compatibility"
-    else
-        FIX_CMDS+=("mkdir -p $MEDIA_DIR")
-        FIX_CMDS+=("chown -R \$(id -u):\$(id -g) $MEDIA_DIR")
+        if [ ! -d "$DATA_DIR" ]; then
+            if [ "$APPLY_FIXES" = true ]; then
+                mkdir -p "$DATA_DIR"
+                chmod 775 "$DATA_DIR"
+                # Ensure .gitkeep exists to maintain directory in git
+                touch "$DATA_DIR/.gitkeep"
+                log_ok "Created data directory: $DATA_DIR"
+            else
+                log_warn "Data directory missing: $DATA_DIR"
+                log_info "  ⚠️  Call history will NOT be recorded without this directory!"
+                log_info "  Run: ./preflight.sh --apply-fixes to create it automatically"
+                FIX_CMDS+=("mkdir -p $DATA_DIR && chmod 775 $DATA_DIR && touch $DATA_DIR/.gitkeep")
+            fi
+        else
+            if [ "$APPLY_FIXES" = true ]; then
+                chmod 775 "$DATA_DIR"
+                log_ok "Fixed data directory permissions: $DATA_DIR"
+            else
+                log_warn "Data directory not writable: $DATA_DIR"
+                log_info "  ⚠️  Call history will NOT be recorded without write access!"
+                log_info "  Run: ./preflight.sh --apply-fixes to fix permissions"
+                FIX_CMDS+=("chmod 775 $DATA_DIR")
+            fi
+        fi
     fi
 }
 
@@ -664,6 +734,7 @@ check_selinux() {
     SELINUX_MODE=$(getenforce 2>/dev/null || echo "Disabled")
     # Use consistent AST_MEDIA_DIR with repo-local default
     MEDIA_DIR="${AST_MEDIA_DIR:-$SCRIPT_DIR/asterisk_media/ai-generated}"
+    DATA_DIR="$SCRIPT_DIR/data"
     
     if [ "$SELINUX_MODE" = "Enforcing" ]; then
         # Check if semanage is available
@@ -683,16 +754,27 @@ check_selinux() {
             print_fix_and_docs "$SELINUX_TOOLS_CMD" "$(github_docs_url "$(platform_yaml_get selinux.aava_docs || echo "docs/INSTALLATION.md")" 2>/dev/null || true)"
         fi
         
-        log_warn "SELinux: Enforcing (context fix may be needed for media directory)"
+        log_warn "SELinux: Enforcing (context fix may be needed for media and data directories)"
         local SELINUX_CONTEXT_CMD
         local SELINUX_RESTORE_CMD
+        
+        # Media directory SELinux context
         SELINUX_CONTEXT_CMD="$(platform_yaml_get selinux.context_cmd || echo "sudo semanage fcontext -a -t container_file_t '{path}(/.*)?'")"
         SELINUX_RESTORE_CMD="$(platform_yaml_get selinux.restore_cmd || echo "sudo restorecon -Rv {path}")"
-        SELINUX_CONTEXT_CMD="${SELINUX_CONTEXT_CMD//\{path\}/$MEDIA_DIR}"
-        SELINUX_RESTORE_CMD="${SELINUX_RESTORE_CMD//\{path\}/$MEDIA_DIR}"
-        FIX_CMDS+=("$SELINUX_CONTEXT_CMD")
-        FIX_CMDS+=("$SELINUX_RESTORE_CMD")
-        print_fix_and_docs "$SELINUX_CONTEXT_CMD"$'\n'"$SELINUX_RESTORE_CMD" "$(github_docs_url "$(platform_yaml_get selinux.aava_docs || echo "docs/INSTALLATION.md")" 2>/dev/null || true)"
+        local MEDIA_CONTEXT_CMD="${SELINUX_CONTEXT_CMD//\{path\}/$MEDIA_DIR}"
+        local MEDIA_RESTORE_CMD="${SELINUX_RESTORE_CMD//\{path\}/$MEDIA_DIR}"
+        FIX_CMDS+=("$MEDIA_CONTEXT_CMD")
+        FIX_CMDS+=("$MEDIA_RESTORE_CMD")
+        
+        # Data directory SELinux context (for call history DB)
+        local DATA_CONTEXT_CMD="${SELINUX_CONTEXT_CMD//\{path\}/$DATA_DIR}"
+        local DATA_RESTORE_CMD="${SELINUX_RESTORE_CMD//\{path\}/$DATA_DIR}"
+        FIX_CMDS+=("$DATA_CONTEXT_CMD")
+        FIX_CMDS+=("$DATA_RESTORE_CMD")
+        
+        log_info "  Media directory: $MEDIA_DIR"
+        log_info "  Data directory: $DATA_DIR (call history)"
+        print_fix_and_docs "$MEDIA_CONTEXT_CMD"$'\n'"$MEDIA_RESTORE_CMD"$'\n'"$DATA_CONTEXT_CMD"$'\n'"$DATA_RESTORE_CMD" "$(github_docs_url "$(platform_yaml_get selinux.aava_docs || echo "docs/INSTALLATION.md")" 2>/dev/null || true)"
     else
         log_ok "SELinux: $SELINUX_MODE"
     fi
@@ -706,18 +788,54 @@ check_env() {
         log_ok ".env file exists"
         log_info "  Tip: For local_only pipeline, no API keys needed!"
     elif [ -f "$SCRIPT_DIR/.env.example" ]; then
-        if [ "$APPLY_FIXES" = true ]; then
-            cp "$SCRIPT_DIR/.env.example" "$SCRIPT_DIR/.env"
-            log_ok "Created .env from .env.example"
-            log_info "  Tip: For local_only pipeline, no API keys needed!"
-            log_info "  For cloud providers, edit .env to add your API keys"
-        else
-            log_warn ".env file missing"
-            FIX_CMDS+=("cp $SCRIPT_DIR/.env.example $SCRIPT_DIR/.env")
-            log_info "  Tip: For local_only pipeline, no API keys needed!"
-        fi
+        # Creating .env is repo-local and safe; do it automatically (no sudo needed).
+        cp "$SCRIPT_DIR/.env.example" "$SCRIPT_DIR/.env"
+        log_ok "Created .env from .env.example"
+        log_info "  Tip: For local_only pipeline, no API keys needed!"
+        log_info "  For cloud providers, edit .env to add your API keys"
     else
         log_warn ".env.example not found"
+    fi
+
+    # Ensure JWT_SECRET is non-empty when Admin UI is remotely accessible by default.
+    # This is a repo-local change and safe to apply automatically.
+    if [ -f "$SCRIPT_DIR/.env" ]; then
+        local current_secret
+        current_secret="$(grep -E '^[# ]*JWT_SECRET=' "$SCRIPT_DIR/.env" | tail -n1 | sed -E 's/^[# ]*JWT_SECRET=//')"
+        current_secret="$(echo "$current_secret" | tr -d '\r' | xargs 2>/dev/null || echo "$current_secret")"
+
+        if [ -z "$current_secret" ] || [ "$current_secret" = "change-me-please" ] || [ "$current_secret" = "changeme" ]; then
+            local new_secret=""
+            if command -v openssl >/dev/null 2>&1; then
+                new_secret="$(openssl rand -hex 32 2>/dev/null || true)"
+            fi
+            if [ -z "$new_secret" ] && command -v python3 >/dev/null 2>&1; then
+                new_secret="$(python3 -c 'import secrets; print(secrets.token_hex(32))' 2>/dev/null || true)"
+            fi
+            if [ -z "$new_secret" ] && command -v shasum >/dev/null 2>&1; then
+                new_secret="$(date +%s%N 2>/dev/null | shasum -a 256 | awk '{print $1}' | cut -c1-64)"
+            fi
+            if [ -z "$new_secret" ] && command -v sha256sum >/dev/null 2>&1; then
+                new_secret="$(date +%s%N 2>/dev/null | sha256sum | awk '{print $1}' | cut -c1-64)"
+            fi
+
+            if [ -n "$new_secret" ]; then
+                # Upsert JWT_SECRET in .env (portable sed: GNU + BSD)
+                if grep -qE '^[# ]*JWT_SECRET=' "$SCRIPT_DIR/.env"; then
+                    sed -i.bak "s/^[# ]*JWT_SECRET=.*/JWT_SECRET=${new_secret}/" "$SCRIPT_DIR/.env" 2>/dev/null || \
+                        sed -i '' "s/^[# ]*JWT_SECRET=.*/JWT_SECRET=${new_secret}/" "$SCRIPT_DIR/.env"
+                else
+                    echo "" >> "$SCRIPT_DIR/.env"
+                    echo "JWT_SECRET=${new_secret}" >> "$SCRIPT_DIR/.env"
+                fi
+                rm -f "$SCRIPT_DIR/.env.bak" 2>/dev/null || true
+                log_ok "Generated JWT_SECRET in .env (Admin UI exposed on :3003 by default)"
+                log_warn "SECURITY: Admin UI binds to 0.0.0.0 by default; restrict port 3003 and change admin password on first login"
+            else
+                log_warn "JWT_SECRET is missing and could not be generated automatically"
+                log_info "  Set JWT_SECRET in .env (recommended: openssl rand -hex 32)"
+            fi
+        fi
     fi
 }
 
@@ -1041,18 +1159,33 @@ print_summary() {
         touch "$SCRIPT_DIR/.preflight-ok"
         echo -e "${GREEN}✓ All checks passed!${NC}"
         echo ""
+        echo "╔═══════════════════════════════════════════════════════════════════════════╗"
+        echo "║  ⚠️  SECURITY NOTICE                                                       ║"
+        echo "╠═══════════════════════════════════════════════════════════════════════════╣"
+        echo "║  Admin UI binds to 0.0.0.0:3003 by default (accessible on network).       ║"
+        echo "║                                                                           ║"
+        echo "║  REQUIRED ACTIONS:                                                        ║"
+        echo "║    1. Change default password (admin/admin) on first login                ║"
+        echo "║    2. Restrict port 3003 via firewall, VPN, or reverse proxy              ║"
+        echo "╚═══════════════════════════════════════════════════════════════════════════╝"
+        echo ""
         echo "Next steps:"
         echo ""
         echo "  1. Start the Admin UI:"
-        echo "     ${COMPOSE_CMD:-docker compose} up -d --build admin-ui"
+        echo "     ${COMPOSE_CMD:-docker compose} up -d admin-ui"
         echo ""
-        echo "  2. Open: http://localhost:3003"
+        if [ -n "${SSH_CONNECTION:-}" ] || [ -n "${SSH_TTY:-}" ]; then
+            echo "  2. Access the Admin UI:"
+            echo "     http://<server-ip>:3003"
+        else
+            echo "  2. Open: http://localhost:3003"
+        fi
         echo ""
-        echo "  3. For local_only pipeline, also start:"
-        echo "     ${COMPOSE_CMD:-docker compose} up -d --build local-ai-server"
+        echo "  3. Complete the Setup Wizard, then start ai-engine:"
+        echo "     ${COMPOSE_CMD:-docker compose} up -d ai-engine"
         echo ""
-        echo "  4. Deeper diagnostics:"
-        echo "     agent doctor --json   # or: agent doctor"
+        echo "  4. For local_hybrid or local_only pipeline, also start:"
+        echo "     ${COMPOSE_CMD:-docker compose} up -d local-ai-server"
         echo ""
     elif [ ${#FAILURES[@]} -eq 0 ]; then
         touch "$SCRIPT_DIR/.preflight-ok"
@@ -1060,18 +1193,33 @@ print_summary() {
         echo ""
         echo "You can proceed, but consider addressing the warnings above."
         echo ""
+        echo "╔═══════════════════════════════════════════════════════════════════════════╗"
+        echo "║  ⚠️  SECURITY NOTICE                                                       ║"
+        echo "╠═══════════════════════════════════════════════════════════════════════════╣"
+        echo "║  Admin UI binds to 0.0.0.0:3003 by default (accessible on network).       ║"
+        echo "║                                                                           ║"
+        echo "║  REQUIRED ACTIONS:                                                        ║"
+        echo "║    1. Change default password (admin/admin) on first login                ║"
+        echo "║    2. Restrict port 3003 via firewall, VPN, or reverse proxy              ║"
+        echo "╚═══════════════════════════════════════════════════════════════════════════╝"
+        echo ""
         echo "Next steps:"
         echo ""
         echo "  1. Start the Admin UI:"
         echo "     ${COMPOSE_CMD:-docker compose} up -d admin-ui"
         echo ""
-        echo "  2. Open: http://localhost:3003"
+        if [ -n "${SSH_CONNECTION:-}" ] || [ -n "${SSH_TTY:-}" ]; then
+            echo "  2. Access the Admin UI:"
+            echo "     http://<server-ip>:3003"
+        else
+            echo "  2. Open: http://localhost:3003"
+        fi
         echo ""
-        echo "  3. For local_only pipeline, also start:"
+        echo "  3. Complete the Setup Wizard, then start ai-engine:"
+        echo "     ${COMPOSE_CMD:-docker compose} up -d ai-engine"
+        echo ""
+        echo "  4. For local_hybrid or local_only pipeline, also start:"
         echo "     ${COMPOSE_CMD:-docker compose} up -d local-ai-server"
-        echo ""
-        echo "  4. Deeper diagnostics:"
-        echo "     agent doctor --json   # or: agent doctor"
         echo ""
     else
         echo -e "${RED}Cannot proceed - fix failures above first.${NC}"

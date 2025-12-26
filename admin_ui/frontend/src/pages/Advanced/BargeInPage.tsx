@@ -72,6 +72,10 @@ const BargeInPage = () => {
     if (loading) return <div className="p-8 text-center text-muted-foreground">Loading configuration...</div>;
 
     const bargeInConfig = config.barge_in || {};
+    const providerFallbackProviders = Array.isArray(bargeInConfig.provider_fallback_providers)
+        ? (bargeInConfig.provider_fallback_providers as string[]).filter(Boolean)
+        : [];
+    const providerFallbackProvidersStr = providerFallbackProviders.join(', ');
 
     return (
         <div className="space-y-6">
@@ -124,6 +128,7 @@ const BargeInPage = () => {
                         <FormSwitch
                             label="Enable Barge-in"
                             description="Allow users to interrupt the AI agent during TTS playback."
+                            tooltip="When enabled, the engine immediately flushes/stops local agent audio when it detects caller speech during an agent response."
                             checked={bargeInConfig.enabled ?? true}
                             onChange={(e) => updateBargeInConfig('enabled', e.target.checked)}
                         />
@@ -132,49 +137,37 @@ const BargeInPage = () => {
                             <FormInput
                                 label="Energy Threshold"
                                 type="number"
-                                value={bargeInConfig.energy_threshold || 700}
+                                value={bargeInConfig.energy_threshold ?? 1000}
                                 onChange={(e) => updateBargeInConfig('energy_threshold', parseInt(e.target.value))}
-                                tooltip="RMS energy level to trigger barge-in (higher = less sensitive)"
+                                tooltip="Caller energy threshold (RMS over PCM16). Higher = less sensitive (fewer false barge-ins), lower = more sensitive (better for quiet callers)."
                             />
                             <FormInput
                                 label="Minimum Duration (ms)"
                                 type="number"
-                                value={bargeInConfig.min_ms || 150}
+                                value={bargeInConfig.min_ms ?? 250}
                                 onChange={(e) => updateBargeInConfig('min_ms', parseInt(e.target.value))}
-                                tooltip="Minimum speech duration to trigger barge-in"
+                                tooltip="Minimum sustained caller speech time required before triggering barge-in. Higher reduces false triggers but feels less responsive."
                             />
-                        </div>
-                    </div>
-                </ConfigCard>
-            </ConfigSection>
-
-            <ConfigSection 
-                title="Protection Windows" 
-                description="Prevent false barge-ins during critical moments."
-            >
-                <ConfigCard>
-                    <div className="space-y-6">
-                        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
                             <FormInput
-                                label="Initial Protection (ms)"
+                                label="Cooldown (ms)"
                                 type="number"
-                                value={bargeInConfig.initial_protection_ms || 100}
-                                onChange={(e) => updateBargeInConfig('initial_protection_ms', parseInt(e.target.value))}
-                                tooltip="Protection window at the start of each response"
+                                value={bargeInConfig.cooldown_ms ?? 500}
+                                onChange={(e) => updateBargeInConfig('cooldown_ms', parseInt(e.target.value))}
+                                tooltip="Minimum time between barge-in triggers. Prevents repeated triggers from echo/noise after an interruption."
                             />
                             <FormInput
                                 label="Post-TTS Protection (ms)"
                                 type="number"
-                                value={bargeInConfig.post_tts_end_protection_ms || 800}
+                                value={bargeInConfig.post_tts_end_protection_ms ?? 250}
                                 onChange={(e) => updateBargeInConfig('post_tts_end_protection_ms', parseInt(e.target.value))}
-                                tooltip="Guard window after TTS ends to prevent echo"
+                                tooltip="Guard window after agent audio ends. Helps avoid self-echo or tail audio being mistaken as caller speech."
                             />
                             <FormInput
-                                label="Finalize Timeout (ms)"
+                                label="Provider Output Suppress (ms)"
                                 type="number"
-                                value={bargeInConfig.finalize_timeout_ms || 300}
-                                onChange={(e) => updateBargeInConfig('finalize_timeout_ms', parseInt(e.target.value))}
-                                tooltip="Wait time before finalizing barge-in detection"
+                                value={bargeInConfig.provider_output_suppress_ms ?? 1200}
+                                onChange={(e) => updateBargeInConfig('provider_output_suppress_ms', parseInt(e.target.value))}
+                                tooltip="After a barge-in, locally suppress provider audio briefly so previously generated speech doesn’t “resume” mid-sentence."
                             />
                         </div>
 
@@ -184,14 +177,129 @@ const BargeInPage = () => {
                                 <div className="text-sm text-blue-700 dark:text-blue-300">
                                     <p className="font-medium mb-1">Tuning Tips</p>
                                     <ul className="list-disc list-inside space-y-1">
-                                        <li><strong>Energy Threshold:</strong> Increase if barge-in is too sensitive (500-1000 typical)</li>
-                                        <li><strong>Post-TTS Protection:</strong> Increase if agent hears its own voice tail (600-1000ms)</li>
-                                        <li><strong>Initial Protection:</strong> Prevents barge-in during first milliseconds of response</li>
+                                        <li><strong>Energy Threshold:</strong> Increase if barge-in is too sensitive (500-1200 typical)</li>
+                                        <li><strong>Provider Output Suppress:</strong> Increase if provider resumes speaking pre-barge audio (800-1600ms typical)</li>
+                                        <li><strong>Post-TTS Protection:</strong> Increase if you see immediate re-triggers after TTS ends (200-600ms typical)</li>
                                     </ul>
                                 </div>
                             </div>
                         </div>
                     </div>
+                </ConfigCard>
+            </ConfigSection>
+
+            <ConfigSection 
+                title="Advanced"
+                description="Additional knobs for provider-owned vs pipeline modes."
+            >
+                <ConfigCard>
+                    <details className="space-y-4">
+                        <summary className="cursor-pointer text-sm font-medium">Show advanced settings</summary>
+                        <div className="space-y-8 pt-4">
+                            <div className="space-y-4">
+                                <div className="text-sm font-medium">Protection windows</div>
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                    <FormInput
+                                        label="Initial Protection (ms)"
+                                        type="number"
+                                        value={bargeInConfig.initial_protection_ms ?? 200}
+                                        onChange={(e) => updateBargeInConfig('initial_protection_ms', parseInt(e.target.value))}
+                                        tooltip="Short guard window at the start of agent output to avoid triggering on initial burst/codec artifacts."
+                                    />
+                                    <FormInput
+                                        label="Greeting Protection (ms)"
+                                        type="number"
+                                        value={bargeInConfig.greeting_protection_ms ?? 0}
+                                        onChange={(e) => updateBargeInConfig('greeting_protection_ms', parseInt(e.target.value))}
+                                        tooltip="Extra guard window during the initial greeting turn (useful if greetings are short and prone to false triggers)."
+                                    />
+                                </div>
+                            </div>
+
+                            <div className="space-y-4">
+                                <div className="text-sm font-medium">Provider-owned mode</div>
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                    <FormSwitch
+                                        label="Provider Fallback Enabled"
+                                        description="Use local VAD fallback only for providers that don’t emit explicit interruption events."
+                                        tooltip="If enabled, the engine can trigger barge-in using local VAD only after media is confirmed and only for the providers listed below."
+                                        checked={bargeInConfig.provider_fallback_enabled ?? true}
+                                        onChange={(e) => updateBargeInConfig('provider_fallback_enabled', e.target.checked)}
+                                    />
+                                    <FormInput
+                                        label="Provider Fallback Providers"
+                                        type="text"
+                                        value={providerFallbackProvidersStr}
+                                        onChange={(e) =>
+                                            updateBargeInConfig(
+                                                'provider_fallback_providers',
+                                                (e.target.value || '')
+                                                    .split(',')
+                                                    .map((s) => s.trim())
+                                                    .filter(Boolean)
+                                            )
+                                        }
+                                        tooltip="Comma-separated provider names where local fallback may apply (e.g., google_live, deepgram)."
+                                    />
+                                    <FormInput
+                                        label="Suppress Extend (ms)"
+                                        type="number"
+                                        value={bargeInConfig.provider_output_suppress_extend_ms ?? 600}
+                                        onChange={(e) => updateBargeInConfig('provider_output_suppress_extend_ms', parseInt(e.target.value))}
+                                        tooltip="While caller keeps speaking after a barge-in, extend suppression so agent doesn’t resume too early."
+                                    />
+                                    <FormInput
+                                        label="Chunk Extend (ms)"
+                                        type="number"
+                                        value={bargeInConfig.provider_output_suppress_chunk_extend_ms ?? 250}
+                                        onChange={(e) => updateBargeInConfig('provider_output_suppress_chunk_extend_ms', parseInt(e.target.value))}
+                                        tooltip="While suppressed, extend suppression when provider chunks keep arriving (prevents tail audio from restarting output)."
+                                    />
+                                </div>
+                            </div>
+
+                            <div className="space-y-4">
+                                <div className="text-sm font-medium">Pipeline / local_hybrid mode</div>
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                    <FormSwitch
+                                        label="Enable TALK_DETECT"
+                                        description="Use Asterisk TALK_DETECT for robust barge-in during local file playback."
+                                        tooltip="Recommended for local_hybrid: Asterisk DSP detects caller speech even during ARI file playback."
+                                        checked={bargeInConfig.pipeline_talk_detect_enabled ?? true}
+                                        onChange={(e) => updateBargeInConfig('pipeline_talk_detect_enabled', e.target.checked)}
+                                    />
+                                    <FormInput
+                                        label="Pipeline Min Duration (ms)"
+                                        type="number"
+                                        value={bargeInConfig.pipeline_min_ms ?? 120}
+                                        onChange={(e) => updateBargeInConfig('pipeline_min_ms', parseInt(e.target.value))}
+                                        tooltip="Pipeline-specific minimum speech duration (more sensitive than provider-owned mode)."
+                                    />
+                                    <FormInput
+                                        label="Pipeline Energy Threshold"
+                                        type="number"
+                                        value={bargeInConfig.pipeline_energy_threshold ?? 300}
+                                        onChange={(e) => updateBargeInConfig('pipeline_energy_threshold', parseInt(e.target.value))}
+                                        tooltip="Pipeline-specific energy threshold (more sensitive than provider-owned mode)."
+                                    />
+                                    <FormInput
+                                        label="TALK_DETECT Silence (ms)"
+                                        type="number"
+                                        value={bargeInConfig.pipeline_talk_detect_silence_ms ?? 1200}
+                                        onChange={(e) => updateBargeInConfig('pipeline_talk_detect_silence_ms', parseInt(e.target.value))}
+                                        tooltip="Asterisk TALK_DETECT(set) silence threshold in ms. Higher treats more audio as ‘silence’."
+                                    />
+                                    <FormInput
+                                        label="TALK_DETECT Talking Threshold"
+                                        type="number"
+                                        value={bargeInConfig.pipeline_talk_detect_talking_threshold ?? 128}
+                                        onChange={(e) => updateBargeInConfig('pipeline_talk_detect_talking_threshold', parseInt(e.target.value))}
+                                        tooltip="Asterisk TALK_DETECT(set) talking threshold (DSP energy). Higher requires louder speech to trigger."
+                                    />
+                                </div>
+                            </div>
+                        </div>
+                    </details>
                 </ConfigCard>
             </ConfigSection>
 
@@ -209,15 +317,15 @@ const BargeInPage = () => {
                         </div>
                         <div>
                             <span className="text-muted-foreground">Energy Threshold:</span>
-                            <span className="ml-2 font-medium">{bargeInConfig.energy_threshold || 700} RMS</span>
+                            <span className="ml-2 font-medium">{bargeInConfig.energy_threshold ?? 1000} RMS</span>
                         </div>
                         <div>
                             <span className="text-muted-foreground">Minimum Duration:</span>
-                            <span className="ml-2 font-medium">{bargeInConfig.min_ms || 150}ms</span>
+                            <span className="ml-2 font-medium">{bargeInConfig.min_ms ?? 250}ms</span>
                         </div>
                         <div>
                             <span className="text-muted-foreground">Post-TTS Protection:</span>
-                            <span className="ml-2 font-medium">{bargeInConfig.post_tts_end_protection_ms || 800}ms</span>
+                            <span className="ml-2 font-medium">{bargeInConfig.post_tts_end_protection_ms ?? 250}ms</span>
                         </div>
                     </div>
                 </ConfigCard>

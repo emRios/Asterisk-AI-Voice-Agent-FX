@@ -312,7 +312,7 @@ class ExternalMediaEngine:
             logger.error(f"Failed to start AI pipeline for call {call_id}: {e}")
     
     
-    async def _on_rtp_audio_received(self, call_id: str, pcm_data: bytes):
+    async def _on_rtp_audio_received(self, call_id: str, ssrc: int, pcm_data: bytes):
         """Handle incoming RTP audio from caller."""
         try:
             call_info = self.active_calls.get(call_id)

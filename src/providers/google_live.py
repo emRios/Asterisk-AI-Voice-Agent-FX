@@ -62,12 +62,10 @@ _GOOGLE_LIVE_SESSIONS = Gauge(
 _GOOGLE_LIVE_AUDIO_SENT = Counter(
     "ai_agent_google_live_audio_bytes_sent",
     "Total audio bytes sent to Google Live API",
-    labelnames=("call_id",),
 )
 _GOOGLE_LIVE_AUDIO_RECEIVED = Counter(
     "ai_agent_google_live_audio_bytes_received",
     "Total audio bytes received from Google Live API",
-    labelnames=("call_id",),
 )
 
 
@@ -120,6 +118,10 @@ class GoogleLiveProvider(AIProviderInterface):
         # Transcription buffering - hold latest partial until turnComplete
         self._input_transcription_buffer: str = ""
         self._output_transcription_buffer: str = ""
+        
+        # Turn latency tracking (Milestone 21 - Call History)
+        self._turn_start_time: Optional[float] = None
+        self._turn_first_audio_received: bool = False
         
         # Golden Baseline: Simple input buffer for 20ms chunking
         self._input_buffer = bytearray()
@@ -539,7 +541,7 @@ class GoogleLiveProvider(AIProviderInterface):
                 }
                 
                 await self._send_message(message)
-                _GOOGLE_LIVE_AUDIO_SENT.labels(call_id=self._call_id).inc(len(chunk_to_send))
+                _GOOGLE_LIVE_AUDIO_SENT.inc(len(chunk_to_send))
 
         except Exception as e:
             logger.error(
@@ -683,6 +685,11 @@ class GoogleLiveProvider(AIProviderInterface):
         if input_transcription:
             text = input_transcription.get("text", "")
             if text:
+                # Track turn start time on EVERY user input fragment (Milestone 21)
+                # This captures the LAST speech fragment time before AI responds
+                # Measures: last user speech → first AI audio response
+                self._turn_start_time = time.time()
+                self._turn_first_audio_received = False
                 # Concatenate fragments (not replace!)
                 self._input_transcription_buffer += text
                 logger.debug(
@@ -731,6 +738,10 @@ class GoogleLiveProvider(AIProviderInterface):
                 )
                 await self._track_conversation_message("assistant", self._output_transcription_buffer)
                 self._output_transcription_buffer = ""
+            
+            # Reset turn tracking for next turn (Milestone 21)
+            self._turn_start_time = None
+            self._turn_first_audio_received = False
         
         # Extract parts (using camelCase keys from actual API)
         for part in content.get("modelTurn", {}).get("parts", []):
@@ -765,7 +776,26 @@ class GoogleLiveProvider(AIProviderInterface):
             # Decode base64
             pcm16_provider = base64.b64decode(audio_b64)
             
-            _GOOGLE_LIVE_AUDIO_RECEIVED.labels(call_id=self._call_id).inc(len(pcm16_provider))
+            # Track turn latency on first audio output (Milestone 21 - Call History)
+            if self._turn_start_time is not None and not self._turn_first_audio_received:
+                self._turn_first_audio_received = True
+                turn_latency_ms = (time.time() - self._turn_start_time) * 1000
+                # Save to session for call history
+                if self._session_store:
+                    try:
+                        session = await self._session_store.get_by_call_id(self._call_id)
+                        if session:
+                            session.turn_latencies_ms.append(turn_latency_ms)
+                            await self._session_store.upsert_call(session)
+                    except Exception:
+                        pass
+                logger.debug(
+                    "Turn latency recorded",
+                    call_id=self._call_id,
+                    latency_ms=round(turn_latency_ms, 1),
+                )
+            
+            _GOOGLE_LIVE_AUDIO_RECEIVED.inc(len(pcm16_provider))
 
             # Resample from provider output rate to target wire rate (from config)
             provider_output_rate = self.config.output_sample_rate_hz
@@ -955,6 +985,29 @@ class GoogleLiveProvider(AIProviderInterface):
                     call_id=self._call_id,
                     function=func_name,
                 )
+                
+                # Log tool call to session for call history (Milestone 21)
+                try:
+                    session_store = getattr(self, '_session_store', None)
+                    if session_store and self._call_id:
+                        from datetime import datetime
+                        session = await session_store.get_by_call_id(self._call_id)
+                        if session:
+                            tool_record = {
+                                "name": func_name,
+                                "params": func_args,
+                                "result": result.get("status", "unknown") if isinstance(result, dict) else "success",
+                                "message": result.get("message", "") if isinstance(result, dict) else str(result),
+                                "timestamp": datetime.now().isoformat(),
+                                "duration_ms": 0,  # TODO: track actual duration
+                            }
+                            if not hasattr(session, 'tool_calls') or session.tool_calls is None:
+                                session.tool_calls = []
+                            session.tool_calls.append(tool_record)
+                            await session_store.upsert_call(session)
+                            logger.debug("Tool call logged to session", call_id=self._call_id, tool=func_name)
+                except Exception as e:
+                    logger.debug(f"Failed to log tool call to session: {e}", call_id=self._call_id)
 
         except Exception as e:
             logger.error(

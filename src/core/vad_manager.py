@@ -30,20 +30,18 @@ WEBRTC_SUPPORTED_RATES = [8000, 16000, 32000]
 _VAD_FRAMES_TOTAL = Counter(
     "ai_agent_vad_frames_total",
     "Total audio frames processed by Enhanced VAD",
-    labelnames=("call_id", "result"),
+    labelnames=("result",),
 )
 
 _VAD_CONFIDENCE_HISTOGRAM = Histogram(
     "ai_agent_vad_confidence",
     "Enhanced VAD confidence distribution",
-    labelnames=("call_id",),
     buckets=(0.1, 0.3, 0.5, 0.7, 0.9, 1.0),
 )
 
 _VAD_ADAPTIVE_THRESHOLD = Gauge(
     "ai_agent_vad_adaptive_threshold",
     "Enhanced VAD adaptive energy threshold",
-    labelnames=("call_id",),
 )
 
 
@@ -230,9 +228,9 @@ class EnhancedVADManager:
     def _update_metrics(self, call_id: str, result: VADResult, threshold: int) -> None:
         try:
             label = "speech" if result.is_speech else "silence"
-            _VAD_FRAMES_TOTAL.labels(call_id, label).inc()
-            _VAD_CONFIDENCE_HISTOGRAM.labels(call_id).observe(result.confidence)
-            _VAD_ADAPTIVE_THRESHOLD.labels(call_id).set(threshold)
+            _VAD_FRAMES_TOTAL.labels(label).inc()
+            _VAD_CONFIDENCE_HISTOGRAM.observe(result.confidence)
+            _VAD_ADAPTIVE_THRESHOLD.set(threshold)
         except Exception:
             logger.debug("Enhanced VAD - metrics update failed", exc_info=True)
 

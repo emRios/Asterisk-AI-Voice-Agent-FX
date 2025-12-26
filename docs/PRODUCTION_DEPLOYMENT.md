@@ -1,6 +1,6 @@
 # Production Deployment Guide
 
-Best practices and recommendations for deploying Asterisk AI Voice Agent v4.5.2 in production environments.
+Best practices and recommendations for deploying Asterisk AI Voice Agent `v4.5+` in production environments.
 
 ## Overview
 
@@ -41,14 +41,16 @@ This guide covers production deployment considerations, security hardening, scal
 - [ ] **`.env` file**: All required environment variables set
 - [ ] **`config/ai-agent.yaml`**: Production configuration selected
 - [ ] **Shared Storage**: `/mnt/asterisk_media/ai-generated` configured (for Local Hybrid)
-- [ ] **Monitoring**: `docker-compose.monitoring.yml` ready
+- [ ] **Call History**: `./data` volume persisted (default DB: `./data/call_history.db`)
+- [ ] **Monitoring (optional)**: Prometheus scraping `/metrics` (aggregate metrics only)
 
 ### Testing Completed
 
 - [ ] **Test Calls**: Successful test calls with chosen configuration
 - [ ] **Load Testing**: Verified capacity with expected concurrent calls
 - [ ] **Failover Testing**: Tested restart and recovery procedures
-- [ ] **Monitoring**: Prometheus and Grafana collecting metrics
+- [ ] **Call History**: Records persisted and export works (Admin UI → Call History)
+- [ ] **Monitoring (optional)**: Prometheus and Grafana collecting aggregate metrics
 
 ---
 
@@ -559,13 +561,14 @@ If you need enterprise-grade secrets management:
 .env
 config/ai-agent.yaml
 docker-compose.yml
-docker-compose.monitoring.yml
 ```
 
-**Monitoring Data** (important):
+**Monitoring Data** (optional):
+If you run Prometheus/Grafana, back up their persistent storage per your monitoring stack.
+
+**Call History** (important for debugging):
 ```
-prometheus data volume
-grafana dashboards and settings
+./data/call_history.db (and SQLite WAL files)
 ```
 
 **Generated Audio Files** (optional):
@@ -601,16 +604,10 @@ cp config/ai-agent.yaml "$BACKUP_PATH/"
 cp docker-compose*.yml "$BACKUP_PATH/"
 
 # Backup Prometheus data
-docker run --rm \
-  --volumes-from prometheus \
-  -v "$BACKUP_PATH:/backup" \
-  alpine tar czf /backup/prometheus.tar.gz /prometheus
+# Backup Call History DB (SQLite uses WAL by default; include -wal/-shm if present)
+cp -a ./data/call_history.db* "$BACKUP_PATH/" 2>/dev/null || true
 
-# Backup Grafana
-docker run --rm \
-  --volumes-from grafana \
-  -v "$BACKUP_PATH:/backup" \
-  alpine tar czf /backup/grafana.tar.gz /var/lib/grafana
+# Monitoring backup (optional): back up Prometheus/Grafana per your monitoring stack.
 
 echo "Backup completed: $BACKUP_PATH"
 
@@ -699,13 +696,7 @@ aws s3 sync /backups/ai-voice-agent/ "$BUCKET/" \
    docker compose up -d
    ```
 
-6. **Restore monitoring data** (optional):
-   ```bash
-   docker run --rm \
-     --volumes-from prometheus \
-     -v "$LATEST_BACKUP:/backup" \
-     alpine tar xzf /backup/prometheus.tar.gz -C /
-   ```
+6. **Restore monitoring data** (optional): restore Prometheus/Grafana per your monitoring stack.
 
 7. **Verify operation**:
    ```bash
@@ -987,7 +978,7 @@ ls -l .env
 docker stats ai_engine
 
 # Check concurrent calls
-curl 'http://localhost:9090/api/v1/query?query=ai_agent_active_calls'
+curl http://localhost:15000/health | jq '.active_calls'
 
 # If CPU high with low calls, check for:
 # - Inefficient configuration

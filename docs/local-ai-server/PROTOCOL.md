@@ -13,7 +13,7 @@ This document describes the WebSocket API exposed by the local AI server (defaul
 
 Source of truth:
 
-- Server: `local_ai_server/main.py`
+- Server entrypoint: `local_ai_server/main.py` (imports `local_ai_server/server.py`)
   - Message handling: `_handle_json_message()`, `_handle_binary_message()`
   - Streaming STT: `_process_stt_stream()`
   - LLM pipeline: `process_llm()`, `_emit_llm_response()`
@@ -32,6 +32,11 @@ Request:
 ```json
 { "type": "auth", "auth_token": "..." }
 ```
+
+Notes:
+
+- The server also accepts `token` as an alias for `auth_token`.
+- You may include `call_id` to correlate logs before the first audio frame.
 
 Response:
 
@@ -162,7 +167,7 @@ If `request_id` is set, the server emits `tts_audio` metadata before the binary 
 
 Notes:
 
-- The server uses an idle finalizer (`LOCAL_STT_IDLE_MS`, default 3000 ms) to promote a final transcript if no more audio arrives; duplicate/empty finals are suppressed per `local_ai_server/main.py`.
+- The server uses an idle finalizer (`LOCAL_STT_IDLE_MS`, default 3000 ms) to promote a final transcript if no more audio arrives; duplicate/empty finals are suppressed per `local_ai_server/server.py`.
 
 ---
 
@@ -265,18 +270,22 @@ Response:
 {
   "type": "status_response",
   "status": "ok",
-  "stt_backend": "vosk|kroko|sherpa",
-  "tts_backend": "piper|kokoro",
+  "stt_backend": "vosk|kroko|sherpa|faster_whisper",
+  "tts_backend": "piper|kokoro|melotts",
   "models": {
     "stt": { "loaded": true, "path": "/app/models/stt/...", "display": "vosk-model-en-us-0.22" },
     "llm": { "loaded": true, "path": "/app/models/llm/...", "display": "phi-3-mini-4k-instruct.Q4_K_M.gguf" },
     "tts": { "loaded": true, "path": "/app/models/tts/...", "display": "en_US-lessac-medium.onnx" }
   },
   "kroko": { "embedded": false, "port": 6006, "language": "en-US", "url": "wss://...", "model_path": "/app/models/kroko/..." },
-  "kokoro": { "mode": "local|api|hf", "voice": "af_heart", "model_path": "/app/models/tts/kokoro", "api_base_url": "https://.../api/v1" },
+  "kokoro": { "mode": "local|api|hf", "voice": "af_heart", "model_path": "/app/models/tts/kokoro", "api_base_url": "https://.../api/v1", "api_key_set": false },
   "config": { "log_level": "INFO", "debug_audio": false }
 }
 ```
+
+Schema:
+
+- See `docs/local-ai-server/protocol.schema.json` for a machine-checkable JSON Schema of the protocol contract.
 
 ---
 
@@ -316,6 +325,10 @@ Response:
 { "type": "switch_response", "status": "success", "message": "...", "changed": ["stt_backend=kroko"] }
 ```
 
+Optional fields:
+
+- `dry_run` (boolean): when `true`, the server updates its in-memory configuration and responds with `switch_response`, but does **not** reload models. This is intended for diagnostics/smoke tests.
+
 ---
 
 ## Capabilities
@@ -352,6 +365,27 @@ Notes:
 - Used by Admin UI `/api/local-ai/capabilities` endpoint to filter available options
 
 ---
+
+## Error Handling Contract (Current Behavior)
+
+This section documents what the server currently does (as implemented in `local_ai_server/server.py` and `local_ai_server/ws_protocol.py`). Some of this will be improved in a later refactor phase (notably: graceful degradation on missing model files).
+
+- **Invalid JSON**: logs a warning and ignores the message (no response).
+- **Missing `type` field**: logs a warning and ignores the message (no response).
+- **Unknown `type`**: logs a warning and ignores the message (no response).
+- **Auth required but not completed**:
+  - JSON messages: server responds with `{ "type": "auth_response", "status": "error", "message": "authentication_required" }`.
+  - Binary audio: server responds with the same `auth_response` and drops audio frames.
+- **Startup model load failures** (STT/LLM/TTS):
+  - Default behavior is **degraded start**: the server starts, and `status_response.models.*.loaded=false` reflects missing components.
+  - Set `LOCAL_AI_FAIL_FAST=1` to restore **fail-fast** startup (exceptions abort startup).
+- **STT unavailable during audio streaming**: server emits a final `stt_result` with empty text and `error: "stt_unavailable"` so upstream can terminate the turn cleanly.
+- **LLM timeouts**: server returns a fallback `llm_response` text (does not crash the connection).
+- **Model switching failures**: server responds with `{ "type": "switch_response", "status": "error", "message": "..." }`.
+
+### Testing / Mock Mode
+
+- `LOCAL_AI_MOCK_MODELS=1`: skip loading real STT/LLM/TTS models on startup. `status_response.config.mock_models=true` and model `loaded` flags are forced `true` for easier smoke testing of the control-plane (`auth/status/capabilities/switch_model`) without downloading multi‑GB assets.
 
 ## Client Examples
 
@@ -407,7 +441,7 @@ async def stt(pcm_bytes):
 
 ## Environment Variables and Tuning
 
-Server-side (see `local_ai_server/main.py`):
+Server-side (see `local_ai_server/ws_protocol.py`):
 
 - Models: `LOCAL_STT_MODEL_PATH`, `LOCAL_LLM_MODEL_PATH`, `LOCAL_TTS_MODEL_PATH`
 - WebSocket bind: `LOCAL_WS_HOST`, `LOCAL_WS_PORT`
@@ -545,5 +579,5 @@ Example:
 
 ## Versioning and Compatibility
 
-- Protocol is stable for v4.0 GA track. Message types and fields correspond to the implementation in `local_ai_server/main.py`.
+- Protocol is stable for v4.0 GA track. Message types and fields correspond to the implementation in `local_ai_server/ws_protocol.py`.
 - The engine's local provider uses the same contract to support pipelines defined in `config/ai-agent.*.yaml`.

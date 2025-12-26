@@ -43,89 +43,78 @@ _JITTER_SENTINEL = object()
 # Prometheus metrics for streaming playback (module-scope, registered once)
 _STREAMING_ACTIVE_GAUGE = Gauge(
     "ai_agent_streaming_active",
-    "Whether streaming playback is active for a call (1 = active)",
-    labelnames=("call_id",),
+    "Number of calls with streaming playback active",
 )
 _STREAMING_BYTES_TOTAL = Counter(
     "ai_agent_streaming_bytes_total",
     "Total bytes queued to streaming playback (pre-conversion)",
-    labelnames=("call_id",),
 )
 _STREAMING_FALLBACKS_TOTAL = Counter(
     "ai_agent_streaming_fallbacks_total",
     "Number of times streaming fell back to file playback",
-    labelnames=("call_id",),
 )
 _STREAMING_JITTER_DEPTH = Gauge(
     "ai_agent_streaming_jitter_buffer_depth",
-    "Current jitter buffer depth in queued chunks",
-    labelnames=("call_id",),
+    "Max jitter buffer depth across active streams (queued chunks)",
 )
 _STREAMING_LAST_CHUNK_AGE = Gauge(
     "ai_agent_streaming_last_chunk_age_seconds",
-    "Seconds since last streaming chunk was received",
-    labelnames=("call_id",),
+    "Max seconds since last streaming chunk across active streams",
 )
 _STREAMING_KEEPALIVES_SENT_TOTAL = Counter(
     "ai_agent_streaming_keepalives_sent_total",
     "Count of keepalive ticks sent while streaming",
-    labelnames=("call_id",),
 )
 _STREAMING_KEEPALIVE_TIMEOUTS_TOTAL = Counter(
     "ai_agent_streaming_keepalive_timeouts_total",
     "Count of keepalive-detected streaming timeouts",
-    labelnames=("call_id",),
 )
 _STREAM_TX_BYTES = Counter(
     "ai_agent_stream_tx_bytes_total",
-    "Outbound audio bytes sent to caller (per call)",
-    labelnames=("call_id",),
+    "Outbound audio bytes sent to caller",
 )
 
 # Additional pacing/underflow metrics
 _STREAM_UNDERFLOW_EVENTS_TOTAL = Counter(
     "ai_agent_stream_underflow_events_total",
     "Underflow events (20ms fillers inserted)",
-    labelnames=("call_id",),
 )
 _STREAM_FILLER_BYTES_TOTAL = Counter(
     "ai_agent_stream_filler_bytes_total",
     "Filler bytes injected on underflow",
-    labelnames=("call_id",),
 )
 _STREAM_FRAMES_SENT_TOTAL = Counter(
     "ai_agent_stream_frames_sent_total",
     "Frames (20ms) actually sent",
-    labelnames=("call_id",),
 )
 
 # New observability metrics for tuning
 _STREAM_STARTED_TOTAL = Counter(
     "ai_agent_stream_started_total",
     "Number of streaming segments started",
-    labelnames=("call_id", "playback_type"),
+    labelnames=("playback_type",),
 )
 _STREAM_FIRST_FRAME_SECONDS = Histogram(
     "ai_agent_stream_first_frame_seconds",
     "Time from stream start to first outbound frame",
     buckets=(0.05, 0.1, 0.2, 0.3, 0.5, 1.0, 2.0),
-    labelnames=("call_id", "playback_type"),
+    labelnames=("playback_type",),
 )
 _STREAM_SEGMENT_DURATION_SECONDS = Histogram(
     "ai_agent_stream_segment_duration_seconds",
     "Streaming segment duration",
     buckets=(0.5, 1.0, 2.0, 3.0, 5.0, 8.0, 15.0, 30.0),
-    labelnames=("call_id", "playback_type"),
+    labelnames=("playback_type",),
 )
 _STREAM_END_REASON_TOTAL = Counter(
     "ai_agent_stream_end_reason_total",
     "Count of stream end reasons",
-    labelnames=("call_id", "reason"),
+    labelnames=("reason",),
 )
 _STREAM_ENDIAN_CORRECTIONS_TOTAL = Counter(
     "ai_agent_stream_endian_corrections_total",
     "Count of PCM16 egress byte-order corrections applied automatically",
-    labelnames=("call_id", "mode"),
+    labelnames=("mode",),
 )
 
 
@@ -386,6 +375,26 @@ class StreamingPlaybackManager:
             return fallback if fallback > 0 else 16000
         return fallback if fallback > 0 else 8000
 
+    def _refresh_streaming_summary_metrics(self) -> None:
+        """Update low-cardinality streaming gauges (aggregate across calls)."""
+        try:
+            _STREAMING_ACTIVE_GAUGE.set(len(self.active_streams))
+            max_depth = 0
+            max_age = 0.0
+            for info in (self.active_streams or {}).values():
+                try:
+                    max_depth = max(max_depth, int(info.get("jitter_depth", 0) or 0))
+                except Exception:
+                    pass
+                try:
+                    max_age = max(max_age, float(info.get("last_chunk_age_s", 0.0) or 0.0))
+                except Exception:
+                    pass
+            _STREAMING_JITTER_DEPTH.set(max_depth)
+            _STREAMING_LAST_CHUNK_AGE.set(max_age)
+        except Exception:
+            logger.debug("Streaming summary metrics update failed", exc_info=True)
+
     async def start_streaming_playback(
         self,
         call_id: str,
@@ -554,8 +563,7 @@ class StreamingPlaybackManager:
             except Exception:
                 pass
 
-            # Mark streaming active in metrics and session
-            _STREAMING_ACTIVE_GAUGE.labels(call_id).set(1)
+            # Mark streaming active in session (metrics are aggregate; updated after stream registration)
             if session:
                 session.streaming_started = True
                 session.current_stream_id = stream_id
@@ -728,9 +736,10 @@ class StreamingPlaybackManager:
             }
             self._startup_ready[call_id] = bool(initial_startup_ready)
             try:
-                _STREAM_STARTED_TOTAL.labels(call_id, playback_type).inc()
+                _STREAM_STARTED_TOTAL.labels(playback_type).inc()
             except Exception:
                 pass
+            self._refresh_streaming_summary_metrics()
             
             logger.info("🎵 STREAMING PLAYBACK - Started",
                        call_id=call_id,
@@ -821,11 +830,13 @@ class StreamingPlaybackManager:
                     # Update timing and metrics
                     last_send_time = time.time()
                     try:
-                        _STREAMING_BYTES_TOTAL.labels(call_id).inc(len(chunk))
-                        _STREAMING_JITTER_DEPTH.labels(call_id).set(jitter_buffer.qsize())
-                        _STREAMING_LAST_CHUNK_AGE.labels(call_id).set(0.0)
-                        # Track per-call queued total as well as segment-local queued_bytes
+                        _STREAMING_BYTES_TOTAL.inc(len(chunk))
                         info = self.active_streams.get(call_id)
+                        if info is not None:
+                            info["jitter_depth"] = jitter_buffer.qsize()
+                            info["last_chunk_age_s"] = 0.0
+                        self._refresh_streaming_summary_metrics()
+                        # Track per-call queued total as well as segment-local queued_bytes
                         if info is not None:
                             info['queued_total_bytes'] = int(info.get('queued_total_bytes', 0) or 0) + len(chunk)
                         sess = await self.session_store.get_by_call_id(call_id)
@@ -918,7 +929,10 @@ class StreamingPlaybackManager:
                         continue
                     # Continuous stream: stay alive, pacer will inject fillers as needed
                     try:
-                        _STREAMING_LAST_CHUNK_AGE.labels(call_id).set(time.time() - last_send_time)
+                        info = self.active_streams.get(call_id)
+                        if info is not None:
+                            info["last_chunk_age_s"] = float(time.time() - last_send_time)
+                        self._refresh_streaming_summary_metrics()
                     except Exception:
                         pass
                     continue
@@ -1012,7 +1026,8 @@ class StreamingPlaybackManager:
             return "finished"
 
         try:
-            _STREAMING_JITTER_DEPTH.labels(call_id).set(jitter_buffer.qsize())
+            stream_info["jitter_depth"] = jitter_buffer.qsize()
+            self._refresh_streaming_summary_metrics()
         except Exception:
             pass
 
@@ -1147,7 +1162,10 @@ class StreamingPlaybackManager:
             )
 
         try:
-            _STREAMING_JITTER_DEPTH.labels(call_id).set(jitter_buffer.qsize())
+            info = self.active_streams.get(call_id)
+            if info is not None:
+                info["jitter_depth"] = jitter_buffer.qsize()
+            self._refresh_streaming_summary_metrics()
         except Exception:
             pass
 
@@ -1287,7 +1305,7 @@ class StreamingPlaybackManager:
             except Exception:
                 pass
         try:
-            _STREAM_FRAMES_SENT_TOTAL.labels(call_id).inc(1)
+            _STREAM_FRAMES_SENT_TOTAL.inc(1)
         except Exception:
             pass
         info = self.active_streams.get(call_id)
@@ -1304,8 +1322,8 @@ class StreamingPlaybackManager:
                 pass
             if filler:
                 try:
-                    _STREAM_UNDERFLOW_EVENTS_TOTAL.labels(call_id).inc(1)
-                    _STREAM_FILLER_BYTES_TOTAL.labels(call_id).inc(len(frame))
+                    _STREAM_UNDERFLOW_EVENTS_TOTAL.inc(1)
+                    _STREAM_FILLER_BYTES_TOTAL.inc(len(frame))
                 except Exception:
                     pass
                 try:
@@ -2450,7 +2468,7 @@ class StreamingPlaybackManager:
                     logger.warning("RTP streaming send failed", call_id=call_id, stream_id=stream_id)
                 else:
                     try:
-                        _STREAM_TX_BYTES.labels(call_id).inc(len(rtp_chunk))
+                        _STREAM_TX_BYTES.inc(len(rtp_chunk))
                         if call_id in self.active_streams:
                             info = self.active_streams[call_id]
                             info['tx_bytes'] = int(info.get('tx_bytes', 0)) + len(rtp_chunk)
@@ -2565,7 +2583,7 @@ class StreamingPlaybackManager:
                     logger.warning("AudioSocket streaming send failed", call_id=call_id, stream_id=stream_id)
                 else:
                     try:
-                        _STREAM_TX_BYTES.labels(call_id).inc(len(chunk))
+                        _STREAM_TX_BYTES.inc(len(chunk))
                         if call_id in self.active_streams:
                             info = self.active_streams[call_id]
                             info['tx_bytes'] = int(info.get('tx_bytes', 0)) + len(chunk)
@@ -2578,7 +2596,7 @@ class StreamingPlaybackManager:
                         start_time = float(self.active_streams[call_id].get('start_time', time.time()))
                         pb_type = str(self.active_streams[call_id].get('playback_type', 'response'))
                         first_s = max(0.0, time.time() - start_time)
-                        _STREAM_FIRST_FRAME_SECONDS.labels(call_id, pb_type).observe(first_s)
+                        _STREAM_FIRST_FRAME_SECONDS.labels(pb_type).observe(first_s)
                         self.active_streams[call_id]['first_frame_observed'] = True
                 except Exception:
                     pass
@@ -2856,7 +2874,7 @@ class StreamingPlaybackManager:
     async def _record_fallback(self, call_id: str, reason: str) -> None:
         """Increment fallback counters and persist the last error."""
         try:
-            _STREAMING_FALLBACKS_TOTAL.labels(call_id).inc()
+            _STREAMING_FALLBACKS_TOTAL.inc()
             sess = await self.session_store.get_by_call_id(call_id)
             if sess:
                 sess.streaming_fallback_count += 1
@@ -2967,8 +2985,9 @@ class StreamingPlaybackManager:
                 # Check for timeout
                 stream_info = self.active_streams[call_id]
                 time_since_last_chunk = time.time() - stream_info['last_chunk_time']
-                _STREAMING_LAST_CHUNK_AGE.labels(call_id).set(max(0.0, time_since_last_chunk))
-                _STREAMING_KEEPALIVES_SENT_TOTAL.labels(call_id).inc()
+                stream_info["last_chunk_age_s"] = max(0.0, float(time_since_last_chunk))
+                self._refresh_streaming_summary_metrics()
+                _STREAMING_KEEPALIVES_SENT_TOTAL.inc()
                 try:
                     sess = await self.session_store.get_by_call_id(call_id)
                     if sess:
@@ -2982,7 +3001,7 @@ class StreamingPlaybackManager:
                                  call_id=call_id,
                                  stream_id=stream_id,
                                  time_since_last_chunk=time_since_last_chunk)
-                    _STREAMING_KEEPALIVE_TIMEOUTS_TOTAL.labels(call_id).inc()
+                    _STREAMING_KEEPALIVE_TIMEOUTS_TOTAL.inc()
                     # In continuous-stream mode, do NOT fallback or end the stream; continue pacing
                     if not self.continuous_stream:
                         try:
@@ -3385,9 +3404,9 @@ class StreamingPlaybackManager:
                     info = self.active_streams[call_id]
                     pb_type = str(info.get('playback_type', 'response'))
                     dur = max(0.0, time.time() - float(info.get('start_time', time.time())))
-                    _STREAM_SEGMENT_DURATION_SECONDS.labels(call_id, pb_type).observe(dur)
+                    _STREAM_SEGMENT_DURATION_SECONDS.labels(pb_type).observe(dur)
                     reason = str(info.get('end_reason') or 'streaming-ended')
-                    _STREAM_END_REASON_TOTAL.labels(call_id, reason).inc()
+                    _STREAM_END_REASON_TOTAL.labels(reason).inc()
             except Exception:
                 pass
 
@@ -3438,6 +3457,7 @@ class StreamingPlaybackManager:
             # Remove from active streams
             if call_id in self.active_streams:
                 del self.active_streams[call_id]
+            self._refresh_streaming_summary_metrics()
             # Record last segment end timestamp for adaptive gating of next segment
             try:
                 self._last_segment_end_ts[call_id] = time.time()
@@ -3451,13 +3471,7 @@ class StreamingPlaybackManager:
             self._resample_states.pop(call_id, None)
             self._dc_block_state.pop(call_id, None)
             self._rtp_codec_cache.pop(call_id, None)
-            # Reset metrics
-            try:
-                _STREAMING_ACTIVE_GAUGE.labels(call_id).set(0)
-                _STREAMING_JITTER_DEPTH.labels(call_id).set(0)
-                _STREAMING_LAST_CHUNK_AGE.labels(call_id).set(0)
-            except Exception:
-                pass
+            # Metrics are aggregate; refreshed when active_streams changes.
             
             # Reset session streaming flags
             try:

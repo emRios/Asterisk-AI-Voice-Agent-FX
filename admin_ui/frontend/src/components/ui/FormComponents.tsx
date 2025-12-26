@@ -79,13 +79,28 @@ export const FormSelect = React.forwardRef<HTMLSelectElement, SelectProps>(
 interface SwitchProps extends React.InputHTMLAttributes<HTMLInputElement> {
     label?: string;
     description?: string;
+    tooltip?: string;
 }
 
 export const FormSwitch = React.forwardRef<HTMLInputElement, SwitchProps>(
-    ({ label, description, className = '', ...props }, ref) => (
+    ({ label, description, tooltip, className = '', ...props }, ref) => (
         <div className="flex items-center justify-between mb-4 p-3 border border-border rounded-lg bg-card/50">
             <div className="space-y-0.5">
-                {label && <label htmlFor={props.id} className="text-sm font-medium cursor-pointer">{label}</label>}
+                {label && (
+                    <div className="flex items-center gap-1.5">
+                        <label htmlFor={props.id} className="text-sm font-medium cursor-pointer">
+                            {label}
+                        </label>
+                        {tooltip && (
+                            <div className="group relative">
+                                <HelpCircle className="w-3.5 h-3.5 text-muted-foreground cursor-help" />
+                                <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 px-2 py-1 bg-popover text-popover-foreground text-xs rounded shadow-md border border-border whitespace-nowrap opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-50">
+                                    {tooltip}
+                                </div>
+                            </div>
+                        )}
+                    </div>
+                )}
                 {description && <p className="text-xs text-muted-foreground">{description}</p>}
             </div>
             <label className="relative inline-flex items-center cursor-pointer">

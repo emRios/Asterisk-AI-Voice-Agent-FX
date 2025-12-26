@@ -91,9 +91,19 @@ class LocalProvider(AIProviderInterface):
         return ["ulaw"]
 
     def is_ready(self) -> bool:
-        """Check if provider is properly configured with WebSocket URL."""
-        ws_url = getattr(self, 'ws_url', None) or ""
-        return bool(ws_url and str(ws_url).strip())
+        """
+        Readiness for the *provider config* (mirrors other providers):
+        - True when the WebSocket URL is configured.
+        - Connection establishment happens on-demand when the provider is used.
+
+        Note: connection state is exposed via `is_connected()`.
+        """
+        ws_url = getattr(self, "ws_url", None) or ""
+        return bool(str(ws_url).strip())
+
+    def is_connected(self) -> bool:
+        """Return True only when the provider has an active WS connection."""
+        return bool(self.websocket is not None and self.websocket.state.name == "OPEN")
 
     async def _connect_ws(self):
         # Use conservative client settings; server will drive pings if needed
@@ -720,5 +730,7 @@ class LocalProvider(AIProviderInterface):
             "supported_codecs": self.supported_codecs,
         }
     
-    def is_ready(self) -> bool:
-        return self.websocket is not None and self.websocket.state.name == "OPEN"
+    # Backwards-compatible alias for older callers that treated readiness as "connected".
+    # Prefer `is_connected()` for connection state.
+    def is_connected_ready(self) -> bool:
+        return self.is_connected()

@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Container, RefreshCw, AlertCircle, Clock, CheckCircle2, XCircle } from 'lucide-react';
+import { Container, RefreshCw, AlertCircle, Clock, CheckCircle2, XCircle, HardDrive, Trash2, Database, Layers, Box } from 'lucide-react';
 import { ConfigSection } from '../../components/ui/ConfigSection';
 import { ConfigCard } from '../../components/ui/ConfigCard';
 import axios from 'axios';
@@ -15,10 +15,17 @@ interface ContainerInfo {
     ports?: string[];
 }
 
+interface DiskUsage {
+    images: { total: number; active: number; size: string; reclaimable: string };
+    containers: { total: number; active: number; size: string; reclaimable: string };
+    volumes: { total: number; active: number; size: string; reclaimable: string };
+    build_cache: { total: number; active: number; size: string; reclaimable: string };
+}
+
 interface Toast {
     id: number;
     message: string;
-    type: 'success' | 'error';
+    type: 'success' | 'error' | 'warning';
 }
 
 const DockerPage = () => {
@@ -27,13 +34,59 @@ const DockerPage = () => {
     const [error, setError] = useState<string | null>(null);
     const [actionLoading, setActionLoading] = useState<string | null>(null);
     const [toasts, setToasts] = useState<Toast[]>([]);
+    const [diskUsage, setDiskUsage] = useState<DiskUsage | null>(null);
+    const [diskLoading, setDiskLoading] = useState(false);
+    const [pruning, setPruning] = useState(false);
 
-    const showToast = (message: string, type: 'success' | 'error') => {
+    const showToast = (message: string, type: 'success' | 'error' | 'warning') => {
         const id = Date.now();
         setToasts(prev => [...prev, { id, message, type }]);
         setTimeout(() => {
             setToasts(prev => prev.filter(t => t.id !== id));
         }, 4000);
+    };
+
+    const fetchDiskUsage = async () => {
+        setDiskLoading(true);
+        try {
+            const res = await axios.get('/api/system/docker/disk-usage');
+            setDiskUsage(res.data);
+        } catch (err: any) {
+            console.error('Failed to fetch Docker disk usage', err);
+        } finally {
+            setDiskLoading(false);
+        }
+    };
+
+    const handlePrune = async (type: 'build_cache' | 'images' | 'all') => {
+        if (!confirm(
+            type === 'all' 
+                ? 'This will clean up build cache and unused images. Continue?' 
+                : type === 'build_cache'
+                    ? 'This will clear the Docker build cache. Builds will take longer next time but this is safe. Continue?'
+                    : 'This will remove unused Docker images. Continue?'
+        )) return;
+
+        setPruning(true);
+        try {
+            const res = await axios.post('/api/system/docker/prune', {
+                prune_build_cache: type === 'build_cache' || type === 'all',
+                prune_images: type === 'images' || type === 'all',
+                prune_containers: type === 'all',
+                prune_volumes: false  // Never auto-prune volumes
+            });
+            
+            if (res.data.success) {
+                showToast(`Cleanup complete: ${res.data.space_reclaimed || 'Space freed'}`, 'success');
+                fetchDiskUsage();
+            } else {
+                showToast('Cleanup failed', 'error');
+            }
+        } catch (err: any) {
+            showToast('Cleanup failed: ' + (err.response?.data?.detail || err.message), 'error');
+        } finally {
+            setPruning(false);
+        }
     };
 
     const fetchContainers = async () => {
@@ -52,6 +105,7 @@ const DockerPage = () => {
 
     useEffect(() => {
         fetchContainers();
+        fetchDiskUsage();
     }, []);
 
     const handleRestart = async (id: string, name: string) => {
@@ -105,6 +159,106 @@ const DockerPage = () => {
                     {error}
                 </div>
             )}
+
+            {/* Docker Disk Usage Section */}
+            <ConfigSection title="Docker Disk Usage" description="Monitor and clean up Docker storage to prevent disk space issues.">
+                <ConfigCard className="p-4">
+                    {diskLoading && !diskUsage ? (
+                        <div className="text-center py-4 text-muted-foreground">Loading disk usage...</div>
+                    ) : diskUsage ? (
+                        <div className="space-y-4">
+                            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                                {/* Build Cache */}
+                                <div className="p-3 bg-orange-500/10 rounded-lg border border-orange-500/20">
+                                    <div className="flex items-center gap-2 mb-2">
+                                        <Layers className="w-4 h-4 text-orange-500" />
+                                        <span className="text-sm font-medium">Build Cache</span>
+                                    </div>
+                                    <div className="text-lg font-bold">{diskUsage.build_cache.size}</div>
+                                    <div className="text-xs text-muted-foreground">
+                                        {diskUsage.build_cache.reclaimable} reclaimable
+                                    </div>
+                                </div>
+                                
+                                {/* Images */}
+                                <div className="p-3 bg-blue-500/10 rounded-lg border border-blue-500/20">
+                                    <div className="flex items-center gap-2 mb-2">
+                                        <Box className="w-4 h-4 text-blue-500" />
+                                        <span className="text-sm font-medium">Images</span>
+                                    </div>
+                                    <div className="text-lg font-bold">{diskUsage.images.size}</div>
+                                    <div className="text-xs text-muted-foreground">
+                                        {diskUsage.images.total} total, {diskUsage.images.active} active
+                                    </div>
+                                </div>
+                                
+                                {/* Containers */}
+                                <div className="p-3 bg-green-500/10 rounded-lg border border-green-500/20">
+                                    <div className="flex items-center gap-2 mb-2">
+                                        <Container className="w-4 h-4 text-green-500" />
+                                        <span className="text-sm font-medium">Containers</span>
+                                    </div>
+                                    <div className="text-lg font-bold">{diskUsage.containers.size}</div>
+                                    <div className="text-xs text-muted-foreground">
+                                        {diskUsage.containers.total} total, {diskUsage.containers.active} active
+                                    </div>
+                                </div>
+                                
+                                {/* Volumes */}
+                                <div className="p-3 bg-purple-500/10 rounded-lg border border-purple-500/20">
+                                    <div className="flex items-center gap-2 mb-2">
+                                        <Database className="w-4 h-4 text-purple-500" />
+                                        <span className="text-sm font-medium">Volumes</span>
+                                    </div>
+                                    <div className="text-lg font-bold">{diskUsage.volumes.size}</div>
+                                    <div className="text-xs text-muted-foreground">
+                                        {diskUsage.volumes.total} total
+                                    </div>
+                                </div>
+                            </div>
+                            
+                            {/* Cleanup Actions */}
+                            <div className="flex flex-wrap gap-2 pt-2 border-t">
+                                <button
+                                    onClick={() => handlePrune('build_cache')}
+                                    disabled={pruning}
+                                    className="inline-flex items-center gap-2 px-3 py-1.5 text-sm font-medium rounded-md bg-orange-500/10 text-orange-600 hover:bg-orange-500/20 disabled:opacity-50 border border-orange-500/20"
+                                >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                    Clean Build Cache
+                                </button>
+                                <button
+                                    onClick={() => handlePrune('images')}
+                                    disabled={pruning}
+                                    className="inline-flex items-center gap-2 px-3 py-1.5 text-sm font-medium rounded-md bg-blue-500/10 text-blue-600 hover:bg-blue-500/20 disabled:opacity-50 border border-blue-500/20"
+                                >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                    Clean Unused Images
+                                </button>
+                                <button
+                                    onClick={() => fetchDiskUsage()}
+                                    disabled={diskLoading}
+                                    className="inline-flex items-center gap-2 px-3 py-1.5 text-sm font-medium rounded-md bg-muted hover:bg-muted/80 disabled:opacity-50"
+                                >
+                                    <RefreshCw className={`w-3.5 h-3.5 ${diskLoading ? 'animate-spin' : ''}`} />
+                                    Refresh
+                                </button>
+                            </div>
+                            
+                            {pruning && (
+                                <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                                    <RefreshCw className="w-4 h-4 animate-spin" />
+                                    Cleaning up Docker resources...
+                                </div>
+                            )}
+                        </div>
+                    ) : (
+                        <div className="text-center py-4 text-muted-foreground">
+                            Unable to load Docker disk usage
+                        </div>
+                    )}
+                </ConfigCard>
+            </ConfigSection>
 
             <ConfigSection title="Service Status" description="Current state of system containers.">
                 <div className="grid gap-4">

@@ -920,8 +920,12 @@ def update_yaml_provider_field(provider_name: str, field: str, value: Any) -> bo
         if provider_name not in config['providers']:
             config['providers'][provider_name] = {}
         
-        # Update the field
-        config['providers'][provider_name][field] = value
+        # Update the field (allow deletion by passing None)
+        if value is None:
+            if isinstance(config['providers'].get(provider_name), dict):
+                config['providers'][provider_name].pop(field, None)
+        else:
+            config['providers'][provider_name][field] = value
         
         # Write back
         with open(settings.CONFIG_PATH, 'w') as f:

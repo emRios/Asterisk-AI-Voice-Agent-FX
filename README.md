@@ -2,7 +2,7 @@
 
 # Asterisk AI Voice Agent
 
-![Version](https://img.shields.io/badge/version-4.5.2-blue.svg)
+![Version](https://img.shields.io/badge/version-4.5.3-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 ![Python](https://img.shields.io/badge/python-3.10+-blue.svg)
 ![Docker](https://img.shields.io/badge/docker-compose-blue.svg)
@@ -21,7 +21,7 @@ The most powerful, flexible open-source AI voice agent for Asterisk/FreePBX. Fea
 ## 📖 Table of Contents
 
 - [🚀 Quick Start](#-quick-start)
-- [🎉 What's New](#-whats-new-in-v452)
+- [🎉 What's New](#-whats-new-in-v453)
 - [🌟 Why Asterisk AI Voice Agent?](#-why-asterisk-ai-voice-agent)
 - [✨ Features](#-features)
 - [🎥 Demo](#-demo)
@@ -39,23 +39,24 @@ The most powerful, flexible open-source AI voice agent for Asterisk/FreePBX. Fea
 
 ## 🚀 Quick Start
 
-Get up and running in **2 minutes** with the Admin UI.
+Get the **Admin UI running in 2 minutes**.
 
-### 1. Run Pre-flight Check
+For a complete **first successful call** walkthrough (dialplan + transport selection + verification), see:
+- **[Installation Guide](docs/INSTALLATION.md)**
+- **[Transport Compatibility](docs/Transport-Mode-Compatibility.md)**
+
+### 1. Run Pre-flight Check (Required)
 
 ```bash
 # Clone repository
 git clone https://github.com/hkjarral/Asterisk-AI-Voice-Agent.git
 cd Asterisk-AI-Voice-Agent
 
-# Check system compatibility
-./preflight.sh
-
-# Auto-fix issues (requires root for system changes)
+# Run preflight with auto-fix (creates .env, generates JWT_SECRET)
 sudo ./preflight.sh --apply-fixes
 ```
 
-> **Note:** The `--apply-fixes` flag requires root/sudo to install packages, set permissions, and configure system settings. Running without sudo will show what needs fixing but won't apply changes.
+> **Important:** Preflight creates your `.env` file and generates a secure `JWT_SECRET`. Always run this first!
 
 ### 2. Start the Admin UI
 
@@ -66,14 +67,36 @@ docker compose up -d --build admin-ui
 
 ### 3. Access the Dashboard
 
-Open **[http://localhost:3003](http://localhost:3003)** in your browser.
+Open in your browser:
+- **Local:** `http://localhost:3003`
+- **Remote server:** `http://<server-ip>:3003`
 
-- **Login**: `admin` / `admin` (Please change this immediately!)
-- Follow the **Setup Wizard** to configure your providers and pipelines.
+**Default Login:** `admin` / `admin`
 
-### 4. Connect Asterisk
+Follow the **Setup Wizard** to configure your providers and make a test call.
+
+> ⚠️ **Security:** The Admin UI is accessible on the network. **Change the default password immediately** and restrict port 3003 via firewall, VPN, or reverse proxy for production use.
+
+### 4. Verify Installation
+
+```bash
+# Start ai-engine (required for health checks)
+docker compose up -d --build ai-engine
+
+# Check ai-engine health
+curl http://localhost:15000/health
+# Expected: {"status":"healthy"}
+
+# View logs for any errors
+docker compose logs ai-engine | tail -20
+```
+
+### 5. Connect Asterisk
 
 The wizard will generate the necessary dialplan configuration for your Asterisk server.
+
+Transport selection is configuration-dependent (not strictly “pipelines vs full agents”). Use the validated matrix in:
+- **[docs/Transport-Mode-Compatibility.md](docs/Transport-Mode-Compatibility.md)**
 
 ---
 
@@ -101,7 +124,7 @@ docker compose up -d
 Add this to your FreePBX (`extensions_custom.conf`):
 ```asterisk
 [from-ai-agent]
-exten => s,1,NoOp(Asterisk AI Voice Agent v4.5.2)
+exten => s,1,NoOp(Asterisk AI Voice Agent v4.5.3)
  same => n,Stasis(asterisk-ai-voice-agent)
  same => n,Hangup()
 ```
@@ -119,22 +142,40 @@ docker compose logs -f ai-engine
 
 ---
 
-## 🎉 What's New in v4.5.2
+## 🎉 What's New in v4.5.3
 
 <details open>
 <summary><b>Latest Updates</b></summary>
+
+### 📊 Call History & Analytics
+- **Full Call Logging**: Every call saved with conversation history, timing, and outcome
+- **Per-Call Debugging**: Review transcripts, tool executions, and errors from Admin UI
+- **Search & Filter**: Find calls by caller, provider, context, or date range
+- **Export**: Download call data as CSV or JSON
+
+### 🎤 Barge-In Improvements
+- **Immediate Interruption**: Agent audio stops instantly when caller speaks
+- **Provider-Owned Turn-Taking**: Full agents (Google, Deepgram, OpenAI, ElevenLabs) handle VAD natively
+- **Platform Flush**: Local playback clears immediately on interruption signal
+- **Transport Parity**: Works with both ExternalMedia RTP and AudioSocket
+
+### 🧠 Additional Model Support
+- **Faster Whisper**: High-accuracy STT backend with GPU acceleration
+- **MeloTTS**: New neural TTS option for local pipelines
+- **Model Hot-Swap**: Switch models via Dashboard without container restart
 
 ### 🔌 MCP Tool Integration
 - **External Tools Framework**: Connect AI agents to external services via Model Context Protocol
 - **Admin UI Config**: Configure MCP servers from the web interface
 
-### 🔄 Model Hot-Swap
-- **No Restart Required**: Switch STT/TTS/LLM models via WebSocket command
-- **Live Model Switching**: Change models mid-operation from Dashboard
+### 🔒 RTP Security Hardening
+- **Remote Endpoint Pinning**: Lock RTP streams to prevent audio hijacking
+- **Allowlist Support**: Restrict allowed remote hosts for ExternalMedia
+- **Cross-Talk Prevention**: SSRC-based routing ensures call isolation
 
-### 🎤 Local AI Improvements
-- **Kokoro API Mode**: Use OpenAI-compatible TTS endpoints (`KOKORO_MODE=api`)
-- **Kroko Embedded Models**: Download Kroko ASR models directly from Admin UI Models Page
+### 🚀 Pipeline-First Default
+- **`local_hybrid` Default**: Privacy-focused pipeline is now the out-of-box default
+- **Pipeline-Aware Readiness**: Health probes correctly reflect pipeline component status
 
 </details>
 
@@ -181,7 +222,7 @@ docker compose logs -f ai-engine
 | **Asterisk-Native** | Works directly with your existing Asterisk/FreePBX - no external telephony providers required. |
 | **Truly Open Source** | MIT licensed with complete transparency and control. |
 | **Modular Architecture** | Choose cloud, local, or hybrid - mix providers as needed. |
-| **Production-Ready** | Battle-tested with validated configurations and enterprise monitoring. |
+| **Production-Ready** | Battle-tested baselines with Call History-first debugging. |
 | **Cost-Effective** | Local Hybrid costs ~$0.001-0.003/minute (LLM only). |
 | **Privacy-First** | Keep audio local while using cloud intelligence. |
 
@@ -251,9 +292,9 @@ active_pipeline: local_ollama
 - **Tool Calling System**: AI-powered actions (transfers, emails) work with any provider.
 - **Agent CLI Tools**: `doctor`, `troubleshoot`, `demo`, `init` commands.
 - **Modular Pipeline System**: Independent STT, LLM, and TTS provider selection.
-- **Dual Transport Support**: AudioSocket (full agents) and ExternalMedia RTP (pipelines).
+- **Dual Transport Support**: AudioSocket and ExternalMedia RTP (see Transport Compatibility matrix).
 - **High-Performance Architecture**: Separate `ai-engine` and `local-ai-server` containers.
-- **Enterprise Monitoring**: Prometheus + Grafana with 5 dashboards and 50+ metrics.
+- **Observability**: Built-in **Call History** for per-call debugging + optional `/metrics` scraping.
 - **State Management**: SessionStore for centralized, typed call state.
 - **Barge-In Support**: Interrupt handling with configurable gating.
 
@@ -369,11 +410,9 @@ ASTERISK_ARI_USERNAME=asterisk
 ASTERISK_ARI_PASSWORD=your-password
 ```
 
-### Optional: Enterprise Monitoring
-Access Grafana at `http://your-server-ip:3000` (default: admin/admin).
-```bash
-docker compose -f docker-compose.monitoring.yml up -d
-```
+### Optional: Metrics (Bring Your Own Prometheus)
+The engine exposes Prometheus-format metrics at `http://<engine-host>:15000/metrics`.
+Per-call debugging is handled via **Admin UI → Call History**.
 
 ---
 

@@ -7,7 +7,18 @@ import os
 import yaml
 import subprocess
 import stat
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List, Tuple
+from dataclasses import dataclass, field
+from pathlib import PurePosixPath
+import hashlib
+import shutil
+import tarfile
+import tempfile
+import threading
+import time
+import urllib.request
+import uuid
+import zipfile
 
 logger = logging.getLogger(__name__)
 from settings import ENV_PATH, CONFIG_PATH, ensure_env_file, PROJECT_ROOT
@@ -19,6 +30,244 @@ from api.models_catalog import (
 )
 
 router = APIRouter()
+
+DISK_WARNING_BYTES = 10 * 1024 * 1024 * 1024  # 10 GB
+DISK_BLOCK_BYTES = 2 * 1024 * 1024 * 1024  # 2 GB (hard stop for downloads)
+
+
+def _format_bytes(num_bytes: int) -> str:
+    if num_bytes < 0:
+        return "unknown"
+    units = ["B", "KB", "MB", "GB", "TB"]
+    size = float(num_bytes)
+    unit = 0
+    while size >= 1024 and unit < len(units) - 1:
+        size /= 1024.0
+        unit += 1
+    if unit <= 1:
+        return f"{int(size)} {units[unit]}"
+    return f"{size:.1f} {units[unit]}"
+
+
+def _disk_preflight(path: str, *, required_bytes: int = 0) -> Tuple[bool, Optional[str]]:
+    """
+    Returns (ok, warning_or_error_message).
+    - Warns when free space < DISK_WARNING_BYTES.
+    - Blocks when free space < max(DISK_BLOCK_BYTES, required_bytes).
+    """
+    try:
+        total, used, free = shutil.disk_usage(path)
+    except Exception:
+        return True, None
+
+    block_at = max(DISK_BLOCK_BYTES, int(required_bytes or 0))
+    if free < block_at:
+        msg = (
+            f"Insufficient disk space: free={_format_bytes(free)} required={_format_bytes(block_at)} "
+            f"(path={path})."
+        )
+        return False, msg
+
+    if free < DISK_WARNING_BYTES:
+        return True, f"Low disk space: only {_format_bytes(free)} free (path={path})."
+    return True, None
+
+
+def _url_content_length(url: str) -> Optional[int]:
+    try:
+        req = urllib.request.Request(url, method="HEAD")
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            val = resp.headers.get("Content-Length")
+            if val:
+                return int(val)
+    except Exception:
+        return None
+    return None
+
+
+def _sha256_file(path: str) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _write_sha256_sidecar(path: str, sha256_hex: str) -> None:
+    atomic_write_text(f"{path}.sha256", f"{sha256_hex}  {os.path.basename(path)}\n")
+
+
+def _is_within_directory(base_dir: str, candidate_path: str) -> bool:
+    base = os.path.abspath(base_dir)
+    cand = os.path.abspath(candidate_path)
+    return cand == base or cand.startswith(base + os.sep)
+
+
+def _safe_extract_zip(zip_path: str, dest_dir: str) -> List[str]:
+    """
+    Safely extract a zip into dest_dir using a staging dir and then move
+    the extracted top-level entries into dest_dir.
+    """
+    staging = tempfile.mkdtemp(prefix=".extract_", dir=dest_dir)
+    try:
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            for info in zf.infolist():
+                name = info.filename
+                if not name:
+                    continue
+                pp = PurePosixPath(name)
+                if pp.is_absolute() or ".." in pp.parts:
+                    raise RuntimeError(f"Unsafe zip member path: {name}")
+                mode = (info.external_attr >> 16) & 0o170000
+                if mode == stat.S_IFLNK:
+                    raise RuntimeError(f"Unsafe zip member (symlink): {name}")
+                out_path = os.path.join(staging, *pp.parts)
+                if not _is_within_directory(staging, out_path):
+                    raise RuntimeError(f"Unsafe zip extraction path: {name}")
+
+            zf.extractall(staging)
+
+        moved: List[str] = []
+        for entry in os.listdir(staging):
+            src = os.path.join(staging, entry)
+            dst = os.path.join(dest_dir, entry)
+            if os.path.exists(dst):
+                if os.path.isdir(dst) and not os.path.islink(dst):
+                    shutil.rmtree(dst)
+                else:
+                    os.remove(dst)
+            shutil.move(src, dst)
+            moved.append(entry)
+        return moved
+    finally:
+        try:
+            shutil.rmtree(staging)
+        except Exception:
+            pass
+
+
+def _safe_extract_tar(tar_path: str, dest_dir: str) -> List[str]:
+    """
+    Safely extract a tar into dest_dir using a staging dir and then move
+    the extracted top-level entries into dest_dir.
+    """
+    staging = tempfile.mkdtemp(prefix=".extract_", dir=dest_dir)
+    try:
+        with tarfile.open(tar_path, "r:*") as tf:
+            for member in tf.getmembers():
+                name = member.name
+                if not name:
+                    continue
+                pp = PurePosixPath(name)
+                if pp.is_absolute() or ".." in pp.parts:
+                    raise RuntimeError(f"Unsafe tar member path: {name}")
+                if member.issym() or member.islnk():
+                    raise RuntimeError(f"Unsafe tar member (link): {name}")
+                if not (member.isfile() or member.isdir()):
+                    raise RuntimeError(f"Unsafe tar member type: {name}")
+                out_path = os.path.join(staging, *pp.parts)
+                if not _is_within_directory(staging, out_path):
+                    raise RuntimeError(f"Unsafe tar extraction path: {name}")
+
+            tf.extractall(staging)
+
+        moved: List[str] = []
+        for entry in os.listdir(staging):
+            src = os.path.join(staging, entry)
+            dst = os.path.join(dest_dir, entry)
+            if os.path.exists(dst):
+                if os.path.isdir(dst) and not os.path.islink(dst):
+                    shutil.rmtree(dst)
+                else:
+                    os.remove(dst)
+            shutil.move(src, dst)
+            moved.append(entry)
+        return moved
+    finally:
+        try:
+            shutil.rmtree(staging)
+        except Exception:
+            pass
+
+
+@dataclass
+class DownloadJob:
+    id: str
+    kind: str
+    created_at: float = field(default_factory=time.time)
+    running: bool = True
+    completed: bool = False
+    error: Optional[str] = None
+    output: List[str] = field(default_factory=list)
+    progress: Dict[str, Any] = field(
+        default_factory=lambda: {
+            "bytes_downloaded": 0,
+            "total_bytes": 0,
+            "percent": 0,
+            "speed_bps": 0,
+            "eta_seconds": None,
+            "start_time": None,
+            "current_file": "",
+        }
+    )
+
+
+_download_jobs: Dict[str, DownloadJob] = {}
+_download_jobs_lock = threading.Lock()
+_latest_download_job_id: Optional[str] = None
+
+
+def _create_download_job(kind: str, *, current_file: str = "") -> DownloadJob:
+    global _latest_download_job_id
+    job_id = str(uuid.uuid4())
+    job = DownloadJob(id=job_id, kind=kind)
+    job.progress["start_time"] = time.time()
+    job.progress["current_file"] = current_file
+    with _download_jobs_lock:
+        _download_jobs[job_id] = job
+        _latest_download_job_id = job_id
+        if len(_download_jobs) > 25:
+            oldest = sorted(_download_jobs.values(), key=lambda j: j.created_at)[:-25]
+            for j in oldest:
+                _download_jobs.pop(j.id, None)
+    return job
+
+
+def _get_download_job(job_id: Optional[str]) -> Optional[DownloadJob]:
+    with _download_jobs_lock:
+        if job_id:
+            return _download_jobs.get(job_id)
+        if _latest_download_job_id:
+            return _download_jobs.get(_latest_download_job_id)
+        return None
+
+
+def _job_output(job_id: str, line: str) -> None:
+    with _download_jobs_lock:
+        job = _download_jobs.get(job_id)
+        if not job:
+            return
+        job.output.append(str(line))
+        if len(job.output) > 200:
+            job.output = job.output[-200:]
+
+
+def _job_set_progress(job_id: str, **updates: Any) -> None:
+    with _download_jobs_lock:
+        job = _download_jobs.get(job_id)
+        if not job:
+            return
+        job.progress.update(updates)
+
+
+def _job_finish(job_id: str, *, completed: bool, error: Optional[str] = None) -> None:
+    with _download_jobs_lock:
+        job = _download_jobs.get(job_id)
+        if not job:
+            return
+        job.running = False
+        job.completed = bool(completed)
+        job.error = error
 
 
 def setup_host_symlink() -> dict:
@@ -632,32 +881,25 @@ async def detect_local_tier():
         return {"error": str(e)}
 
 
-_download_process = None
-_download_output = []
-_download_status = {"running": False, "completed": False, "error": None}
-_download_progress = {"bytes_downloaded": 0, "total_bytes": 0, "percent": 0, "speed_bps": 0, "eta_seconds": None, "start_time": None}
-
 @router.post("/local/download-models")
 async def download_local_models(tier: str = "auto"):
     """Start model download in background. Returns immediately."""
     import subprocess
-    import threading
     from settings import PROJECT_ROOT
     
-    global _download_process, _download_output, _download_status
-    
-    # Reset state
-    _download_output = []
-    _download_status = {"running": True, "completed": False, "error": None}
-    
     try:
+        ok, warn_or_err = _disk_preflight(os.path.join(PROJECT_ROOT, "models"))
+        if not ok:
+            return {"status": "error", "message": warn_or_err}
+
+        job = _create_download_job("script", current_file="scripts/model_setup.sh")
+
         # Run model_setup.sh with --assume-yes
         cmd = ["bash", "scripts/model_setup.sh", "--assume-yes"]
         if tier != "auto":
             cmd.extend(["--tier", tier])
         
         def run_download():
-            global _download_process, _download_output, _download_status
             try:
                 process = subprocess.Popen(
                     cmd,
@@ -667,23 +909,18 @@ async def download_local_models(tier: str = "auto"):
                     text=True,
                     bufsize=1
                 )
-                _download_process = process
-                
+
                 for line in iter(process.stdout.readline, ''):
                     if line:
-                        _download_output.append(line.strip())
-                        # Keep last 50 lines
-                        if len(_download_output) > 50:
-                            _download_output.pop(0)
+                        _job_output(job.id, line.strip())
                 
                 process.wait()
-                _download_status["running"] = False
-                _download_status["completed"] = process.returncode == 0
                 if process.returncode != 0:
-                    _download_status["error"] = f"Download failed with code {process.returncode}"
+                    _job_finish(job.id, completed=False, error=f"Download failed with code {process.returncode}")
+                else:
+                    _job_finish(job.id, completed=True)
             except Exception as e:
-                _download_status["running"] = False
-                _download_status["error"] = str(e)
+                _job_finish(job.id, completed=False, error=str(e))
         
         # Start download thread
         thread = threading.Thread(target=run_download, daemon=True)
@@ -691,30 +928,46 @@ async def download_local_models(tier: str = "auto"):
         
         return {
             "status": "started",
-            "message": "Model download started. This may take several minutes."
+            "message": "Model download started. This may take several minutes.",
+            "job_id": job.id,
+            "disk_warning": warn_or_err if warn_or_err and warn_or_err.startswith("Low disk space") else None,
         }
     except Exception as e:
-        _download_status = {"running": False, "completed": False, "error": str(e)}
         return {"status": "error", "message": str(e)}
 
 
 @router.get("/local/download-progress")
-async def get_download_progress():
+async def get_download_progress(job_id: Optional[str] = None):
     """Get current download progress and output."""
-    global _download_output, _download_status, _download_progress
-    
+    job = _get_download_job(job_id)
+    if not job:
+        return {
+            "job_id": None,
+            "running": False,
+            "completed": False,
+            "error": None,
+            "output": [],
+            "bytes_downloaded": 0,
+            "total_bytes": 0,
+            "percent": 0,
+            "speed_bps": 0,
+            "eta_seconds": None,
+            "current_file": "",
+        }
+
     return {
-        "running": _download_status.get("running", False),
-        "completed": _download_status.get("completed", False),
-        "error": _download_status.get("error"),
-        "output": _download_output[-20:] if _download_output else [],  # Last 20 lines
+        "job_id": job.id,
+        "running": job.running,
+        "completed": job.completed,
+        "error": job.error,
+        "output": job.output[-20:] if job.output else [],  # Last 20 lines
         # Detailed progress info
-        "bytes_downloaded": _download_progress.get("bytes_downloaded", 0),
-        "total_bytes": _download_progress.get("total_bytes", 0),
-        "percent": _download_progress.get("percent", 0),
-        "speed_bps": _download_progress.get("speed_bps", 0),
-        "eta_seconds": _download_progress.get("eta_seconds"),
-        "current_file": _download_progress.get("current_file", "")
+        "bytes_downloaded": job.progress.get("bytes_downloaded", 0),
+        "total_bytes": job.progress.get("total_bytes", 0),
+        "percent": job.progress.get("percent", 0),
+        "speed_bps": job.progress.get("speed_bps", 0),
+        "eta_seconds": job.progress.get("eta_seconds"),
+        "current_file": job.progress.get("current_file", "")
     }
 
 
@@ -725,26 +978,14 @@ class SingleModelDownload(BaseModel):
     model_path: Optional[str] = None
     config_url: Optional[str] = None  # For TTS models that need JSON config
     voice_files: Optional[Dict[str, str]] = None  # For Kokoro TTS voice files
+    expected_sha256: Optional[str] = None  # Optional integrity check
 
 
 @router.post("/local/download-model")
 async def download_single_model(request: SingleModelDownload):
     """Download a single model from the catalog."""
-    import threading
-    import urllib.request
-    import zipfile
-    import tarfile
-    import shutil
-    import time
     from settings import PROJECT_ROOT
-    
-    global _download_output, _download_status, _download_progress
-    
-    # Reset state
-    _download_output = []
-    _download_status = {"running": True, "completed": False, "error": None}
-    _download_progress = {"bytes_downloaded": 0, "total_bytes": 0, "percent": 0, "speed_bps": 0, "eta_seconds": None, "start_time": time.time(), "current_file": request.model_id}
-    
+
     # Determine target directory based on type
     # Special case: Kroko embedded models go to models/kroko/
     is_kroko_embedded = request.model_id and request.model_id.startswith("kroko_") and request.model_id != "kroko_cloud"
@@ -762,15 +1003,25 @@ async def download_single_model(request: SingleModelDownload):
     
     # Ensure target directory exists
     os.makedirs(target_dir, exist_ok=True)
+
+    url_lower = (request.download_url or "").lower()
+    is_archive_guess = any(x in url_lower for x in (".zip", ".tar.gz", ".tgz", ".tar.bz2", ".tar"))
+    content_len = _url_content_length(request.download_url) or 0
+    required = content_len * (3 if is_archive_guess else 2)
+    ok, warn_or_err = _disk_preflight(target_dir, required_bytes=required)
+    if not ok:
+        return {"status": "error", "message": warn_or_err}
+
+    job = _create_download_job("single", current_file=request.model_id)
     
     def download_worker():
-        global _download_output, _download_status, _download_progress
         try:
-            _download_output.append(f"📥 Starting download: {request.model_id}")
-            _download_output.append(f"   URL: {request.download_url}")
+            import json
+
+            _job_output(job.id, f"📥 Starting download: {request.model_id}")
+            _job_output(job.id, f"   URL: {request.download_url}")
             
             # Determine file extension
-            url_lower = request.download_url.lower()
             if '.zip' in url_lower:
                 ext = '.zip'
                 is_archive = True
@@ -789,13 +1040,12 @@ async def download_single_model(request: SingleModelDownload):
                 is_archive = False
             
             # Download to temp file
-            temp_file = os.path.join(target_dir, f"temp_download{ext}")
+            temp_file = os.path.join(target_dir, f".{request.model_id}.{uuid.uuid4().hex}.download{ext}.part")
             start_time = time.time()
             last_update_time = start_time
             
             def progress_hook(block_num, block_size, total_size):
                 nonlocal last_update_time
-                global _download_progress, _download_output
                 
                 bytes_downloaded = block_num * block_size
                 current_time = time.time()
@@ -807,11 +1057,15 @@ async def download_single_model(request: SingleModelDownload):
                     remaining_bytes = total_size - bytes_downloaded
                     eta_seconds = remaining_bytes / speed_bps if speed_bps > 0 else None
                     
-                    _download_progress["bytes_downloaded"] = bytes_downloaded
-                    _download_progress["total_bytes"] = total_size
-                    _download_progress["percent"] = percent
-                    _download_progress["speed_bps"] = int(speed_bps)
-                    _download_progress["eta_seconds"] = int(eta_seconds) if eta_seconds else None
+                    _job_set_progress(
+                        job.id,
+                        bytes_downloaded=bytes_downloaded,
+                        total_bytes=total_size,
+                        percent=percent,
+                        speed_bps=int(speed_bps),
+                        eta_seconds=int(eta_seconds) if eta_seconds else None,
+                        current_file=request.model_id,
+                    )
                     
                     # Update output every 2 seconds
                     if current_time - last_update_time >= 2:
@@ -820,33 +1074,49 @@ async def download_single_model(request: SingleModelDownload):
                         mb_total = total_size / (1024 * 1024)
                         speed_mbps = speed_bps / (1024 * 1024)
                         eta_str = f"{int(eta_seconds // 60)}m {int(eta_seconds % 60)}s" if eta_seconds else "calculating..."
-                        _download_output.append(f"   {mb_done:.1f}/{mb_total:.1f} MB ({percent}%) - {speed_mbps:.2f} MB/s - ETA: {eta_str}")
-                        if len(_download_output) > 50:
-                            _download_output.pop(0)
+                        _job_output(job.id, f"   {mb_done:.1f}/{mb_total:.1f} MB ({percent}%) - {speed_mbps:.2f} MB/s - ETA: {eta_str}")
             
             urllib.request.urlretrieve(request.download_url, temp_file, progress_hook)
-            _download_output.append("✅ Download complete, extracting...")
-            _download_progress["percent"] = 100
+            _job_set_progress(job.id, percent=100)
+            _job_output(job.id, "✅ Download complete, verifying checksum...")
+
+            sha = _sha256_file(temp_file)
+            if request.expected_sha256 and sha.lower() != request.expected_sha256.lower():
+                raise RuntimeError(f"SHA256 mismatch: expected={request.expected_sha256} got={sha}")
             
             if is_archive:
                 # Extract archive
+                _job_output(job.id, "📦 Extracting archive safely...")
                 if ext == '.zip':
-                    with zipfile.ZipFile(temp_file, 'r') as zf:
-                        # Get the root folder name from the archive
-                        names = zf.namelist()
-                        root_folder = names[0].split('/')[0] if names else None
-                        zf.extractall(target_dir)
-                        _download_output.append(f"✅ Extracted to {target_dir}/{root_folder}")
+                    moved = _safe_extract_zip(temp_file, target_dir)
                 elif ext in ['.tar.gz', '.tar', '.tgz', '.tar.bz2']:
-                    with tarfile.open(temp_file, 'r:*') as tf:
-                        names = tf.getnames()
-                        root_folder = names[0].split('/')[0] if names else None
-                        tf.extractall(target_dir)
-                        _download_output.append(f"✅ Extracted to {target_dir}/{root_folder}")
+                    moved = _safe_extract_tar(temp_file, target_dir)
+                else:
+                    moved = []
+
+                root_folder = moved[0] if moved else None
+                if root_folder:
+                    meta_path = os.path.join(target_dir, root_folder, ".download.json")
+                    atomic_write_text(
+                        meta_path,
+                        json.dumps(
+                            {
+                                "source_url": request.download_url,
+                                "archive_sha256": sha,
+                                "downloaded_at": int(time.time()),
+                            },
+                            indent=2,
+                            sort_keys=False,
+                        )
+                        + "\n",
+                    )
+                    _job_output(job.id, f"✅ Extracted to {target_dir}/{root_folder}")
+                else:
+                    _job_output(job.id, f"✅ Extracted to {target_dir}")
                 
                 # Clean up archive file after extraction
                 os.remove(temp_file)
-                _download_output.append("🧹 Cleaned up archive file")
+                _job_output(job.id, "🧹 Cleaned up archive file")
             else:
                 # Single file - rename to model_path or keep original name
                 # Special handling for Kokoro which uses a directory structure
@@ -859,9 +1129,10 @@ async def download_single_model(request: SingleModelDownload):
                 else:
                     final_path = os.path.join(target_dir, os.path.basename(request.download_url))
                 
-                if temp_file != final_path:
-                    shutil.move(temp_file, final_path)
-                _download_output.append(f"✅ Saved to {final_path}")
+                os.makedirs(os.path.dirname(final_path), exist_ok=True)
+                shutil.move(temp_file, final_path)
+                _write_sha256_sidecar(final_path, sha)
+                _job_output(job.id, f"✅ Saved to {final_path} (sha256={sha[:12]}...)")
                 
                 # Download config file for TTS models (e.g., Piper .onnx.json)
                 if request.config_url and request.type == "tts":
@@ -871,41 +1142,47 @@ async def download_single_model(request: SingleModelDownload):
                         config_dest = os.path.join(kokoro_dir, "config.json")
                     else:
                         config_dest = final_path + ".json"
-                    _download_output.append(f"📥 Downloading config file...")
+                    _job_output(job.id, f"📥 Downloading config file...")
                     try:
-                        urllib.request.urlretrieve(request.config_url, config_dest)
-                        _download_output.append(f"✅ Config saved to {config_dest}")
+                        tmp_cfg = config_dest + f".{uuid.uuid4().hex}.part"
+                        urllib.request.urlretrieve(request.config_url, tmp_cfg)
+                        cfg_sha = _sha256_file(tmp_cfg)
+                        shutil.move(tmp_cfg, config_dest)
+                        _write_sha256_sidecar(config_dest, cfg_sha)
+                        _job_output(job.id, f"✅ Config saved to {config_dest}")
                     except Exception as config_err:
-                        _download_output.append(f"⚠️ Config download failed: {config_err}")
+                        _job_output(job.id, f"⚠️ Config download failed: {config_err}")
                 
                 # Download voice files for Kokoro TTS
                 if request.voice_files and request.type == "tts":
                     kokoro_dir = os.path.dirname(final_path)
                     voices_dir = os.path.join(kokoro_dir, "voices")
                     os.makedirs(voices_dir, exist_ok=True)
-                    _download_output.append(f"📥 Downloading voice files...")
+                    _job_output(job.id, f"📥 Downloading voice files...")
                     for voice_name, voice_url in request.voice_files.items():
                         try:
                             voice_dest = os.path.join(voices_dir, f"{voice_name}.pt")
-                            urllib.request.urlretrieve(voice_url, voice_dest)
-                            _download_output.append(f"✅ Voice '{voice_name}' saved")
+                            tmp_voice = voice_dest + f".{uuid.uuid4().hex}.part"
+                            urllib.request.urlretrieve(voice_url, tmp_voice)
+                            v_sha = _sha256_file(tmp_voice)
+                            shutil.move(tmp_voice, voice_dest)
+                            _write_sha256_sidecar(voice_dest, v_sha)
+                            _job_output(job.id, f"✅ Voice '{voice_name}' saved")
                         except Exception as voice_err:
-                            _download_output.append(f"⚠️ Voice '{voice_name}' download failed: {voice_err}")
-            
-            _download_status["running"] = False
-            _download_status["completed"] = True
-            _download_output.append(f"🎉 Model {request.model_id} installed successfully!")
+                            _job_output(job.id, f"⚠️ Voice '{voice_name}' download failed: {voice_err}")
+
+            _job_finish(job.id, completed=True)
+            _job_output(job.id, f"🎉 Model {request.model_id} installed successfully!")
             
         except Exception as e:
-            _download_status["running"] = False
-            _download_status["error"] = str(e)
-            _download_output.append(f"❌ Error: {str(e)}")
+            _job_finish(job.id, completed=False, error=str(e))
+            _job_output(job.id, f"❌ Error: {str(e)}")
             # Clean up partial download on error
-            if os.path.exists(temp_file):
-                try:
+            try:
+                if "temp_file" in locals() and os.path.exists(temp_file):
                     os.remove(temp_file)
-                except:
-                    pass
+            except Exception:
+                pass
     
     # Start download thread
     thread = threading.Thread(target=download_worker, daemon=True)
@@ -913,7 +1190,9 @@ async def download_single_model(request: SingleModelDownload):
     
     return {
         "status": "started",
-        "message": f"Downloading {request.model_id}..."
+        "message": f"Downloading {request.model_id}...",
+        "job_id": job.id,
+        "disk_warning": warn_or_err if warn_or_err and warn_or_err.startswith("Low disk space") else None,
     }
 
 
@@ -938,29 +1217,8 @@ class ModelSelection(BaseModel):
 @router.post("/local/download-selected-models")
 async def download_selected_models(selection: ModelSelection):
     """Download user-selected models from the catalog."""
-    import subprocess
-    import threading
-    import urllib.request
-    import zipfile
-    import shutil
-    import time
     from settings import PROJECT_ROOT
-    
-    global _download_output, _download_status, _download_progress
-    
-    # Reset state
-    _download_output = []
-    _download_status = {"running": True, "completed": False, "error": None}
-    _download_progress = {
-        "bytes_downloaded": 0,
-        "total_bytes": 0,
-        "percent": 0,
-        "speed_bps": 0,
-        "eta_seconds": None,
-        "start_time": time.time(),
-        "current_file": "",
-    }
-    
+
     # Get full catalog
     catalog = get_full_catalog()
     
@@ -1030,9 +1288,7 @@ async def download_selected_models(selection: ModelSelection):
             "size_mb": 0,
             "size_display": "Custom",
         }
-    
-    _download_output.append(f"🌍 Selected language: {selection.language}")
-    
+
     if not stt_model:
         return {"status": "error", "message": f"Unknown STT model: {selection.stt}"}
     if not llm_model:
@@ -1042,20 +1298,51 @@ async def download_selected_models(selection: ModelSelection):
 
     kokoro_mode = (selection.kokoro_mode or "local").lower()
     skip_kokoro_download = tts_model.get("backend") == "kokoro" and kokoro_mode in ("api", "hf")
-    
-    def download_file(url: str, dest_path: str, label: str):
-        """Download a file with progress reporting."""
-        global _download_output, _download_progress
+
+    models_dir = os.path.join(PROJECT_ROOT, "models")
+    os.makedirs(models_dir, exist_ok=True)
+
+    # Disk preflight (best-effort: HEAD Content-Length). Archives need extra room for extraction.
+    urls: List[Tuple[str, bool]] = []
+    if stt_model.get("download_url"):
+        stt_url = stt_model["download_url"]
+        urls.append((stt_url, any(x in stt_url.lower() for x in (".zip", ".tar", ".tgz"))))
+    if llm_model.get("download_url"):
+        llm_url = llm_model["download_url"]
+        urls.append((llm_url, False))
+    if not skip_kokoro_download and tts_model.get("download_url"):
+        tts_url = tts_model["download_url"]
+        urls.append((tts_url, False))
+    if not skip_kokoro_download and tts_model.get("config_url"):
+        urls.append((tts_model["config_url"], False))
+    if not skip_kokoro_download and tts_model.get("voice_files"):
+        for _, voice_url in (tts_model.get("voice_files") or {}).items():
+            urls.append((voice_url, False))
+
+    required_bytes = 0
+    for u, is_archive in urls:
+        cl = _url_content_length(u) or 0
+        required_bytes += cl * (3 if is_archive else 2)
+
+    ok, warn_or_err = _disk_preflight(models_dir, required_bytes=required_bytes)
+    if not ok:
+        return {"status": "error", "message": warn_or_err}
+
+    job = _create_download_job("selected", current_file="models")
+    _job_output(job.id, f"🌍 Selected language: {selection.language}")
+
+    def download_file(url: str, dest_path: str, label: str, expected_sha256: Optional[str] = None):
+        """Download a file with progress reporting and write a sha256 sidecar."""
+        tmp_path = dest_path + f".{uuid.uuid4().hex}.part"
         try:
-            _download_output.append(f"⬇️ Downloading {label}...")
-            _download_progress["current_file"] = label
-            
-            # Create directory if needed
+            _job_output(job.id, f"⬇️ Downloading {label}...")
+            _job_set_progress(job.id, current_file=label)
+
             os.makedirs(os.path.dirname(dest_path), exist_ok=True)
-            
-            # Download with progress
+
             start_time = time.time()
             last_update = start_time
+
             def report_progress(block_num, block_size, total_size):
                 nonlocal last_update
                 bytes_done = block_num * block_size
@@ -1067,31 +1354,48 @@ async def download_selected_models(selection: ModelSelection):
                     remaining = max(0, total_size - bytes_done)
                     eta = int(remaining / speed_bps) if speed_bps > 0 else None
 
-                    _download_progress["bytes_downloaded"] = int(bytes_done)
-                    _download_progress["total_bytes"] = int(total_size)
-                    _download_progress["percent"] = percent
-                    _download_progress["speed_bps"] = speed_bps
-                    _download_progress["eta_seconds"] = eta
+                    _job_set_progress(
+                        job.id,
+                        bytes_downloaded=int(bytes_done),
+                        total_bytes=int(total_size),
+                        percent=percent,
+                        speed_bps=speed_bps,
+                        eta_seconds=eta,
+                        current_file=label,
+                    )
 
                     if now - last_update >= 2:
                         last_update = now
                         mb_done = bytes_done / (1024 * 1024)
                         mb_total = total_size / (1024 * 1024)
-                        _download_output.append(f"   {label}: {mb_done:.1f}/{mb_total:.1f} MB ({percent}%)")
-            
-            urllib.request.urlretrieve(url, dest_path, report_progress)
-            _download_output.append(f"✅ {label} downloaded successfully")
+                        _job_output(job.id, f"   {label}: {mb_done:.1f}/{mb_total:.1f} MB ({percent}%)")
+
+            urllib.request.urlretrieve(url, tmp_path, report_progress)
+            _job_output(job.id, "🔐 Verifying checksum...")
+            sha = _sha256_file(tmp_path)
+            if expected_sha256 and sha.lower() != expected_sha256.lower():
+                raise RuntimeError(f"SHA256 mismatch: expected={expected_sha256} got={sha}")
+
+            shutil.move(tmp_path, dest_path)
+            _write_sha256_sidecar(dest_path, sha)
+            _job_output(job.id, f"✅ {label} downloaded successfully")
             return True
         except Exception as e:
-            _download_output.append(f"❌ Failed to download {label}: {e}")
+            _job_output(job.id, f"❌ Failed to download {label}: {e}")
             return False
+        finally:
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except Exception:
+                pass
     
     def run_downloads():
-        global _download_status, _download_output
-        models_dir = os.path.join(PROJECT_ROOT, "models")
         success = True
         
         try:
+            import json
+
             # Download STT model
             if stt_model.get("download_url"):
                 stt_dir = os.path.join(models_dir, "stt")
@@ -1100,24 +1404,67 @@ async def download_selected_models(selection: ModelSelection):
                 if stt_model.get("backend") == "vosk":
                     # Vosk is a zip file
                     zip_path = os.path.join(stt_dir, "vosk-model.zip")
-                    if download_file(stt_model["download_url"], zip_path, "Vosk STT Model"):
-                        _download_output.append("📦 Extracting Vosk model...")
-                        with zipfile.ZipFile(zip_path, 'r') as zf:
-                            zf.extractall(stt_dir)
-                        os.remove(zip_path)
-                        _download_output.append("✅ Vosk model extracted")
+                    if download_file(stt_model["download_url"], zip_path, "Vosk STT Model", stt_model.get("sha256")):
+                        _job_output(job.id, "📦 Extracting Vosk model safely...")
+                        sha = _sha256_file(zip_path)
+                        moved = _safe_extract_zip(zip_path, stt_dir)
+                        root = moved[0] if moved else None
+                        if root:
+                            atomic_write_text(
+                                os.path.join(stt_dir, root, ".download.json"),
+                                json.dumps(
+                                    {
+                                        "source_url": stt_model["download_url"],
+                                        "archive_sha256": sha,
+                                        "downloaded_at": int(time.time()),
+                                    },
+                                    indent=2,
+                                    sort_keys=False,
+                                )
+                                + "\n",
+                            )
+                        try:
+                            os.remove(zip_path)
+                        except Exception:
+                            pass
+                        try:
+                            os.remove(zip_path + ".sha256")
+                        except Exception:
+                            pass
+                        _job_output(job.id, "✅ Vosk model extracted")
                     else:
                         success = False
                 elif stt_model.get("backend") == "sherpa":
                     # Sherpa is a tar.bz2 archive
-                    import tarfile
                     archive_path = os.path.join(stt_dir, "sherpa-model.tar.bz2")
-                    if download_file(stt_model["download_url"], archive_path, "Sherpa STT Model"):
-                        _download_output.append("📦 Extracting Sherpa model...")
-                        with tarfile.open(archive_path, 'r:bz2') as tf:
-                            tf.extractall(stt_dir)
-                        os.remove(archive_path)
-                        _download_output.append("✅ Sherpa model extracted")
+                    if download_file(stt_model["download_url"], archive_path, "Sherpa STT Model", stt_model.get("sha256")):
+                        _job_output(job.id, "📦 Extracting Sherpa model safely...")
+                        sha = _sha256_file(archive_path)
+                        moved = _safe_extract_tar(archive_path, stt_dir)
+                        root = moved[0] if moved else None
+                        if root:
+                            atomic_write_text(
+                                os.path.join(stt_dir, root, ".download.json"),
+                                json.dumps(
+                                    {
+                                        "source_url": stt_model["download_url"],
+                                        "archive_sha256": sha,
+                                        "downloaded_at": int(time.time()),
+                                    },
+                                    indent=2,
+                                    sort_keys=False,
+                                )
+                                + "\n",
+                            )
+                        try:
+                            os.remove(archive_path)
+                        except Exception:
+                            pass
+                        try:
+                            os.remove(archive_path + ".sha256")
+                        except Exception:
+                            pass
+                        _job_output(job.id, "✅ Sherpa model extracted")
                     else:
                         success = False
                 elif stt_model.get("backend") == "kroko" and stt_model.get("embedded"):
@@ -1125,29 +1472,30 @@ async def download_selected_models(selection: ModelSelection):
                     kroko_dir = os.path.join(models_dir, "kroko")
                     os.makedirs(kroko_dir, exist_ok=True)
                     dest = os.path.join(kroko_dir, stt_model["model_path"])
-                    if not download_file(stt_model["download_url"], dest, "Kroko Embedded STT Model"):
+                    if not download_file(stt_model["download_url"], dest, "Kroko Embedded STT Model", stt_model.get("sha256")):
                         success = False
                 else:
                     # Single file model
                     dest = os.path.join(stt_dir, stt_model["model_path"])
-                    if not download_file(stt_model["download_url"], dest, "STT Model"):
+                    if not download_file(stt_model["download_url"], dest, "STT Model", stt_model.get("sha256")):
                         success = False
             else:
-                _download_output.append(f"ℹ️ STT: {stt_model['name']} (no download needed)")
+                _job_output(job.id, f"ℹ️ STT: {stt_model['name']} (no download needed)")
             
             # Download LLM model
             if llm_model.get("download_url"):
                 llm_dir = os.path.join(models_dir, "llm")
                 os.makedirs(llm_dir, exist_ok=True)
                 dest = os.path.join(llm_dir, llm_model["model_path"])
-                if not download_file(llm_model["download_url"], dest, "LLM Model"):
+                if not download_file(llm_model["download_url"], dest, "LLM Model", llm_model.get("sha256")):
                     success = False
             else:
-                _download_output.append(f"ℹ️ LLM: {llm_model['name']} (no download needed)")
+                _job_output(job.id, f"ℹ️ LLM: {llm_model['name']} (no download needed)")
             
             # Download TTS model
             if skip_kokoro_download:
-                _download_output.append(
+                _job_output(
+                    job.id,
                     f"ℹ️ TTS: {tts_model['name']} (no download needed for Kokoro mode={kokoro_mode})"
                 )
             elif tts_model.get("download_url"):
@@ -1163,13 +1511,13 @@ async def download_selected_models(selection: ModelSelection):
                     
                     # Download main model
                     model_dest = os.path.join(kokoro_dir, "kokoro-v1_0.pth")
-                    if not download_file(tts_model["download_url"], model_dest, "Kokoro TTS Model"):
+                    if not download_file(tts_model["download_url"], model_dest, "Kokoro TTS Model", tts_model.get("sha256")):
                         success = False
                     
                     # Download config
                     if tts_model.get("config_url"):
                         config_dest = os.path.join(kokoro_dir, "config.json")
-                        download_file(tts_model["config_url"], config_dest, "Kokoro Config")
+                        download_file(tts_model["config_url"], config_dest, "Kokoro Config", tts_model.get("config_sha256"))
                     
                     # Download voice files
                     if tts_model.get("voice_files"):
@@ -1179,18 +1527,18 @@ async def download_selected_models(selection: ModelSelection):
                 else:
                     # Standard single-file TTS model (Piper)
                     dest = os.path.join(tts_dir, tts_model["model_path"])
-                    if not download_file(tts_model["download_url"], dest, "TTS Model"):
+                    if not download_file(tts_model["download_url"], dest, "TTS Model", tts_model.get("sha256")):
                         success = False
                     
                     # Also download config file if present
                     if tts_model.get("config_url"):
                         config_dest = dest + ".json"
-                        download_file(tts_model["config_url"], config_dest, "TTS Config")
+                        download_file(tts_model["config_url"], config_dest, "TTS Config", tts_model.get("config_sha256"))
             else:
-                _download_output.append(f"ℹ️ TTS: {tts_model['name']} (no download needed)")
+                _job_output(job.id, f"ℹ️ TTS: {tts_model['name']} (no download needed)")
             
             # Update .env with selected models
-            _download_output.append("📝 Updating configuration...")
+            _job_output(job.id, "📝 Updating configuration...")
             env_updates = []
             
             # Persist backend selections (even if no download needed)
@@ -1250,20 +1598,17 @@ async def download_selected_models(selection: ModelSelection):
                     header="Model selections from wizard",
                 )
                 
-                _download_output.append("✅ Configuration updated")
-            
-            _download_status["completed"] = success
-            _download_status["running"] = False
+                _job_output(job.id, "✅ Configuration updated")
             
             if success:
-                _download_output.append("🎉 All models downloaded successfully!")
+                _job_output(job.id, "🎉 All models downloaded successfully!")
+                _job_finish(job.id, completed=True)
             else:
-                _download_status["error"] = "Some downloads failed"
+                _job_finish(job.id, completed=False, error="Some downloads failed")
                 
         except Exception as e:
-            _download_status["running"] = False
-            _download_status["error"] = str(e)
-            _download_output.append(f"❌ Error: {e}")
+            _job_finish(job.id, completed=False, error=str(e))
+            _job_output(job.id, f"❌ Error: {e}")
     
     # Start download thread
     thread = threading.Thread(target=run_downloads, daemon=True)
@@ -1282,7 +1627,9 @@ async def download_selected_models(selection: ModelSelection):
             "stt": stt_model["name"],
             "llm": llm_model["name"],
             "tts": tts_model["name"]
-        }
+        },
+        "job_id": job.id,
+        "disk_warning": warn_or_err if warn_or_err and warn_or_err.startswith("Low disk space") else None,
     }
 
 
@@ -1515,7 +1862,9 @@ async def get_local_server_logs():
 async def get_local_server_status():
     """Check if local-ai-server is running and healthy."""
     import docker
-    import httpx
+    import websockets
+    import json
+    import asyncio
     
     try:
         client = docker.from_env()
@@ -1529,9 +1878,20 @@ async def get_local_server_status():
         healthy = False
         if running:
             try:
-                async with httpx.AsyncClient() as http_client:
-                    response = await http_client.get("http://127.0.0.1:8000/health", timeout=5.0)
-                    healthy = response.status_code == 200
+                ws_url = os.getenv("HEALTH_CHECK_LOCAL_AI_URL", "ws://127.0.0.1:8765")
+                async with websockets.connect(ws_url, open_timeout=5) as ws:
+                    auth_token = (os.getenv("LOCAL_WS_AUTH_TOKEN", "") or "").strip()
+                    if auth_token:
+                        await ws.send(json.dumps({"type": "auth", "auth_token": auth_token}))
+                        raw = await asyncio.wait_for(ws.recv(), timeout=5)
+                        auth_data = json.loads(raw)
+                        if auth_data.get("type") != "auth_response" or auth_data.get("status") != "ok":
+                            raise RuntimeError(f"Local AI auth failed: {auth_data}")
+
+                    await ws.send(json.dumps({"type": "status"}))
+                    raw = await asyncio.wait_for(ws.recv(), timeout=5)
+                    data = json.loads(raw)
+                    healthy = data.get("type") == "status_response" and data.get("status") == "ok"
             except:
                 pass
         

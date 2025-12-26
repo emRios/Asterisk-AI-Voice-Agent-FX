@@ -122,67 +122,70 @@ const VADPage = () => {
                             <FormSwitch
                                 label="Enhanced VAD"
                                 description="Use advanced algorithms for better accuracy."
-                                checked={vadConfig.enhanced_enabled ?? true}
+                                tooltip="Enables engine-side VAD (energy + optional WebRTC VAD) used for local heuristics like barge-in fallback and silence robustness. Does not change provider-owned turn-taking."
+                                checked={vadConfig.enhanced_enabled ?? false}
                                 onChange={(e) => updateVADConfig('enhanced_enabled', e.target.checked)}
                             />
                             <FormSwitch
                                 label="Use Provider VAD"
-                                description="Offload VAD to the STT provider if supported."
+                                description="Prefer provider-managed turn detection when supported; engine VAD is used only for local fallback heuristics."
+                                tooltip="When enabled, the engine avoids making primary turn/endpointing decisions and relies on provider-side detection where available. Engine VAD may still be used for safe local fallbacks."
                                 checked={vadConfig.use_provider_vad ?? false}
                                 onChange={(e) => updateVADConfig('use_provider_vad', e.target.checked)}
                             />
                         </div>
 
-                        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                            <FormInput
-                                label="Min Utterance Duration (ms)"
-                                type="number"
-                                value={vadConfig.min_utterance_duration_ms || 600}
-                                onChange={(e) => updateVADConfig('min_utterance_duration_ms', parseInt(e.target.value))}
-                                tooltip="Minimum speech duration to be considered valid - filters out noise (default: 600ms)."
-                            />
-                            <FormInput
-                                label="Max Utterance Duration (ms)"
-                                type="number"
-                                value={vadConfig.max_utterance_duration_ms || 10000}
-                                onChange={(e) => updateVADConfig('max_utterance_duration_ms', parseInt(e.target.value))}
-                                tooltip="Maximum speech duration before forcing a cutoff (default: 10000ms = 10s)."
-                            />
-                            <FormInput
-                                label="Utterance Padding (ms)"
-                                type="number"
-                                value={vadConfig.utterance_padding_ms || 200}
-                                onChange={(e) => updateVADConfig('utterance_padding_ms', parseInt(e.target.value))}
-                                tooltip="Extra silence added after speech ends to catch trailing words (default: 200ms)."
-                            />
-                        </div>
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                             <FormInput
-                                label="Fallback Buffer Size"
+                                label="Energy Threshold (RMS)"
                                 type="number"
-                                value={vadConfig.fallback_buffer_size || 128000}
-                                onChange={(e) => updateVADConfig('fallback_buffer_size', parseInt(e.target.value))}
-                                tooltip="Audio buffer size in bytes for fallback VAD (default: 128000)."
+                                value={vadConfig.energy_threshold ?? 1500}
+                                onChange={(e) => updateVADConfig('energy_threshold', parseInt(e.target.value))}
+                                tooltip="Engine VAD energy threshold (RMS over PCM16). Higher = less sensitive (fewer false triggers), lower = more sensitive (better for quiet callers)."
                             />
                             <FormInput
-                                label="Fallback Interval (ms)"
+                                label="Confidence Threshold"
                                 type="number"
-                                value={vadConfig.fallback_interval_ms || 4000}
-                                onChange={(e) => updateVADConfig('fallback_interval_ms', parseInt(e.target.value))}
-                                tooltip="Interval for fallback VAD checks when primary is uncertain (default: 4000ms)."
+                                step="0.05"
+                                min="0"
+                                max="1"
+                                value={vadConfig.confidence_threshold ?? 0.6}
+                                onChange={(e) => updateVADConfig('confidence_threshold', parseFloat(e.target.value))}
+                                tooltip="Confidence required for engine VAD decisions (0.0–1.0). Used by engine heuristics; providers may implement their own confidence/endpointing."
+                            />
+                        </div>
+
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                            <FormSwitch
+                                label="Adaptive Threshold"
+                                description="Adapt energy threshold based on observed noise floor."
+                                tooltip="When enabled, engine VAD raises the effective energy threshold in noisy environments so background noise doesn’t trigger speech."
+                                checked={vadConfig.adaptive_threshold_enabled ?? true}
+                                onChange={(e) => updateVADConfig('adaptive_threshold_enabled', e.target.checked)}
+                            />
+                            <FormInput
+                                label="Noise Adaptation Rate"
+                                type="number"
+                                step="0.05"
+                                min="0"
+                                max="1"
+                                value={vadConfig.noise_adaptation_rate ?? 0.1}
+                                onChange={(e) => updateVADConfig('noise_adaptation_rate', parseFloat(e.target.value))}
+                                tooltip="How quickly the adaptive threshold reacts to background noise (0.0–1.0). Higher reacts faster but can over-adjust on short noise bursts."
                             />
                         </div>
                     </div>
                 </ConfigCard>
             </ConfigSection>
 
-            <ConfigSection title="Fallback VAD (WebRTC)" description="Backup detection mechanism using WebRTC standards.">
+            <ConfigSection title="Engine VAD (WebRTC)" description="Engine-side fallback heuristics (barge-in + safety), using WebRTC VAD when available.">
                 <ConfigCard>
                     <div className="space-y-6">
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                             <FormSwitch
-                                label="Enable Fallback VAD"
-                                description="Use WebRTC VAD when primary detection is uncertain."
+                                label="Enable Engine Fallback"
+                                description="Allow periodic forwarding / heuristics during extended silence (engine-side)."
+                                tooltip="If the engine believes the caller is silent for too long, it periodically lets audio through to avoid getting “stuck” on mis-detected silence. Does not affect providers that continuously stream audio."
                                 checked={vadConfig.fallback_enabled ?? true}
                                 onChange={(e) => updateVADConfig('fallback_enabled', e.target.checked)}
                             />
@@ -190,18 +193,11 @@ const VADPage = () => {
 
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                             <FormInput
-                                label="Fallback Buffer Size (bytes)"
-                                type="number"
-                                value={vadConfig.fallback_buffer_size || 128000}
-                                onChange={(e) => updateVADConfig('fallback_buffer_size', parseInt(e.target.value))}
-                                tooltip="Audio buffer size in bytes for fallback VAD (default: 128000)."
-                            />
-                            <FormInput
                                 label="Fallback Interval (ms)"
                                 type="number"
-                                value={vadConfig.fallback_interval_ms || 4000}
+                                value={vadConfig.fallback_interval_ms ?? 1500}
                                 onChange={(e) => updateVADConfig('fallback_interval_ms', parseInt(e.target.value))}
-                                tooltip="Interval for fallback VAD checks when primary is uncertain (default: 4000ms)."
+                                tooltip="After this much detected silence, engine may periodically allow audio through for robustness (default: 1500ms). Increase to reduce background noise leakage; decrease if calls feel “stuck”."
                             />
                         </div>
 
@@ -211,23 +207,23 @@ const VADPage = () => {
                                 type="number"
                                 min="0"
                                 max="3"
-                                value={vadConfig.webrtc_aggressiveness || 1}
+                                value={vadConfig.webrtc_aggressiveness ?? 1}
                                 onChange={(e) => updateVADConfig('webrtc_aggressiveness', parseInt(e.target.value))}
-                                tooltip="Higher values mean more aggressive silence detection."
+                                tooltip="WebRTC VAD aggressiveness (0–3). Higher = more aggressive silence detection (fewer false speech triggers) but may miss quiet speech."
                             />
                             <FormInput
                                 label="Start Frames"
                                 type="number"
-                                value={vadConfig.webrtc_start_frames || 3}
+                                value={vadConfig.webrtc_start_frames ?? 2}
                                 onChange={(e) => updateVADConfig('webrtc_start_frames', parseInt(e.target.value))}
-                                tooltip="Number of speech frames needed to trigger speech start (default: 3)."
+                                tooltip="Number of consecutive “speech” frames needed to declare speech started. Higher reduces false starts but increases detection latency."
                             />
                             <FormInput
                                 label="End Silence Frames"
                                 type="number"
-                                value={vadConfig.webrtc_end_silence_frames || 50}
+                                value={vadConfig.webrtc_end_silence_frames ?? 15}
                                 onChange={(e) => updateVADConfig('webrtc_end_silence_frames', parseInt(e.target.value))}
-                                tooltip="Silence frames needed to detect end of speech (default: 50)."
+                                tooltip="Number of consecutive “silence” frames needed to declare speech ended. Higher avoids cutting off trailing words but increases tail latency."
                             />
                         </div>
                     </div>

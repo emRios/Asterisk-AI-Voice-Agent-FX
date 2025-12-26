@@ -8,8 +8,11 @@ FROM python:3.11 as builder
 # ─────────────────────────────────────────────────────────────────────────────
 ARG INCLUDE_VOSK=true
 ARG INCLUDE_SHERPA=true
+ARG INCLUDE_FASTER_WHISPER=false
+ARG INCLUDE_WHISPER_CPP=false
 ARG INCLUDE_PIPER=true
 ARG INCLUDE_KOKORO=true
+ARG INCLUDE_MELOTTS=false
 ARG INCLUDE_LLAMA=true
 
 WORKDIR /usr/src/app
@@ -36,6 +39,16 @@ RUN if [ "$INCLUDE_SHERPA" = "true" ]; then \
         pip install --no-cache-dir sherpa-onnx==1.12.19; \
     fi
 
+RUN if [ "$INCLUDE_FASTER_WHISPER" = "true" ]; then \
+        echo "📦 Installing Faster-Whisper STT..." && \
+        pip install --no-cache-dir faster-whisper==1.0.3; \
+    fi
+
+RUN if [ "$INCLUDE_WHISPER_CPP" = "true" ]; then \
+        echo "📦 Installing Whisper.cpp (pywhispercpp)..." && \
+        pip install --no-cache-dir pywhispercpp==1.2.0; \
+    fi
+
 RUN if [ "$INCLUDE_PIPER" = "true" ]; then \
         echo "📦 Installing Piper TTS..." && \
         pip install --no-cache-dir piper-tts==1.2.0; \
@@ -44,6 +57,16 @@ RUN if [ "$INCLUDE_PIPER" = "true" ]; then \
 RUN if [ "$INCLUDE_KOKORO" = "true" ]; then \
         echo "📦 Installing Kokoro TTS..." && \
         pip install --no-cache-dir "kokoro>=0.9.2"; \
+    fi
+
+RUN if [ "$INCLUDE_MELOTTS" = "true" ]; then \
+        echo "📦 Installing MeloTTS..." && \
+        pip install --no-cache-dir git+https://github.com/myshell-ai/MeloTTS.git && \
+        python -m unidic download && \
+        python -c "import nltk; nltk.download('averaged_perceptron_tagger_eng')" && \
+        echo "📦 Pre-downloading MeloTTS BERT model..." && \
+        python -c "from transformers import AutoTokenizer; AutoTokenizer.from_pretrained('bert-base-uncased')" && \
+        python -c "from melo.api import TTS; tts = TTS(language='EN', device='cpu'); print('MeloTTS ready')"; \
     fi
 
 RUN if [ "$INCLUDE_LLAMA" = "true" ]; then \

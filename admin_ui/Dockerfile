@@ -23,6 +23,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
     gnupg \
+    build-essential \
+    python3-dev \
     && install -m 0755 -d /etc/apt/keyrings \
     && curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg \
     && chmod a+r /etc/apt/keyrings/docker.gpg \
@@ -46,6 +48,7 @@ COPY --from=frontend-builder /app/frontend/dist ./static
 EXPOSE 3003
 
 # Run the application
-# SECURITY: Binds to localhost by default. Set UVICORN_HOST=0.0.0.0 for remote access (requires reverse proxy + auth).
+# NOTE: Binds to 0.0.0.0 by default for remote accessibility (common for Asterisk servers).
+# SECURITY: Change admin password on first login and restrict port 3003 via firewall/VPN/reverse proxy.
 # Port configurable via UVICORN_PORT env var.
-CMD uvicorn main:app --host ${UVICORN_HOST:-127.0.0.1} --port ${UVICORN_PORT:-3003}
+CMD uvicorn main:app --host ${UVICORN_HOST:-0.0.0.0} --port ${UVICORN_PORT:-3003}

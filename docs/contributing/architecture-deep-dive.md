@@ -171,15 +171,11 @@ Configuration changes propagate through the existing async watcher introduced in
 
 Operators can trigger a reload manually with `make engine-reload` (wrapper around `kill -HUP $(pgrep -f ai-engine)` on the host). This preserves uptime while enabling rapid iteration on streaming quality or provider selection.
 
-### Monitoring & Analytics (Milestone 14)
+### Monitoring & Analytics
 
-An optional monitoring stack (Prometheus + Grafana) is defined in `docker-compose.yml` and managed via `make monitor-up` / `make monitor-down`. When enabled it provides:
+This project ships **aggregate, low-cardinality Prometheus metrics** and a **per-call Call History** database for debugging and support workflows.
 
-- Streaming dashboards (restart counts, jitter buffer depth, fallback rates)
-- Turn latency histograms and provider distribution panels
-- Hooks for future transcript/sentiment analytics (Deepgram Test Intelligence, etc.)
-
-Dashboards are stored under `monitoring/dashboards/`, and configuration instructions live in `docs/contributing/milestones/milestone-14-monitoring-stack.md`. The stack is disabled by default so standard deployments remain lightweight.
+The legacy bundled Prometheus/Grafana compose + dashboards were removed from the main repo path; operators should bring their own monitoring stack and scrape `/metrics` if desired. See `docs/MONITORING_GUIDE.md`.
 
 ## Recent Progress and Current State
 

@@ -45,22 +45,18 @@ _KEEPALIVE_INTERVAL_SEC = 15.0
 _OPENAI_ASSUMED_OUTPUT_RATE = Gauge(
     "ai_agent_openai_assumed_output_sample_rate_hz",
     "Configured OpenAI Realtime output sample rate per call",
-    labelnames=("call_id",),
 )
 _OPENAI_PROVIDER_OUTPUT_RATE = Gauge(
     "ai_agent_openai_provider_output_sample_rate_hz",
     "Provider-advertised OpenAI Realtime output sample rate per call",
-    labelnames=("call_id",),
 )
 _OPENAI_MEASURED_OUTPUT_RATE = Gauge(
     "ai_agent_openai_measured_output_sample_rate_hz",
     "Measured OpenAI Realtime output sample rate per call",
-    labelnames=("call_id",),
 )
 _OPENAI_SESSION_AUDIO_INFO = Info(
     "ai_agent_openai_session_audio",
     "OpenAI Realtime session audio format assumptions and provider acknowledgements",
-    labelnames=("call_id",),
 )
 
 
@@ -95,6 +91,8 @@ class OpenAIRealtimeProvider(AIProviderInterface):
         self._current_response_id: Optional[str] = None  # Track active response for cancellation
         self._greeting_response_id: Optional[str] = None  # Track greeting to protect from barge-in
         self._greeting_completed: bool = False  # Track if greeting has finished
+        # Debounce engine-level barge-in signals (prevents flush storms).
+        self._last_barge_in_emit_ts: float = 0.0
         self._farewell_response_id: Optional[str] = None  # Track farewell response for hangup
         self._hangup_after_response: bool = False  # Flag to trigger hangup after next response
         self._farewell_timeout_task: Optional[asyncio.Task] = None  # Timeout fallback for hangup
@@ -110,6 +108,11 @@ class OpenAIRealtimeProvider(AIProviderInterface):
         self._transcript_buffer: str = ""
         self._input_info_logged: bool = False
         self._allowed_tools: Optional[List[str]] = None
+        
+        # Turn latency tracking (Milestone 21 - Call History)
+        self._turn_start_time: Optional[float] = None
+        self._turn_first_audio_received: bool = False
+        self._session_store = None  # Set via engine for latency tracking
         # Aggregate provider-rate PCM16 bytes (24 kHz default) and commit in >=100ms chunks
         self._pending_audio_provider_rate: bytearray = bytearray()
         
@@ -230,10 +233,19 @@ class OpenAIRealtimeProvider(AIProviderInterface):
             )
 
         provider_rate = int(self.config.provider_input_sample_rate_hz or 0)
-        if provider_rate and provider_rate < 24000:
-            issues.append(
-                f"OpenAI provider_input_sample_rate_hz={provider_rate}; recommend 24000 for realtime streaming."
-            )
+        provider_enc = (getattr(self.config, "provider_input_encoding", None) or "linear16").lower()
+        if provider_rate:
+            if provider_enc in ("ulaw", "mulaw", "g711_ulaw", "mu-law", "alaw", "g711_alaw") and provider_rate != 8000:
+                issues.append(
+                    f"OpenAI provider_input_sample_rate_hz={provider_rate}; G.711 (μ-law/a-law) should be 8000 Hz."
+                )
+            elif provider_enc in ("slin16", "linear16", "pcm16"):
+                # Telephony deployments commonly run an internal 16 kHz PCM pipeline; 24 kHz PCM is also supported.
+                # Only warn when configured to an unusual PCM rate.
+                if provider_rate not in (16000, 24000):
+                    issues.append(
+                        f"OpenAI provider_input_sample_rate_hz={provider_rate}; for PCM16 use 16000 Hz (telephony) or 24000 Hz (wideband)."
+                    )
 
         return issues
 
@@ -590,6 +602,29 @@ class OpenAIRealtimeProvider(AIProviderInterface):
             
             # Send result back to OpenAI
             await self.tool_adapter.send_tool_result(result, context)
+            
+            # Log tool call to session for call history (Milestone 21)
+            try:
+                session_store = getattr(self, '_session_store', None)
+                if session_store and self._call_id and function_name:
+                    from datetime import datetime
+                    session = await session_store.get_by_call_id(self._call_id)
+                    if session:
+                        tool_record = {
+                            "name": function_name,
+                            "params": item.get("arguments", {}),
+                            "result": result.get("status", "unknown") if isinstance(result, dict) else "success",
+                            "message": result.get("message", "") if isinstance(result, dict) else str(result),
+                            "timestamp": datetime.now().isoformat(),
+                            "duration_ms": 0,
+                        }
+                        if not hasattr(session, 'tool_calls') or session.tool_calls is None:
+                            session.tool_calls = []
+                        session.tool_calls.append(tool_record)
+                        await session_store.upsert_call(session)
+                        logger.debug("Tool call logged to session", call_id=self._call_id, tool=function_name)
+            except Exception as log_err:
+                logger.debug(f"Failed to log tool call to session: {log_err}", call_id=self._call_id)
             
         except Exception as e:
             logger.error(
@@ -1047,7 +1082,7 @@ class OpenAIRealtimeProvider(AIProviderInterface):
         """
         if not self.websocket or self.websocket.state.name != "OPEN":
             return
-        
+
         try:
             cancel_payload = {
                 "type": "response.cancel",
@@ -1060,6 +1095,23 @@ class OpenAIRealtimeProvider(AIProviderInterface):
                 call_id=self._call_id,
                 response_id=response_id
             )
+            # Local egress can have buffered audio (pacer/outbuf). Flush it immediately so the interrupted
+            # sentence does not resume locally even if OpenAI continues sending a few in-flight frames.
+            try:
+                await self._emit_audio_done()
+            except Exception:
+                logger.debug("Failed emitting AgentAudioDone during barge-in cancel", call_id=self._call_id, exc_info=True)
+            try:
+                async with self._pacer_lock:
+                    self._outbuf.clear()
+            except Exception:
+                logger.debug("Failed clearing pacer buffer during barge-in cancel", call_id=self._call_id, exc_info=True)
+            try:
+                self._pacer_running = False
+                if self._pacer_task and not self._pacer_task.done():
+                    self._pacer_task.cancel()
+            except Exception:
+                logger.debug("Failed stopping pacer during barge-in cancel", call_id=self._call_id, exc_info=True)
         except Exception:
             logger.error(
                 "Failed to cancel OpenAI response",
@@ -1067,6 +1119,28 @@ class OpenAIRealtimeProvider(AIProviderInterface):
                 response_id=response_id,
                 exc_info=True
             )
+
+    async def _emit_provider_barge_in(self, *, event_type: str) -> None:
+        """Notify the engine that provider-side VAD detected user interruption.
+
+        Engine uses this to flush local playback immediately (Option 2),
+        while OpenAI remains responsible for response cancellation/turn-taking.
+        """
+        try:
+            now = time.time()
+            if now - float(self._last_barge_in_emit_ts or 0.0) < 0.25:
+                return
+            self._last_barge_in_emit_ts = now
+            await self.on_event(
+                {
+                    "type": "ProviderBargeIn",
+                    "call_id": self._call_id,
+                    "provider": "openai_realtime",
+                    "event": event_type,
+                }
+            )
+        except Exception:
+            logger.debug("Failed to emit ProviderBargeIn", call_id=self._call_id, exc_info=True)
     
     async def _send_audio_to_openai(self, pcm16: bytes):
         """Helper method to send PCM16 audio to OpenAI (extracted for gating logic).
@@ -1074,6 +1148,8 @@ class OpenAIRealtimeProvider(AIProviderInterface):
         This contains the actual audio sending logic that was previously inline in send_audio.
         It handles both VAD-enabled and manual commit modes.
         """
+        # Turn start tracking moved to response.done event to count conversational turns correctly
+        
         # If server VAD is enabled, just append frames; do not commit.
         vad_enabled = getattr(self.config, "turn_detection", None) is not None
         if vad_enabled:
@@ -1381,6 +1457,9 @@ class OpenAIRealtimeProvider(AIProviderInterface):
             # Reset audio start time when response fully completes - allows interruption for next response
             self._response_audio_start_time = None
             
+            # Note: Turn latency timer now starts on input_audio_buffer.speech_stopped
+            # (moved from here for standardized measurement across providers)
+            
             await self._emit_audio_done()
             
             # Only emit additional audio_done if this response actually had audio output
@@ -1527,8 +1606,14 @@ class OpenAIRealtimeProvider(AIProviderInterface):
 
         # Optional acks/telemetry for audio buffer operations
         if event_type and event_type.startswith("input_audio_buffer"):
+            # Track turn start time when user STOPS speaking (Milestone 21)
+            # This measures: speech end → first AI audio response
+            if event_type == "input_audio_buffer.speech_stopped":
+                self._turn_start_time = time.time()
+                self._turn_first_audio_received = False
+                logger.debug("Turn latency timer started (speech_stopped)", call_id=self._call_id)
             # Handle barge-in: cancel ongoing response when user starts speaking
-            if event_type == "input_audio_buffer.speech_started" and self._current_response_id:
+            elif event_type == "input_audio_buffer.speech_started" and self._current_response_id:
                 # Protect greeting response from barge-in cancellation
                 if self._current_response_id == self._greeting_response_id and not self._greeting_completed:
                     logger.info(
@@ -1555,6 +1640,7 @@ class OpenAIRealtimeProvider(AIProviderInterface):
                             elapsed_seconds=round(elapsed, 2)
                         )
                         await self._cancel_response(self._current_response_id)
+                        await self._emit_provider_barge_in(event_type=event_type)
                 else:
                     # No audio started yet, still cancel text-only responses
                     logger.info(
@@ -1563,8 +1649,40 @@ class OpenAIRealtimeProvider(AIProviderInterface):
                         response_id=self._current_response_id
                     )
                     await self._cancel_response(self._current_response_id)
+                    await self._emit_provider_barge_in(event_type=event_type)
             else:
-                logger.info("OpenAI input_audio_buffer ack", call_id=self._call_id, event_type=event_type)
+                # IMPORTANT: even when there's no cancellable response (e.g., output buffered locally),
+                # we still want the platform to flush local playback immediately on speech_started.
+                if event_type == "input_audio_buffer.speech_started":
+                    # Never interrupt the greeting turn via platform flush.
+                    if self._greeting_response_id and not self._greeting_completed:
+                        logger.info(
+                            "🛡️  Barge-in blocked - protecting greeting response",
+                            call_id=self._call_id,
+                            response_id=self._greeting_response_id,
+                        )
+                    else:
+                        # AudioSocket+streaming: a response can be "done" at the provider while
+                        # we're still draining buffered audio locally (pacer/outbuf).
+                        # If the caller starts speaking, we must stop emitting any remaining buffered
+                        # audio immediately so the next turn can proceed normally.
+                        try:
+                            async with self._pacer_lock:
+                                self._outbuf.clear()
+                        except Exception:
+                            logger.debug("Failed to clear OpenAI egress buffer on barge-in", call_id=self._call_id, exc_info=True)
+                        try:
+                            await self._emit_audio_done()
+                        except Exception:
+                            logger.debug("Failed to stop OpenAI egress pacer on barge-in", call_id=self._call_id, exc_info=True)
+                        logger.info(
+                            "🎤 User speech started (no active response); requesting platform flush",
+                            call_id=self._call_id,
+                            event_type=event_type,
+                        )
+                        await self._emit_provider_barge_in(event_type=event_type)
+                else:
+                    logger.info("OpenAI input_audio_buffer ack", call_id=self._call_id, event_type=event_type)
             return
 
         # Additional transcript variants per guide
@@ -1656,6 +1774,31 @@ class OpenAIRealtimeProvider(AIProviderInterface):
 
         if not raw_bytes:
             return
+
+        # Track turn latency on first audio output (Milestone 21 - Call History)
+        if self._turn_start_time is not None and not self._turn_first_audio_received:
+            self._turn_first_audio_received = True
+            turn_latency_ms = (time.time() - self._turn_start_time) * 1000
+            # Save to session for call history
+            if self._session_store and self._call_id:
+                try:
+                    call_id_copy = self._call_id
+                    latency_copy = turn_latency_ms
+                    async def save_latency():
+                        try:
+                            session = await self._session_store.get_by_call_id(call_id_copy)
+                            if session:
+                                session.turn_latencies_ms.append(latency_copy)
+                                await self._session_store.upsert_call(session)
+                                logger.debug("Turn latency saved to session", call_id=call_id_copy, latency_ms=round(latency_copy, 1))
+                            else:
+                                logger.debug("Session not found for latency tracking", call_id=call_id_copy)
+                        except Exception as e:
+                            logger.debug("Failed to save turn latency", call_id=call_id_copy, error=str(e))
+                    asyncio.create_task(save_latency())
+                except Exception as e:
+                    logger.debug("Failed to create latency save task", error=str(e))
+            logger.info("Turn latency recorded", call_id=self._call_id, latency_ms=round(turn_latency_ms, 1))
 
         # Always update the output meter with provider-native bytes
         self._update_output_meter(len(raw_bytes))
@@ -1969,7 +2112,7 @@ class OpenAIRealtimeProvider(AIProviderInterface):
 
         assumed_output = int(getattr(self.config, "output_sample_rate_hz", 0) or 0)
         try:
-            _OPENAI_ASSUMED_OUTPUT_RATE.labels(call_id).set(assumed_output)
+            _OPENAI_ASSUMED_OUTPUT_RATE.set(assumed_output)
         except Exception:
             pass
 
@@ -1985,7 +2128,7 @@ class OpenAIRealtimeProvider(AIProviderInterface):
         }
 
         try:
-            _OPENAI_SESSION_AUDIO_INFO.labels(call_id).info(info_payload)
+            _OPENAI_SESSION_AUDIO_INFO.info(info_payload)
         except Exception:
             pass
 
@@ -2016,7 +2159,7 @@ class OpenAIRealtimeProvider(AIProviderInterface):
         if provider_rate:
             self._provider_reported_output_rate = provider_rate
             try:
-                _OPENAI_PROVIDER_OUTPUT_RATE.labels(call_id).set(provider_rate)
+                _OPENAI_PROVIDER_OUTPUT_RATE.set(provider_rate)
             except Exception:
                 pass
             try:
@@ -2050,7 +2193,7 @@ class OpenAIRealtimeProvider(AIProviderInterface):
         }
 
         try:
-            _OPENAI_SESSION_AUDIO_INFO.labels(call_id).info(info_payload)
+            _OPENAI_SESSION_AUDIO_INFO.info(info_payload)
         except Exception:
             pass
 
@@ -2092,7 +2235,7 @@ class OpenAIRealtimeProvider(AIProviderInterface):
         confirmed_pcm = bool(self._outfmt_acknowledged and self._provider_output_format == "pcm16")
 
         try:
-            _OPENAI_MEASURED_OUTPUT_RATE.labels(self._call_id).set(measured_rate)
+            _OPENAI_MEASURED_OUTPUT_RATE.set(measured_rate)
         except Exception:
             pass
 
@@ -2161,9 +2304,15 @@ class OpenAIRealtimeProvider(AIProviderInterface):
                     except Exception:
                         logger.debug("Failed to log OpenAI output rate info", exc_info=True)
 
-            # Fallback trigger: if stream has been running >10s and measured rate remains <7.6–8 kHz, switch to PCM16@24k
+            # Fallback trigger: if stream has been running >10s and measured rate remains <7.6–8 kHz, switch to PCM16@24k.
+            # Guardrail: when the server has ACKed G.711 (μ-law/a-law) output, this heuristic is unreliable because
+            # the "measured_rate" is an average over wall-clock time and naturally drops during user-speech/silence.
+            # Switching formats mid-call can introduce audible artifacts, so only allow the fallback when we are not
+            # currently in an ACKed G.711 mode.
             try:
                 if not self._fallback_pcm24k_done:
+                    if self._outfmt_acknowledged and self._provider_output_format in ("g711_ulaw", "g711_alaw"):
+                        return
                     # Use pacer start when available, otherwise meter start as a conservative window
                     window_anchor = self._pacer_start_ts if self._pacer_start_ts > 0.0 else self._output_meter_start_ts
                     window = now - window_anchor if window_anchor > 0.0 else elapsed
@@ -2364,15 +2513,4 @@ class OpenAIRealtimeProvider(AIProviderInterface):
         return None
 
     def _clear_metrics(self, call_id: Optional[str]) -> None:
-        if not call_id:
-            return
-        for metric in (_OPENAI_ASSUMED_OUTPUT_RATE, _OPENAI_PROVIDER_OUTPUT_RATE, _OPENAI_MEASURED_OUTPUT_RATE):
-            try:
-                metric.remove(call_id)
-            except (KeyError, ValueError):
-                pass
-        try:
-            _OPENAI_SESSION_AUDIO_INFO.remove(call_id)
-        except (KeyError, ValueError):
-            pass
         self._reset_output_meter()

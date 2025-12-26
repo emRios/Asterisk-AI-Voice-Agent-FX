@@ -10,7 +10,7 @@ import audioop
 import time
 import random
 from dataclasses import dataclass, field
-from typing import Dict, Optional, Callable, Any, Tuple
+from typing import Dict, Optional, Callable, Any, Tuple, Iterable
 
 from .logging_config import get_logger
 
@@ -63,11 +63,14 @@ class RTPServer:
         self,
         host: str,
         port: int,
-        engine_callback: Callable[[int, bytes], Any],
+        engine_callback: Callable[[str, int, bytes], Any],
         codec: str = "ulaw",
         format: str = "slin16",
         sample_rate: int = 16000,
         port_range: Optional[Tuple[int, int]] = None,
+        *,
+        allowed_remote_hosts: Optional[Iterable[str]] = None,
+        lock_remote_endpoint: bool = True,
     ):
         self.host = host
         self.base_port = int(port)
@@ -89,6 +92,12 @@ class RTPServer:
         self.port_allocation: Dict[int, str] = {}
         self.ssrc_to_call_id: Dict[int, str] = {}
         self.running: bool = False
+        self.lock_remote_endpoint: bool = bool(lock_remote_endpoint)
+        self.allowed_remote_hosts = (
+            {str(h).strip() for h in allowed_remote_hosts if str(h).strip()}
+            if allowed_remote_hosts is not None
+            else None
+        )
 
         logger.info(
             "RTP Server initialized",
@@ -97,6 +106,8 @@ class RTPServer:
             codec=self.codec,
             format=self.format,
             sample_rate=self.sample_rate,
+            lock_remote_endpoint=self.lock_remote_endpoint,
+            allowed_remote_hosts=sorted(self.allowed_remote_hosts) if self.allowed_remote_hosts else None,
         )
 
     async def start(self) -> None:
@@ -320,6 +331,14 @@ class RTPServer:
 
             # Record remote endpoint on first packet.
             if session.remote_host is None:
+                if self.allowed_remote_hosts is not None and addr[0] not in self.allowed_remote_hosts:
+                    logger.warning(
+                        "RTP packet rejected (source not allowed)",
+                        call_id=call_id,
+                        remote_host=addr[0],
+                        remote_port=addr[1],
+                    )
+                    continue
                 session.remote_host, session.remote_port = addr[0], addr[1]
                 logger.info(
                     "RTP remote endpoint established",
@@ -328,6 +347,24 @@ class RTPServer:
                     remote_port=session.remote_port,
                 )
             elif (addr[0] != session.remote_host) or (addr[1] != session.remote_port):
+                if self.allowed_remote_hosts is not None and addr[0] not in self.allowed_remote_hosts:
+                    logger.warning(
+                        "RTP packet rejected (source not allowed)",
+                        call_id=call_id,
+                        remote_host=addr[0],
+                        remote_port=addr[1],
+                    )
+                    continue
+                if self.lock_remote_endpoint:
+                    logger.warning(
+                        "RTP remote endpoint mismatch (locked; dropping packet)",
+                        call_id=call_id,
+                        expected_host=session.remote_host,
+                        expected_port=session.remote_port,
+                        actual_host=addr[0],
+                        actual_port=addr[1],
+                    )
+                    continue
                 session.remote_host, session.remote_port = addr[0], addr[1]
                 logger.info(
                     "RTP remote endpoint updated",
@@ -411,7 +448,7 @@ class RTPServer:
             return
 
         try:
-            await self.engine_callback(ssrc, pcm_resampled)
+            await self.engine_callback(call_id, ssrc, pcm_resampled)
         except Exception as exc:
             logger.error("Engine callback failed", call_id=call_id, error=str(exc))
         else:

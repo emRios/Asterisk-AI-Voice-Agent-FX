@@ -50,6 +50,9 @@ COPY --chown=appuser:appuser main.py ./
 # Prepare log directory for file logging
 RUN mkdir -p /app/logs && chown appuser:appuser /app/logs
 
+# Prepare data directory for call history database (Milestone 21)
+RUN mkdir -p /app/data && chown appuser:appuser /app/data
+
 # Set PATH for virtual environment
 ENV PATH="/opt/venv/bin:$PATH"
 

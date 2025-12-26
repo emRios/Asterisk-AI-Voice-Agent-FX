@@ -32,19 +32,7 @@ def openai_config():
 
 
 def _cleanup_metrics(call_id: str) -> None:
-    for metric in (
-        _OPENAI_ASSUMED_OUTPUT_RATE,
-        _OPENAI_MEASURED_OUTPUT_RATE,
-        _OPENAI_PROVIDER_OUTPUT_RATE,
-    ):
-        try:
-            metric.remove(call_id)
-        except (KeyError, ValueError):
-            pass
-    try:
-        _OPENAI_SESSION_AUDIO_INFO.remove(call_id)
-    except (KeyError, ValueError):
-        pass
+    return
 
 
 def test_output_rate_drift_adjusts_active_rate(openai_config):

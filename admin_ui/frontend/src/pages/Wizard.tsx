@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { AlertCircle, ArrowRight, Loader2, Cloud, Server, Shield, Zap, SkipForward, CheckCircle, CheckCircle2, XCircle, Terminal, Copy, HardDrive, Play, RefreshCw, Info } from 'lucide-react';
+import { AlertCircle, ArrowRight, Loader2, Cloud, Server, Shield, Zap, SkipForward, CheckCircle, CheckCircle2, XCircle, Terminal, Copy, HardDrive, Play, RefreshCw, Info, AlertTriangle } from 'lucide-react';
 import axios from 'axios';
 
 interface SetupConfig {
@@ -84,9 +84,9 @@ const Wizard = () => {
 
 
     const [showSkipConfirm, setShowSkipConfirm] = useState(false);
-    const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
+    const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' | 'warning' } | null>(null);
 
-    const showToast = (message: string, type: 'success' | 'error') => {
+    const showToast = (message: string, type: 'success' | 'error' | 'warning') => {
         setToast({ message, type });
         setTimeout(() => setToast(null), 4000);
     };
@@ -716,6 +716,7 @@ const Wizard = () => {
                                                         <option value="vosk">Vosk (Local)</option>
                                                         <option value="kroko">Kroko (Local/Cloud)</option>
                                                         <option value="sherpa">Sherpa (Local)</option>
+                                                        <option value="faster_whisper">Faster-Whisper (Local)</option>
                                                     </select>
                                                 </div>
                                                 {config.local_stt_backend === 'kroko' && (
@@ -773,6 +774,7 @@ const Wizard = () => {
                                                         <option value="piper">Piper (Local)</option>
                                                         <option value="kokoro_local">Kokoro (Local)</option>
                                                         <option value="kokoro_cloud">Kokoro (Cloud/API)</option>
+                                                        <option value="melotts">MeloTTS (Local/CPU)</option>
                                                     </select>
                                                 </div></div>
                                             {config.local_tts_backend === 'kokoro' && config.kokoro_mode === 'api' && (
@@ -1212,6 +1214,7 @@ const Wizard = () => {
                                                         <>
                                                             <option value="vosk">Vosk (Local)</option>
                                                             <option value="kroko_cloud">Kroko (Cloud)</option>
+                                                            <option value="faster_whisper">Faster-Whisper (Local)</option>
                                                         </>
                                                     )}
                                                 </select>
@@ -1270,6 +1273,7 @@ const Wizard = () => {
                                                         <>
                                                             <option value="piper">Piper (Local)</option>
                                                             <option value="kokoro">Kokoro (Premium)</option>
+                                                            <option value="melotts">MeloTTS (Local)</option>
                                                         </>
                                                     )}
                                                 </select>
@@ -1424,32 +1428,37 @@ const Wizard = () => {
                                                     Downloads models for selected backends.
                                                 </p>
                                             </div>
-                                            <button
-                                                onClick={async () => {
-                                                    setLocalAIStatus(prev => ({ ...prev, downloading: true, downloadOutput: [] }));
-                                                    try {
-                                                        await axios.post('/api/wizard/local/download-selected-models', {
-                                                            stt: config.local_stt_backend,
-                                                            llm: config.local_llm_model,
-                                                            tts: config.local_tts_backend,
-                                                            kroko_embedded: config.kroko_embedded,
+	                                            <button
+	                                                onClick={async () => {
+	                                                    setLocalAIStatus(prev => ({ ...prev, downloading: true, downloadOutput: [] }));
+	                                                    try {
+	                                                        const startRes = await axios.post('/api/wizard/local/download-selected-models', {
+	                                                            stt: config.local_stt_backend,
+	                                                            llm: config.local_llm_model,
+	                                                            tts: config.local_tts_backend,
+	                                                            kroko_embedded: config.kroko_embedded,
                                                             kokoro_mode: config.kokoro_mode,
                                                             language: selectedLanguage,
                                                             // Send exact model IDs to download the specific model selected
                                                             stt_model_id: config.local_stt_model,
                                                             tts_model_id: config.local_tts_model,
                                                             llm_download_url: config.local_llm_custom_url,
-                                                            llm_model_path: config.local_llm_custom_filename,
-                                                            kokoro_api_base_url: config.kokoro_api_base_url,
-                                                            kokoro_api_key: config.kokoro_api_key
-                                                        });
-                                                        const pollProgress = async () => {
-                                                            try {
-                                                                const res = await axios.get('/api/wizard/local/download-progress');
-                                                                setLocalAIStatus(prev => ({
-                                                                    ...prev,
-                                                                    downloadOutput: res.data.output || [],
-                                                                    downloadProgress: res.data.running ? {
+	                                                            llm_model_path: config.local_llm_custom_filename,
+	                                                            kokoro_api_base_url: config.kokoro_api_base_url,
+	                                                            kokoro_api_key: config.kokoro_api_key
+	                                                        });
+	                                                        const jobId = startRes.data?.job_id;
+	                                                        const diskWarning = startRes.data?.disk_warning;
+	                                                        if (diskWarning) showToast(diskWarning, 'warning');
+	                                                        const pollProgress = async () => {
+	                                                            try {
+	                                                                const res = await axios.get('/api/wizard/local/download-progress', {
+	                                                                    params: jobId ? { job_id: jobId } : undefined
+	                                                                });
+	                                                                setLocalAIStatus(prev => ({
+	                                                                    ...prev,
+	                                                                    downloadOutput: res.data.output || [],
+	                                                                    downloadProgress: res.data.running ? {
                                                                         bytes_downloaded: res.data.bytes_downloaded || 0,
                                                                         total_bytes: res.data.total_bytes || 0,
                                                                         percent: res.data.percent || 0,
@@ -2244,23 +2253,27 @@ exten => s,1,NoOp(AI Agent Call)
                 )}
 
                 {/* Toast Notification */}
-                {toast && (
-                    <div className="fixed bottom-4 right-4 z-50">
-                        <div
-                            className={`flex items-center gap-2 px-4 py-3 rounded-lg shadow-lg text-sm font-medium animate-in slide-in-from-right ${toast.type === 'success'
-                                ? 'bg-green-500 text-white'
-                                : 'bg-red-500 text-white'
-                                }`}
-                        >
-                            {toast.type === 'success' ? (
-                                <CheckCircle2 className="w-4 h-4" />
-                            ) : (
-                                <XCircle className="w-4 h-4" />
-                            )}
-                            {toast.message}
-                        </div>
-                    </div>
-                )}
+	                {toast && (
+	                    <div className="fixed bottom-4 right-4 z-50">
+	                        <div
+	                            className={`flex items-center gap-2 px-4 py-3 rounded-lg shadow-lg text-sm font-medium animate-in slide-in-from-right ${toast.type === 'success'
+	                                ? 'bg-green-500 text-white'
+	                                : toast.type === 'warning'
+	                                    ? 'bg-yellow-500 text-white'
+	                                    : 'bg-red-500 text-white'
+	                                }`}
+	                        >
+	                            {toast.type === 'success' ? (
+	                                <CheckCircle2 className="w-4 h-4" />
+	                            ) : toast.type === 'warning' ? (
+	                                <AlertTriangle className="w-4 h-4" />
+	                            ) : (
+	                                <XCircle className="w-4 h-4" />
+	                            )}
+	                            {toast.message}
+	                        </div>
+	                    </div>
+	                )}
             </div>
         </div >
     );

@@ -12,6 +12,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Additional provider integrations
 - Enhanced monitoring features
 
+## [4.5.3] - 2025-12-22
+
+### Added
+
+- ExternalMedia RTP hardening: remote endpoint pinning (`external_media.lock_remote_endpoint`) and allowlist support (`external_media.allowed_remote_hosts`)
+- Tests for RTP routing/security and Prometheus label cardinality
+- Admin UI backend: model switching mappings for `faster_whisper` STT and `melotts` TTS
+
+### Changed
+
+- Default provider now `local_hybrid` (pipeline-first GA default)
+- Readiness probe is pipeline-aware when `default_provider` references a pipeline (e.g., `local_hybrid`)
+- Prometheus metrics are low-cardinality only (removed per-call labels like `call_id`; per-call detail lives in Call History)
+
+### Fixed
+
+- ExternalMedia RTP SSRC routing: prevent cross-call audio mixing by using authoritative `call_id` in engine callback
+- Admin UI HealthWidget rebuild payload: stop mis-parsing model/voice identifiers
+- Local provider readiness badge: report “configured” vs “connected” semantics correctly
+
+### Removed
+
+- Legacy bundled Prometheus/Grafana monitoring stack and `monitoring/` assets from the main repo path (Call History-first debugging; bring-your-own monitoring)
+
+### Improved (Onboarding & DX)
+
+- Preflight is now **required** (not recommended) in all documentation
+- Admin UI Dockerfile default bind aligned to `0.0.0.0` (matches docker-compose.yml for out-of-box accessibility)
+- Prominent ASCII security warning box in `preflight.sh` and `install.sh` post-install output
+- Timezone (`TZ`) now configurable via `.env` with `America/Phoenix` default
+- README Quick Start includes verification step with health check command
+- INSTALLATION.md Path A corrected: preflight required, proper service ordering
+- Remote server access (`http://<server-ip>:3003`) now primary instruction alongside localhost
+
 ## [4.5.2] - 2025-12-16
 
 ### Added
@@ -759,7 +793,7 @@ For new deployments:
 - **Repository**: https://github.com/hkjarral/Asterisk-AI-Voice-Agent
 - **Documentation**: [docs/README.md](docs/README.md)
 - **FreePBX Guide**: [docs/FreePBX-Integration-Guide.md](docs/FreePBX-Integration-Guide.md)
-- **Monitoring**: [monitoring/README.md](monitoring/README.md)
+- **Metrics/Observability**: [docs/MONITORING_GUIDE.md](docs/MONITORING_GUIDE.md)
 
 ---
 

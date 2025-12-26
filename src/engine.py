@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import logging
 import math
 import os
@@ -10,9 +11,10 @@ import uuid
 import audioop
 import base64
 import json
+import ipaddress
 from collections import deque
-from datetime import datetime
-from typing import Dict, Any, Optional, List, Set, Tuple
+from datetime import datetime, timezone
+from typing import Dict, Any, Optional, List, Set, Tuple, Callable
 
 # Simple audio capture system removed - not used in production
 
@@ -116,27 +118,25 @@ _TURN_RESPONSE_SECONDS = Histogram(
 _CFG_BARGE_MS = Gauge(
     "ai_agent_config_barge_in_ms",
     "Configured barge-in timing values (ms)",
-    labelnames=("call_id", "param"),
+    labelnames=("param",),
 )
 _CFG_BARGE_THRESHOLD = Gauge(
     "ai_agent_config_barge_in_threshold",
     "Configured barge-in energy threshold",
-    labelnames=("call_id",),
 )
 _CFG_STREAM_MS = Gauge(
     "ai_agent_config_streaming_ms",
     "Configured streaming timing values (ms)",
-    labelnames=("call_id", "param"),
+    labelnames=("param",),
 )
 _CFG_TD_MS = Gauge(
     "ai_agent_config_turn_detection_ms",
     "Configured provider turn detection timing values (ms)",
-    labelnames=("call_id", "param"),
+    labelnames=("param",),
 )
 _CFG_TD_THRESHOLD = Gauge(
     "ai_agent_config_turn_detection_threshold",
     "Configured provider turn detection threshold",
-    labelnames=("call_id",),
 )
 
 # Barge-in reaction latency (seconds) from first energy to trigger
@@ -144,41 +144,34 @@ _BARGE_REACTION_SECONDS = Histogram(
     "ai_agent_barge_in_reaction_seconds",
     "Time from first speech energy to barge-in trigger",
     buckets=(0.1, 0.2, 0.3, 0.5, 0.8, 1.2, 2.0),
-    labelnames=("call_id",),
 )
 
 # Per-call audio byte counters (ingress)
 _STREAM_RX_BYTES = Counter(
     "ai_agent_stream_rx_bytes_total",
     "Inbound audio bytes from caller (per call)",
-    labelnames=("call_id",),
 )
 _CODEC_ALIGNMENT = Gauge(
     "ai_agent_codec_alignment",
     "Codec/sample-rate alignment status per call/provider (1=aligned,0=degraded)",
-    labelnames=("call_id", "provider"),
+    labelnames=("provider",),
 )
 _AUDIO_RMS_GAUGE = Gauge(
     "ai_agent_audio_rms",
     "Observed RMS levels for audio stages",
-    labelnames=("call_id", "stage"),
+    labelnames=("stage",),
 )
 _AUDIO_DC_OFFSET = Gauge(
     "ai_agent_audio_dc_offset",
     "Observed DC offset (mean sample value) for audio stages",
-    labelnames=("call_id", "stage"),
+    labelnames=("stage",),
 )
 
-# Call metadata and duration tracking for dashboard
-_CALL_METADATA = Gauge(
-    "ai_agent_call_metadata",
-    "Call metadata including caller info, pipeline, provider, and context selection",
-    labelnames=("call_id", "caller_name", "caller_number", "pipeline", "provider", "context"),
-)
+# Call duration tracking (aggregate)
 _CALL_DURATION = Histogram(
     "ai_agent_call_duration_seconds",
     "Total call duration from start to end",
-    labelnames=("call_id", "pipeline", "provider"),
+    labelnames=("pipeline", "provider"),
     buckets=(10, 30, 60, 120, 180, 300, 600, 900, 1800, 3600),
 )
 # Track call start times for duration calculation
@@ -322,7 +315,15 @@ class Engine:
             default=self.transport_orchestrator.default_profile_name,
         )
         
+        # Provider templates are safe to use for readiness/capability inspection, but
+        # MUST NOT be used for per-call sessions (providers keep call-specific state).
         self.providers: Dict[str, AIProviderInterface] = {}
+        # Factories for creating per-call provider instances (supports concurrent calls).
+        self.provider_factories: Dict[str, Callable[[], AIProviderInterface]] = {}
+        # Active provider instances keyed by call_id (one provider instance per call).
+        self._call_providers: Dict[str, AIProviderInterface] = {}
+        # Single-flight start tasks keyed by call_id (prevents duplicate start_session races).
+        self._provider_start_tasks: Dict[str, asyncio.Task] = {}
         # Track static codec/sample-rate validation issues per provider
         self.provider_alignment_issues: Dict[str, List[str]] = {}
         # Per-call provider streaming queues (AgentAudio -> streaming playback)
@@ -455,6 +456,10 @@ class Engine:
         self.ari_client.on_event("ChannelDestroyed", self._handle_channel_destroyed)
         self.ari_client.on_event("ChannelDtmfReceived", self._handle_dtmf_received)
         self.ari_client.on_event("ChannelVarset", self._handle_channel_varset)
+        # Pipelines (local_hybrid): use Asterisk talk detection to trigger barge-in during
+        # channel playback, where ExternalMedia RTP can be paused/altered.
+        self.ari_client.on_event("ChannelTalkingStarted", self._handle_channel_talking_started)
+        self.ari_client.on_event("ChannelTalkingFinished", self._handle_channel_talking_finished)
 
     async def on_rtp_packet(self, packet: bytes, addr: tuple):
         """Handle incoming RTP packets from the UDP server."""
@@ -594,7 +599,25 @@ class Engine:
                     else:  # ulaw, alaw
                         sample_rate = 8000
                 
-                port_range = self._parse_port_range(getattr(self.config.external_media, "port_range", None), rtp_port)
+                
+                port_range = self._parse_port_range(
+                    getattr(self.config.external_media, "port_range", None),
+                    rtp_port,
+                )
+                allowed_remote_hosts = getattr(self.config.external_media, "allowed_remote_hosts", None)
+                if not allowed_remote_hosts:
+                    try:
+                        ipaddress.ip_address(str(self.config.asterisk.host))
+                        allowed_remote_hosts = [str(self.config.asterisk.host)]
+                        logger.info(
+                            "ExternalMedia RTP allowlist defaulted to Asterisk host IP",
+                            allowed_remote_hosts=allowed_remote_hosts,
+                        )
+                    except Exception:
+                        allowed_remote_hosts = None
+                lock_remote_endpoint = bool(
+                    getattr(self.config.external_media, "lock_remote_endpoint", True)
+                )
                 
                 # Create RTP server with callback to route audio to providers
                 self.rtp_server = RTPServer(
@@ -605,6 +628,8 @@ class Engine:
                     format=format,
                     sample_rate=sample_rate,
                     port_range=port_range,
+                    allowed_remote_hosts=allowed_remote_hosts,
+                    lock_remote_endpoint=lock_remote_endpoint,
                 )
                 
                 # Start RTP server
@@ -621,17 +646,54 @@ class Engine:
                     for prov_name, provider in self.providers.items():
                         if hasattr(provider, 'config'):
                             cfg = provider.config
-                            # Check provider input sample rate
-                            provider_input_rate = getattr(cfg, 'provider_input_sample_rate_hz', None) or getattr(cfg, 'input_sample_rate_hz', None)
-                            if provider_input_rate and provider_input_rate != sample_rate:
+                            # Check provider input alignment.
+                            # ExternalMedia "codec" reflects the RTP wire codec (e.g., ulaw@8k),
+                            # while "sample_rate" here is the engine's internal PCM rate derived from external_media.format.
+                            def _enc_class(enc: Any) -> str:
+                                e = str(enc or "").strip().lower()
+                                if e in ("ulaw", "mulaw", "g711_ulaw", "mu-law"):
+                                    return "g711_ulaw"
+                                if e in ("alaw", "g711_alaw"):
+                                    return "g711_alaw"
+                                if e in ("slin", "slin16", "linear16", "pcm16", "pcm"):
+                                    return "pcm16"
+                                return e
+
+                            transport_codec_class = _enc_class(codec)
+                            provider_in_enc = getattr(cfg, "provider_input_encoding", None) or getattr(cfg, "input_encoding", None)
+                            provider_in_class = _enc_class(provider_in_enc)
+
+                            provider_rate_key = (
+                                "provider_input_sample_rate_hz"
+                                if getattr(cfg, "provider_input_sample_rate_hz", None) is not None
+                                else "input_sample_rate_hz"
+                            )
+                            provider_input_rate = getattr(cfg, provider_rate_key, None)
+                            try:
+                                provider_input_rate = int(provider_input_rate) if provider_input_rate else None
+                            except Exception:
+                                provider_input_rate = None
+
+                            # If the provider expects G.711, 8 kHz is correct regardless of internal PCM rate.
+                            # If the provider expects PCM, align to the internal PCM rate to avoid resampling.
+                            expected_rate = None
+                            if provider_in_class in ("g711_ulaw", "g711_alaw"):
+                                expected_rate = 8000
+                            elif provider_in_class == "pcm16":
+                                expected_rate = int(sample_rate or 0) or None
+
+                            if provider_input_rate and expected_rate and provider_input_rate != expected_rate:
                                 logger.warning(
                                     "⚠️  TRANSPORT/PROVIDER MISMATCH",
                                     provider=prov_name,
                                     transport="ExternalMedia",
-                                    transport_rate=sample_rate,
+                                    transport_codec=codec,
+                                    transport_internal_rate=sample_rate,
+                                    provider_input_encoding=str(provider_in_enc or ""),
                                     provider_rate=provider_input_rate,
+                                    expected_rate=expected_rate,
                                     impact="Extra resampling step - slight quality loss",
-                                    suggestion=f"Consider updating providers.{prov_name}.input_sample_rate_hz to {sample_rate} for optimal quality"
+                                    suggestion=f"Consider updating providers.{prov_name}.{provider_rate_key} to {expected_rate} to avoid resampling",
                                 )
                 except Exception:
                     logger.debug("Provider format validation failed", exc_info=True)
@@ -764,6 +826,11 @@ class Engine:
         # Pipeline adapter suffixes - these are loaded by PipelineOrchestrator, not Engine
         ADAPTER_SUFFIXES = ('_stt', '_llm', '_tts')
         
+        # Provider templates are for readiness/capability checks only.
+        # Per-call provider sessions are created via provider_factories.
+        self.providers.clear()
+        self.provider_factories.clear()
+        
         logger.info("Loading AI providers...", provider_names=list(self.config.providers.keys()))
         for name, provider_config_data in self.config.providers.items():
             # Skip pipeline adapters - they're handled by PipelineOrchestrator
@@ -785,6 +852,8 @@ class Engine:
                     config = LocalProviderConfig(**resolved_config)
                     provider = LocalProvider(config, self.on_provider_event)
                     self.providers[name] = provider
+                    # Per-call factory (supports concurrent calls).
+                    self.provider_factories[name] = lambda cfg=config: LocalProvider(self._clone_config(cfg), self.on_provider_event)
                     logger.info(f"Provider '{name}' loaded successfully.")
 
                     # Provide initial greeting from global LLM config
@@ -793,11 +862,6 @@ class Engine:
                             provider.set_initial_greeting(getattr(self.config.llm, 'initial_greeting', None))
                     except Exception:
                         logger.debug("Failed to set initial greeting on LocalProvider", exc_info=True)
-
-                    # Initialize persistent connection for local provider
-                    if hasattr(provider, 'initialize'):
-                        await provider.initialize()
-                        logger.info(f"Provider '{name}' connection initialized.")
 
                     runtime_issues = self._describe_provider_alignment(name, provider)
                     if runtime_issues:
@@ -813,7 +877,11 @@ class Engine:
                         continue
 
                     provider = DeepgramProvider(deepgram_config, self.config.llm, self.on_provider_event)
+                    # Set session store for turn latency tracking (Milestone 21)
+                    provider.set_session_store(self.session_store)
                     self.providers[name] = provider
+                    # Per-call factory (supports concurrent calls).
+                    self.provider_factories[name] = lambda cfg=deepgram_config: DeepgramProvider(self._clone_config(cfg), self.config.llm, self.on_provider_event)
                     logger.info("Provider 'deepgram' loaded successfully with OpenAI LLM dependency.")
 
                     runtime_issues = self._describe_provider_alignment(name, provider)
@@ -825,11 +893,17 @@ class Engine:
                         continue
 
                     provider = OpenAIRealtimeProvider(
-                        openai_cfg, 
+                        openai_cfg,
                         self.on_provider_event,
                         gating_manager=self.audio_gating_manager
                     )
+                    # Set session store for turn latency tracking (Milestone 21)
+                    provider._session_store = self.session_store
                     self.providers[name] = provider
+                    # Per-call factory (supports concurrent calls).
+                    self.provider_factories[name] = (
+                        lambda cfg=openai_cfg: OpenAIRealtimeProvider(self._clone_config(cfg), self.on_provider_event, gating_manager=self.audio_gating_manager)
+                    )
                     logger.info(
                         "Provider 'openai_realtime' loaded successfully",
                         audio_gating_enabled=self.audio_gating_manager is not None
@@ -857,7 +931,13 @@ class Engine:
                         self.on_provider_event,
                         gating_manager=self.audio_gating_manager
                     )
+                    # Set session store for turn latency tracking (Milestone 21)
+                    provider._session_store = self.session_store
                     self.providers[name] = provider
+                    # Per-call factory (supports concurrent calls).
+                    self.provider_factories[name] = (
+                        lambda cfg=google_cfg: GoogleLiveProvider(self._clone_config(cfg), self.on_provider_event, gating_manager=self.audio_gating_manager)
+                    )
                     logger.info(
                         "Provider 'google_live' loaded successfully",
                         audio_gating_enabled=self.audio_gating_manager is not None
@@ -875,7 +955,13 @@ class Engine:
                         elevenlabs_cfg, 
                         self.on_provider_event,
                     )
+                    # Set session store for turn latency tracking (Milestone 21)
+                    provider._session_store = self.session_store
                     self.providers[name] = provider
+                    # Per-call factory (supports concurrent calls).
+                    self.provider_factories[name] = (
+                        lambda cfg=elevenlabs_cfg: ElevenLabsAgentProvider(self._clone_config(cfg), self.on_provider_event)
+                    )
                     logger.info(
                         "Provider 'elevenlabs_agent' loaded successfully"
                     )
@@ -890,16 +976,16 @@ class Engine:
             except Exception as e:
                 logger.error(f"Failed to load provider '{name}': {e}", exc_info=True)
         
-        # Validate that default provider is available
+        # Validate that default provider is available.
+        # Note: default_provider may also point at a pipeline name for pipeline-first deployments.
         available_providers = list(self.providers.keys())
-        if self.config.default_provider not in available_providers:
-            logger.error(
-                f"Default provider '{self.config.default_provider}' not loaded. "
-                f"Check provider configuration and API keys. Available providers: {available_providers}"
-            )
-        else:
-            logger.info(f"Default provider '{self.config.default_provider}' is available and ready.")
-            
+        default_target = getattr(self.config, "default_provider", None)
+        pipelines_cfg = getattr(self.config, "pipelines", None) or {}
+        available_pipelines = list(pipelines_cfg.keys()) if isinstance(pipelines_cfg, dict) else []
+
+        if default_target in available_providers:
+            logger.info(f"Default provider '{default_target}' is available and ready.")
+
             # Validate provider connectivity (full agent mode)
             for provider_name, provider in self.providers.items():
                 # Check basic readiness - providers must have is_ready() and return True
@@ -931,6 +1017,17 @@ class Engine:
                         error=str(exc),
                         exc_info=True
                     )
+        elif default_target in available_pipelines:
+            logger.info(
+                "Default pipeline is configured",
+                default_pipeline=default_target,
+            )
+        else:
+            logger.error(
+                f"Default provider '{default_target}' not loaded. "
+                f"Check provider configuration and API keys. Available providers: {available_providers}. "
+                f"Available pipelines: {available_pipelines}"
+            )
             
             # Check codec/sample alignment
             for provider_name in self.providers:
@@ -1130,13 +1227,16 @@ class Engine:
                 # Fallback: search all sessions for external_media_id
                 sessions = await self.session_store.get_all_sessions()
                 for s in sessions:
-                    if s.external_media_id == external_media_id:
+                    if s.external_media_id == external_media_id or s.pending_external_media_id == external_media_id:
                         session = s
                         break
             
             if not session:
-                logger.warning("ExternalMedia channel entered Stasis but no caller found", 
-                             external_media_id=external_media_id)
+                logger.warning(
+                    "ExternalMedia channel entered Stasis but no caller found (will retry attach)",
+                    external_media_id=external_media_id,
+                )
+                asyncio.create_task(self._retry_attach_external_media_channel(external_media_id))
                 return
             
             caller_channel_id = session.caller_channel_id
@@ -1155,7 +1255,8 @@ class Engine:
                                caller_channel_id=caller_channel_id)
                     
                     # Start the provider session now that media path is connected
-                    await self._start_provider_session(caller_channel_id)
+                    if not session.provider_session_active:
+                        await self._ensure_provider_session_started(caller_channel_id)
                 else:
                     logger.error("🎯 EXTERNAL MEDIA - Failed to add ExternalMedia channel to bridge", 
                                external_media_id=external_media_id,
@@ -1170,6 +1271,60 @@ class Engine:
                         external_media_id=external_media_id, 
                         error=str(e), 
                         exc_info=True)
+
+    async def _retry_attach_external_media_channel(
+        self,
+        external_media_id: str,
+        *,
+        attempts: int = 25,
+        delay_seconds: float = 0.1,
+    ) -> None:
+        """
+        Best-effort retry for attaching an ExternalMedia channel to its call bridge.
+
+        Mitigates an ARI event-order race where the ExternalMedia channel's StasisStart
+        can arrive before the call session has been updated with external_media_id.
+        """
+        for attempt in range(1, max(1, attempts) + 1):
+            try:
+                session = await self.session_store.get_by_channel_id(external_media_id)
+                if not session:
+                    sessions = await self.session_store.get_all_sessions()
+                    for s in sessions:
+                        if s.external_media_id == external_media_id or s.pending_external_media_id == external_media_id:
+                            session = s
+                            break
+
+                if session and session.bridge_id:
+                    success = await self.ari_client.add_channel_to_bridge(session.bridge_id, external_media_id)
+                    if success:
+                        session.external_media_id = external_media_id
+                        session.pending_external_media_id = None
+                        await self._save_session(session)
+                        logger.info(
+                            "🎯 EXTERNAL MEDIA - ExternalMedia channel attached after retry",
+                            external_media_id=external_media_id,
+                            bridge_id=session.bridge_id,
+                            caller_channel_id=session.caller_channel_id,
+                            attempt=attempt,
+                        )
+                        if not session.provider_session_active:
+                            await self._ensure_provider_session_started(session.caller_channel_id)
+                        return
+            except Exception:
+                logger.debug(
+                    "ExternalMedia attach retry failed",
+                    external_media_id=external_media_id,
+                    attempt=attempt,
+                    exc_info=True,
+                )
+            await asyncio.sleep(delay_seconds)
+
+        logger.error(
+            "🎯 EXTERNAL MEDIA - ExternalMedia attach retry exhausted",
+            external_media_id=external_media_id,
+            attempts=attempts,
+        )
 
     async def _handle_caller_stasis_start_hybrid(self, caller_channel_id: str, channel: dict):
         """Handle caller channel entering Stasis - Hybrid ARI approach."""
@@ -1222,7 +1377,7 @@ class Engine:
                 provider_name=self.config.default_provider,
                 audio_capture_enabled=True,  # FIX #1: Start with capture enabled, only disable when TTS actually starts
                 status="connected",
-                start_time=datetime.now()  # Track call start time for email tools
+                start_time=datetime.now(timezone.utc)  # Track call start time (UTC for consistent storage)
             )
             session.enhanced_vad_enabled = bool(self.vad_manager)
             await self._save_session(session, new=True)
@@ -1386,6 +1541,35 @@ class Engine:
                     logger.info("🎯 EXTERNAL MEDIA - ExternalMedia channel created, session updated", 
                                channel_id=caller_channel_id, 
                                external_media_id=external_media_id)
+
+                    # Attach immediately to avoid reliance on ExternalMedia StasisStart ordering.
+                    if session.bridge_id:
+                        attached = False
+                        for attempt in range(1, 26):
+                            added = await self.ari_client.add_channel_to_bridge(session.bridge_id, external_media_id)
+                            if added:
+                                attached = True
+                                session.pending_external_media_id = None
+                                await self._save_session(session)
+                                logger.info(
+                                    "🎯 EXTERNAL MEDIA - ExternalMedia channel added to bridge (direct attach)",
+                                    external_media_id=external_media_id,
+                                    bridge_id=session.bridge_id,
+                                    caller_channel_id=caller_channel_id,
+                                    attempt=attempt,
+                                )
+                                break
+                            await asyncio.sleep(0.1)
+
+                        if attached and not session.provider_session_active:
+                            await self._ensure_provider_session_started(caller_channel_id)
+                        elif not attached:
+                            logger.error(
+                                "🎯 EXTERNAL MEDIA - Failed to add ExternalMedia channel to bridge (direct attach)",
+                                external_media_id=external_media_id,
+                                bridge_id=session.bridge_id,
+                                caller_channel_id=caller_channel_id,
+                            )
                 else:
                     logger.error("🎯 EXTERNAL MEDIA - Failed to create ExternalMedia channel", channel_id=caller_channel_id)
             else:
@@ -1440,7 +1624,7 @@ class Engine:
                 
                 
                 # Start provider session now that media path is connected
-                await self._start_provider_session(caller_channel_id)
+                await self._ensure_provider_session_started(caller_channel_id)
             else:
                 logger.error("🎯 HYBRID ARI - Failed to add Local channel to bridge", 
                            local_channel_id=local_channel_id,
@@ -1549,7 +1733,7 @@ class Engine:
             self.bridges[audiosocket_channel_id] = bridge_id
 
             if not session.provider_session_active:
-                await self._start_provider_session(caller_channel_id)
+                await self._ensure_provider_session_started(caller_channel_id)
 
             # Start ARI channel recording on the AudioSocket channel (only when diagnostics enabled)
             # Check if diagnostic taps are enabled
@@ -1712,8 +1896,14 @@ class Engine:
             except Exception as e:
                 logger.warning(f"Failed to remove AudioSocket channel: {e}")
         
-        # Step 2: Stop AI provider session
-        provider = self.providers.get(session.provider_name)
+        # Step 2: Stop AI provider session (per-call instance)
+        try:
+            start_task = self._provider_start_tasks.pop(session.call_id, None)
+            if start_task:
+                start_task.cancel()
+        except Exception:
+            pass
+        provider = self._call_providers.pop(session.call_id, None)
         if provider:
             try:
                 # Stop the provider's session for this call
@@ -1941,6 +2131,158 @@ class Engine:
         except Exception as exc:
             logger.error("Error handling ChannelVarset", error=str(exc), exc_info=True)
 
+    async def _enable_pipeline_talk_detect(self, session: CallSession) -> None:
+        """Enable Asterisk talk detection (TALK_DETECT) on the caller channel for pipelines."""
+        try:
+            cfg = getattr(self.config, "barge_in", None)
+            if not cfg or not bool(getattr(cfg, "pipeline_talk_detect_enabled", False)):
+                return
+            call_id = session.call_id
+            if not bool(self._pipeline_forced.get(call_id)):
+                return
+            channel_id = getattr(session, "caller_channel_id", None)
+            if not channel_id:
+                return
+            if not getattr(session, "vad_state", None):
+                session.vad_state = {}
+            td = session.vad_state.setdefault("pipeline_talk_detect", {})
+            if bool(td.get("enabled", False)):
+                return
+            silence_ms = int(getattr(cfg, "pipeline_talk_detect_silence_ms", 1200))
+            talking_thr = int(getattr(cfg, "pipeline_talk_detect_talking_threshold", 128))
+            value = f"{silence_ms},{talking_thr}"
+            ok = await self.ari_client.set_channel_var(channel_id, "TALK_DETECT(set)", value)
+            td.update(
+                {
+                    "enabled": bool(ok),
+                    "channel_id": channel_id,
+                    "set_ts": time.time(),
+                    "silence_ms": silence_ms,
+                    "talking_threshold": talking_thr,
+                }
+            )
+            await self._save_session(session)
+            if ok:
+                logger.info(
+                    "Enabled TALK_DETECT for pipeline",
+                    call_id=call_id,
+                    channel_id=channel_id,
+                    silence_ms=silence_ms,
+                    talking_threshold=talking_thr,
+                )
+            else:
+                logger.warning("Failed to enable TALK_DETECT for pipeline", call_id=call_id, channel_id=channel_id)
+        except Exception:
+            logger.debug("Enable TALK_DETECT failed", call_id=getattr(session, "call_id", None), exc_info=True)
+
+    async def _disable_pipeline_talk_detect(self, session: CallSession) -> None:
+        """Disable Asterisk talk detection (TALK_DETECT) on the caller channel for pipelines."""
+        try:
+            cfg = getattr(self.config, "barge_in", None)
+            if not cfg or not bool(getattr(cfg, "pipeline_talk_detect_enabled", False)):
+                return
+            call_id = session.call_id
+            channel_id = getattr(session, "caller_channel_id", None)
+            if not channel_id:
+                return
+            td_enabled = False
+            if getattr(session, "vad_state", None):
+                td = session.vad_state.get("pipeline_talk_detect", {}) or {}
+                td_enabled = bool(td.get("enabled", False))
+            if not td_enabled:
+                return
+            await self.ari_client.set_channel_var(channel_id, "TALK_DETECT(remove)", "")
+            try:
+                td = session.vad_state.get("pipeline_talk_detect", {}) or {}
+                td["enabled"] = False
+                td["remove_ts"] = time.time()
+                session.vad_state["pipeline_talk_detect"] = td
+                await self._save_session(session)
+            except Exception:
+                pass
+            logger.info("Disabled TALK_DETECT for pipeline", call_id=call_id, channel_id=channel_id)
+        except Exception:
+            logger.debug("Disable TALK_DETECT failed", call_id=getattr(session, "call_id", None), exc_info=True)
+
+    async def _handle_channel_talking_started(self, event: dict) -> None:
+        """Trigger pipeline barge-in when Asterisk detects caller speech during TTS playback."""
+        try:
+            channel = event.get("channel", {}) or {}
+            channel_id = channel.get("id")
+            if not channel_id:
+                return
+
+            session = await self.session_store.get_by_channel_id(channel_id)
+            if not session:
+                return
+            call_id = session.call_id
+
+            if not bool(self._pipeline_forced.get(call_id)):
+                return
+
+            # Only act when local playback/gating is active; otherwise this is just "caller is talking".
+            if bool(getattr(session, "audio_capture_enabled", True)) and not bool(getattr(session, "tts_playing", False)):
+                return
+
+            cfg = getattr(self.config, "barge_in", None)
+            if not cfg or not getattr(cfg, "enabled", True):
+                return
+
+            now = time.time()
+            tts_elapsed_ms = 0
+            try:
+                if getattr(session, "tts_started_ts", 0.0) > 0:
+                    tts_elapsed_ms = int((now - float(session.tts_started_ts)) * 1000)
+            except Exception:
+                tts_elapsed_ms = 0
+
+            initial_protect = int(getattr(cfg, "initial_protection_ms", 200))
+            try:
+                if getattr(session, "conversation_state", None) == "greeting":
+                    greet_ms = int(getattr(cfg, "greeting_protection_ms", 0))
+                    if greet_ms > initial_protect:
+                        initial_protect = greet_ms
+            except Exception:
+                pass
+            if tts_elapsed_ms < initial_protect:
+                return
+
+            cooldown_ms = int(getattr(cfg, "cooldown_ms", 500))
+            last_barge_in_ts = float(getattr(session, "last_barge_in_ts", 0.0) or 0.0)
+            if last_barge_in_ts and (now - last_barge_in_ts) * 1000 < cooldown_ms:
+                return
+
+            # Treat talk detection as sufficient evidence of an active media path for platform flush.
+            try:
+                if not bool(getattr(session, "media_rx_confirmed", False)):
+                    session.media_rx_confirmed = True
+                    session.first_media_rx_ts = now
+                    await self._save_session(session)
+            except Exception:
+                pass
+
+            await self._apply_barge_in_action(call_id, source="talkdetect", reason="ChannelTalkingStarted")
+            logger.info("🎧 BARGE-IN (TalkDetect) triggered", call_id=call_id, channel_id=channel_id)
+        except Exception:
+            logger.debug("ChannelTalkingStarted handler failed", ari_event=event, exc_info=True)
+
+    async def _handle_channel_talking_finished(self, event: dict) -> None:
+        """Informational handler for talk detection end events (pipelines)."""
+        try:
+            channel = event.get("channel", {}) or {}
+            channel_id = channel.get("id")
+            if not channel_id:
+                return
+            session = await self.session_store.get_by_channel_id(channel_id)
+            if not session:
+                return
+            call_id = session.call_id
+            if not bool(self._pipeline_forced.get(call_id)):
+                return
+            logger.debug("TalkDetect finished", call_id=call_id, channel_id=channel_id)
+        except Exception:
+            logger.debug("ChannelTalkingFinished handler failed", ari_event=event, exc_info=True)
+
     async def _cleanup_call(self, channel_or_call_id: str) -> None:
         """Shared cleanup for StasisEnd/ChannelDestroyed paths."""
         try:
@@ -1964,9 +2306,8 @@ class Engine:
                     provider_name = getattr(session, 'provider_name', None) or "unknown"
                     
                     _CALL_DURATION.labels(
-                        call_id=call_id,
                         pipeline=pipeline_name,
-                        provider=provider_name
+                        provider=provider_name,
                     ).observe(duration)
                     
                     # Clean up start time
@@ -2005,10 +2346,15 @@ class Engine:
             except Exception:
                 logger.debug("Background music stop failed during cleanup", call_id=call_id, exc_info=True)
 
-            # Stop the active provider session if one exists.
+            # Stop the active provider session if one exists (per-call instance).
             try:
-                provider_name = session.provider_name
-                provider = self.providers.get(provider_name)
+                start_task = self._provider_start_tasks.pop(call_id, None)
+                if start_task:
+                    start_task.cancel()
+            except Exception:
+                pass
+            try:
+                provider = self._call_providers.pop(call_id, None)
                 if provider and hasattr(provider, "stop_session"):
                     await provider.stop_session()
             except Exception:
@@ -2071,6 +2417,10 @@ class Engine:
                         q.put_nowait(None)
                     except Exception:
                         pass
+                try:
+                    await self._disable_pipeline_talk_detect(session)
+                except Exception:
+                    logger.debug("Pipeline talk detect disable failed", call_id=call_id, exc_info=True)
                 self._pipeline_forced.pop(call_id, None)
             except Exception:
                 logger.debug("Pipeline cleanup failed", call_id=call_id, exc_info=True)
@@ -2184,6 +2534,12 @@ class Engine:
             except Exception as e:
                 logger.warning("Failed to process transcript emails", call_id=call_id, error=str(e), exc_info=True)
 
+            # Persist call to history before removing session (Milestone 21)
+            try:
+                await self._persist_call_history(session, call_id)
+            except Exception as e:
+                logger.debug("Failed to persist call history", call_id=call_id, error=str(e))
+
             # Finally remove the session.
             await self.session_store.remove_call(call_id)
 
@@ -2237,6 +2593,75 @@ class Engine:
                     await self.session_store.upsert_call(sess3)
             except Exception:
                 pass
+
+    async def _persist_call_history(self, session: CallSession, call_id: str) -> None:
+        """Persist call record to history database (Milestone 21)."""
+        try:
+            from src.core.call_history import CallRecord, get_call_history_store
+            
+            store = get_call_history_store()
+            if not store._enabled:
+                return
+            
+            # Calculate end time and duration (use UTC for consistent timezone handling)
+            from datetime import timezone
+            end_time = datetime.now(timezone.utc)
+            start_time = session.start_time
+            if start_time and start_time.tzinfo is None:
+                start_time = start_time.replace(tzinfo=timezone.utc)
+            elif not start_time:
+                start_time = datetime.fromtimestamp(session.created_at, tz=timezone.utc)
+            duration = (end_time - start_time).total_seconds() if start_time else 0.0
+            
+            # Determine outcome
+            outcome = "completed"
+            if session.error_message:
+                outcome = "error"
+            elif session.transfer_destination:
+                outcome = "transferred"
+            elif not session.conversation_history:
+                outcome = "abandoned"
+            
+            # Calculate latency stats
+            turn_latencies = getattr(session, 'turn_latencies_ms', []) or []
+            avg_latency = sum(turn_latencies) / len(turn_latencies) if turn_latencies else 0.0
+            max_latency = max(turn_latencies) if turn_latencies else 0.0
+            
+            # Barge-in count: number of times we applied a barge-in action (user interrupted agent output).
+            # This is the value the UI should display as "Barge-ins".
+            barge_in_count = int(getattr(session, 'barge_in_count', 0) or 0)
+            
+            record = CallRecord(
+                call_id=call_id,
+                caller_number=session.caller_number,
+                caller_name=session.caller_name,
+                start_time=start_time,
+                end_time=end_time,
+                duration_seconds=duration,
+                provider_name=session.provider_name,
+                pipeline_name=session.pipeline_name,
+                pipeline_components=session.pipeline_components or {},
+                context_name=session.context_name,
+                conversation_history=session.conversation_history or [],
+                outcome=outcome,
+                transfer_destination=session.transfer_destination,
+                error_message=session.error_message,
+                tool_calls=getattr(session, 'tool_calls', []) or [],
+                avg_turn_latency_ms=avg_latency,
+                max_turn_latency_ms=max_latency,
+                total_turns=len(turn_latencies),
+                caller_audio_format=session.caller_audio_format,
+                codec_alignment_ok=session.codec_alignment_ok,
+                barge_in_count=barge_in_count,
+            )
+            
+            saved = await store.save(record)
+            if saved:
+                logger.debug("Call history record saved", call_id=call_id, record_id=record.id)
+        except ImportError:
+            logger.debug("Call history module not available", call_id=call_id)
+        except Exception as e:
+            logger.debug("Failed to persist call history", call_id=call_id, error=str(e))
 
     async def _resolve_audio_profile(self, session: CallSession, channel_id: str) -> None:
         """Resolve TransportProfile and provider prefs from profiles/contexts.
@@ -2522,6 +2947,17 @@ class Engine:
                 logger.debug("No session for caller; dropping AudioSocket audio", conn_id=conn_id, caller_channel_id=caller_channel_id)
                 return
 
+            # Media-path confirmation: first inbound audio frame observed.
+            # Used to gate barge-in actions so we don't trigger during setup races.
+            try:
+                if not bool(getattr(session, "media_rx_confirmed", False)):
+                    session.media_rx_confirmed = True
+                    session.first_media_rx_ts = time.time()
+                    await self._save_session(session)
+                    logger.info("Media RX confirmed (AudioSocket)", call_id=caller_channel_id)
+            except Exception:
+                logger.debug("Failed to set media_rx_confirmed (AudioSocket)", call_id=caller_channel_id, exc_info=True)
+
             diagnostics_flags = session.audio_diagnostics
             if "inbound_first_frame" not in diagnostics_flags:
                 fmt, rate = self._infer_transport_from_frame(len(audio_bytes))
@@ -2530,7 +2966,7 @@ class Engine:
 
             # Per-call RX bytes
             try:
-                _STREAM_RX_BYTES.labels(caller_channel_id).inc(len(audio_bytes))
+                _STREAM_RX_BYTES.inc(len(audio_bytes))
             except Exception:
                 pass
 
@@ -2661,8 +3097,103 @@ class Engine:
             if self._pipeline_forced.get(caller_channel_id):
                 # AAVA-28: Check gating to prevent agent from hearing its own TTS output
                 if not session.audio_capture_enabled:
-                    # Drop audio during TTS playback (gating active)
-                    return
+                    # Pipelines: allow barge-in detection during TTS gating, but do not forward audio until triggered.
+                    cfg = getattr(self.config, "barge_in", None)
+                    if not cfg or not getattr(cfg, "enabled", True):
+                        return
+                    # If TALK_DETECT is enabled for this pipeline, prefer it over local energy checks
+                    # to avoid double-triggering and false positives on AudioSocket.
+                    try:
+                        td = (session.vad_state or {}).get("pipeline_talk_detect", {}) or {}
+                        if bool(td.get("enabled", False)):
+                            return
+                    except Exception:
+                        pass
+                    now = time.time()
+                    tts_elapsed_ms = 0
+                    try:
+                        if getattr(session, "tts_started_ts", 0.0) > 0:
+                            tts_elapsed_ms = int((now - float(session.tts_started_ts)) * 1000)
+                    except Exception:
+                        tts_elapsed_ms = 0
+                    initial_protect = int(getattr(cfg, "initial_protection_ms", 200))
+                    try:
+                        if getattr(session, "conversation_state", None) == "greeting":
+                            greet_ms = int(getattr(cfg, "greeting_protection_ms", 0))
+                            if greet_ms > initial_protect:
+                                initial_protect = greet_ms
+                    except Exception:
+                        pass
+                    if tts_elapsed_ms < initial_protect:
+                        return
+                    try:
+                        energy = audioop.rms(pcm_bytes, 2)
+                    except Exception:
+                        energy = 0
+                    threshold = int(getattr(cfg, "pipeline_energy_threshold", 0) or getattr(cfg, "energy_threshold", 1000))
+                    try:
+                        frame_ms = int((len(pcm_bytes) / float(2 * max(1, int(pcm_rate)))) * 1000)
+                        if frame_ms <= 0:
+                            frame_ms = 20
+                    except Exception:
+                        frame_ms = 20
+                    if energy >= threshold:
+                        if int(getattr(session, "barge_in_candidate_ms", 0)) == 0:
+                            try:
+                                session.barge_start_ts = now
+                            except Exception:
+                                session.barge_start_ts = 0.0
+                        session.barge_in_candidate_ms = int(getattr(session, "barge_in_candidate_ms", 0)) + frame_ms
+                    else:
+                        session.barge_in_candidate_ms = 0
+
+                    # Debug monitor (rate-limited) so we can see why pipeline barge-in is/isn't firing.
+                    try:
+                        mon = session.vad_state.setdefault("pipeline_barge_mon", {})
+                        last = float(mon.get("last_ts", 0.0) or 0.0)
+                        if now - last >= 1.0:
+                            mon["last_ts"] = now
+                            logger.debug(
+                                "Pipeline barge-in monitor (AudioSocket)",
+                                call_id=caller_channel_id,
+                                tts_elapsed_ms=tts_elapsed_ms,
+                                energy=energy,
+                                threshold=threshold,
+                                candidate_ms=int(getattr(session, "barge_in_candidate_ms", 0) or 0),
+                                audio_capture_enabled=session.audio_capture_enabled,
+                            )
+                    except Exception:
+                        pass
+
+                    cooldown_ms = int(getattr(cfg, "cooldown_ms", 500))
+                    last_barge_in_ts = float(getattr(session, "last_barge_in_ts", 0.0) or 0.0)
+                    in_cooldown = (now - last_barge_in_ts) * 1000 < cooldown_ms if last_barge_in_ts else False
+                    min_ms = int(getattr(cfg, "pipeline_min_ms", 0) or getattr(cfg, "min_ms", 250))
+                    if not in_cooldown and int(getattr(session, "barge_in_candidate_ms", 0)) >= min_ms:
+                        try:
+                            try:
+                                if float(getattr(session, "barge_start_ts", 0.0) or 0.0) > 0.0:
+                                    reaction_s = max(0.0, now - float(session.barge_start_ts))
+                                    _BARGE_REACTION_SECONDS.observe(reaction_s)
+                                    session.barge_start_ts = 0.0
+                            except Exception:
+                                pass
+                            await self._apply_barge_in_action(
+                                caller_channel_id,
+                                source="local_vad",
+                                reason="pipeline_tts_overlap",
+                            )
+                            session.audio_capture_enabled = True
+                            logger.info("🎧 BARGE-IN (AudioSocket/pipeline) triggered", call_id=caller_channel_id)
+                        except Exception:
+                            logger.error("Error triggering AudioSocket pipeline barge-in", call_id=caller_channel_id, exc_info=True)
+                    else:
+                        if energy > 0 and self.conversation_coordinator:
+                            try:
+                                self.conversation_coordinator.note_audio_during_tts(caller_channel_id)
+                            except Exception:
+                                pass
+                        return
                 
                 q = self._pipeline_queues.get(caller_channel_id)
                 if q:
@@ -2686,16 +3217,18 @@ class Engine:
             # NOTE: Only applies to monolithic providers, not pipelines (handled above)
             try:
                 provider_name = getattr(session, 'provider_name', None) or self.config.default_provider
-                provider = self.providers.get(provider_name)
+                provider = self._call_providers.get(caller_channel_id)
+                provider_caps_source = provider or self.providers.get(provider_name)
             except Exception:
                 provider = None
+                provider_caps_source = None
             continuous_input = False
             try:
                 # Use provider capabilities instead of hardcoded names
                 capabilities = None
-                if provider and hasattr(provider, 'get_capabilities'):
+                if provider_caps_source and hasattr(provider_caps_source, 'get_capabilities'):
                     try:
-                        capabilities = provider.get_capabilities()
+                        capabilities = provider_caps_source.get_capabilities()
                     except Exception:
                         pass
                 
@@ -2711,7 +3244,14 @@ class Engine:
             except Exception:
                 continuous_input = False
             
-            if continuous_input and provider and hasattr(provider, 'send_audio'):
+            if continuous_input:
+                # Ensure a per-call provider instance exists; never send on the global template.
+                if not provider or not hasattr(provider, 'send_audio'):
+                    if caller_channel_id not in self._provider_start_tasks and not getattr(session, "provider_session_active", False):
+                        self._kickoff_provider_session_start(caller_channel_id)
+                    return
+                if not getattr(session, "provider_session_active", False):
+                    return
                 # CRITICAL FIX: Google Live needs gating, but OpenAI/Deepgram don't
                 # - Google Live: Bidirectional audio, NO server-side echo cancellation → NEEDS gating
                 # - OpenAI Realtime: Server-side AEC → gating harmful
@@ -2769,8 +3309,12 @@ class Engine:
                             prov_rate,
                         )
                     except Exception:
-                        logger.debug("Provider input capture failed (unconditional)", call_id=session.call_id, exc_info=True)
-                    
+                        logger.debug(
+                            "Provider input capture failed (unconditional)",
+                            call_id=session.call_id,
+                            exc_info=True,
+                        )
+
                     # CRITICAL: Pass sample_rate and encoding to prevent double resampling
                     # Google Live needs to know audio is already at provider_rate to skip resampling
                     try:
@@ -2796,6 +3340,17 @@ class Engine:
                         error=str(e),
                         exc_info=True,
                     )
+                # Provider-owned mode: local VAD fallback may flush local output (never cancels provider).
+                try:
+                    await self._maybe_provider_barge_in_fallback(
+                        session,
+                        pcm16=pcm_bytes,
+                        pcm_rate_hz=pcm_rate,
+                        audiosocket_wire=audio_bytes,
+                        source="audiosocket",
+                    )
+                except Exception:
+                    logger.debug("Provider barge-in fallback check failed (AudioSocket)", call_id=caller_channel_id, exc_info=True)
                 return
             else:
                 logger.info(
@@ -2851,18 +3406,20 @@ class Engine:
                 # Determine provider and continuous-input capability FIRST to allow forwarding during greeting guard
                 try:
                     provider_name = getattr(session, 'provider_name', None) or self.config.default_provider
-                    provider = self.providers.get(provider_name)
+                    provider = self._call_providers.get(caller_channel_id)
+                    provider_caps_source = provider or self.providers.get(provider_name)
                 except Exception:
                     provider = None
+                    provider_caps_source = None
                 continuous_input = False
                 try:
                     # CRITICAL: Use provider capabilities to determine continuous audio requirement
                     # Providers with native VAD (full agents) need continuous audio stream
                     # Pipeline providers use engine-side VAD (gated audio)
                     capabilities = None
-                    if provider and hasattr(provider, 'get_capabilities'):
+                    if provider_caps_source and hasattr(provider_caps_source, 'get_capabilities'):
                         try:
-                            capabilities = provider.get_capabilities()
+                            capabilities = provider_caps_source.get_capabilities()
                         except Exception:
                             pass
                     
@@ -2879,7 +3436,13 @@ class Engine:
                 except Exception:
                     continuous_input = False
                 # If provider supports continuous input, forward provider-encoded PCM immediately (during TTS guard)
-                if continuous_input and provider and hasattr(provider, 'send_audio'):
+                if continuous_input:
+                    if not provider or not hasattr(provider, 'send_audio'):
+                        if caller_channel_id not in self._provider_start_tasks and not getattr(session, "provider_session_active", False):
+                            self._kickoff_provider_session_start(caller_channel_id)
+                        return
+                    if not getattr(session, "provider_session_active", False):
+                        return
                     try:
                         # Diagnostics on the PCM payload we are about to send
                         self._update_audio_diagnostics(session, "provider_in", pcm_bytes, "slin16", pcm_rate)
@@ -3056,7 +3619,7 @@ class Engine:
                     )
                     # Notify OpenAI to cancel any in-progress response generation
                     try:
-                        provider = self.providers.get('openai_realtime')
+                        provider = self._call_providers.get(caller_channel_id)
                         if provider and hasattr(provider, 'cancel_response'):
                             await provider.cancel_response()
                     except Exception:
@@ -3068,35 +3631,21 @@ class Engine:
                     should_trigger = False
 
                 if should_trigger:
-                    # Trigger barge-in: stop active playback(s), clear gating, and continue forwarding audio
+                    # Trigger barge-in: flush local output and continue forwarding audio to provider
                     try:
-                        playback_ids = await self.session_store.list_playbacks_for_call(caller_channel_id)
-                        for pid in playback_ids:
-                            try:
-                                await self.ari_client.stop_playback(pid)
-                            except Exception:
-                                logger.debug("Playback stop error during barge-in", playback_id=pid, exc_info=True)
-
-                        # Clear all active gating tokens
-                        tokens = list(getattr(session, 'tts_tokens', set()) or [])
-                        for token in tokens:
-                            try:
-                                if self.conversation_coordinator:
-                                    await self.conversation_coordinator.on_tts_end(caller_channel_id, token, reason="barge-in")
-                            except Exception:
-                                logger.debug("Failed to clear gating token during barge-in", token=token, exc_info=True)
-
-                        session.barge_in_candidate_ms = 0
-                        session.last_barge_in_ts = now
                         # Observe reaction latency if we captured onset
                         try:
                             if float(getattr(session, 'barge_start_ts', 0.0) or 0.0) > 0.0:
                                 reaction_s = max(0.0, now - float(session.barge_start_ts))
-                                _BARGE_REACTION_SECONDS.labels(caller_channel_id).observe(reaction_s)
+                                _BARGE_REACTION_SECONDS.observe(reaction_s)
                                 session.barge_start_ts = 0.0
                         except Exception:
                             pass
-                        await self._save_session(session)
+                        await self._apply_barge_in_action(
+                            caller_channel_id,
+                            source="local_vad",
+                            reason="tts_overlap",
+                        )
                         
                         # Notify VAD manager of barge-in event for adaptive learning
                         if self.vad_manager and vad_result:
@@ -3236,13 +3785,10 @@ class Engine:
                     pcm_payload_bytes=len(pcm_payload) if pcm_payload else 0,
                 )
             
-            provider = self.providers.get(provider_name)
+            provider = self._call_providers.get(caller_channel_id)
             if not provider:
-                logger.warning(
-                    "Provider object is None!",
-                    provider_name=provider_name,
-                    call_id=caller_channel_id,
-                )
+                if caller_channel_id not in self._provider_start_tasks and not getattr(session, "provider_session_active", False):
+                    self._kickoff_provider_session_start(caller_channel_id)
                 return
             if not hasattr(provider, 'send_audio'):
                 logger.warning(
@@ -3250,6 +3796,8 @@ class Engine:
                     provider_name=provider_name,
                     call_id=caller_channel_id,
                 )
+                return
+            if not getattr(session, "provider_session_active", False):
                 return
             
             # DEBUG: Provider ready check (OpenAI troubleshooting)
@@ -3396,6 +3944,236 @@ class Engine:
 
         return result
 
+    async def _run_enhanced_vad_pcm16(self, session: CallSession, pcm16_bytes: bytes, src_rate_hz: int) -> Optional[VADResult]:
+        """Run enhanced VAD on known PCM16 input (used by ExternalMedia RTP path)."""
+        if not self.vad_manager or not pcm16_bytes:
+            return None
+
+        try:
+            src_rate = int(src_rate_hz or 0) or 16000
+        except Exception:
+            src_rate = 16000
+
+        try:
+            if src_rate != 8000:
+                state = self._resample_state_vad8k.get(session.call_id)
+                pcm16_8k, state = audioop.ratecv(pcm16_bytes, 2, 1, src_rate, 8000, state)
+                self._resample_state_vad8k[session.call_id] = state
+            else:
+                pcm16_8k = pcm16_bytes
+        except Exception:
+            pcm16_8k = pcm16_bytes
+
+        if not pcm16_8k:
+            return None
+
+        vad_state = session.vad_state.setdefault("enhanced_vad", {})
+        frame_buffer: bytearray = vad_state.setdefault("frame_buffer", bytearray())
+        frame_buffer.extend(pcm16_8k)
+
+        result: Optional[VADResult] = None
+        stats = vad_state.setdefault("stats", {"frames": 0, "speech_frames": 0})
+
+        while len(frame_buffer) >= 320:
+            frame = bytes(frame_buffer[:320])
+            del frame_buffer[:320]
+            result = await self.vad_manager.process_frame(session.call_id, frame)
+            stats["frames"] = stats.get("frames", 0) + 1
+            if result.is_speech:
+                stats["speech_frames"] = stats.get("speech_frames", 0) + 1
+
+        if result:
+            try:
+                total = max(stats.get("frames", 0), 1)
+                speech_ratio = stats.get("speech_frames", 0) / total
+                session.vad_state["enhanced_summary"] = {
+                    "frames": stats.get("frames", 0),
+                    "speech_frames": stats.get("speech_frames", 0),
+                    "speech_ratio": speech_ratio,
+                    "last_confidence": result.confidence,
+                    "last_energy": result.energy_level,
+                }
+            except Exception:
+                pass
+
+        return result
+
+    async def _is_inbound_isolated_for_barge_in_fallback(self, session: CallSession) -> bool:
+        """Best-effort check that inbound audio is caller-isolated (safe to run local VAD for barge-in)."""
+        try:
+            import time
+
+            now = time.time()
+            state = session.vad_state.setdefault("barge_in_fallback", {})
+            last_ts = float(state.get("iso_check_ts", 0.0) or 0.0)
+            # Cache for 200ms to avoid per-frame lock contention in SessionStore.
+            if last_ts and (now - last_ts) < 0.2:
+                return bool(state.get("iso_ok", False))
+
+            playback_ids = []
+            try:
+                playback_ids = await self.session_store.list_playbacks_for_call(session.call_id)
+            except Exception:
+                playback_ids = []
+
+            has_playback = bool(playback_ids)
+            has_bridge_moh = False
+            try:
+                mid = getattr(session, "music_snoop_channel_id", None)
+                has_bridge_moh = bool(mid and str(mid).startswith("bridge-moh:"))
+            except Exception:
+                has_bridge_moh = False
+
+            ok = (not has_playback) and (not has_bridge_moh)
+            state["iso_check_ts"] = now
+            state["iso_ok"] = ok
+            state["iso_has_playback"] = has_playback
+            state["iso_has_bridge_moh"] = has_bridge_moh
+            return ok
+        except Exception:
+            return False
+
+    async def _maybe_provider_barge_in_fallback(
+        self,
+        session: CallSession,
+        *,
+        pcm16: bytes,
+        pcm_rate_hz: int,
+        audiosocket_wire: Optional[bytes],
+        source: str,
+    ) -> None:
+        """Local VAD fallback for provider-owned mode (flush-only, no provider cancellation)."""
+        try:
+            cfg = getattr(self.config, "barge_in", None)
+            if not cfg or not bool(getattr(cfg, "enabled", True)):
+                return
+            if not bool(getattr(cfg, "provider_fallback_enabled", True)):
+                return
+
+            call_id = session.call_id
+            provider_name = getattr(session, "provider_name", None) or getattr(self.config, "default_provider", "")
+            allow = set((getattr(cfg, "provider_fallback_providers", None) or []) or [])
+            if allow and provider_name not in allow:
+                return
+
+            # Only relevant while streaming playback is active (agent is speaking).
+            try:
+                if not self.streaming_playback_manager.is_stream_active(call_id):
+                    return
+            except Exception:
+                return
+
+            # Only when inbound media path is confirmed.
+            if not bool(getattr(session, "media_rx_confirmed", False)):
+                return
+
+            # Only when we can reasonably assume inbound is caller-isolated.
+            if not await self._is_inbound_isolated_for_barge_in_fallback(session):
+                return
+
+            import time
+
+            now = time.time()
+            vad_result: Optional[VADResult] = None
+            if self.vad_manager:
+                try:
+                    if source == "audiosocket":
+                        vad_result = await self._run_enhanced_vad(session, audiosocket_wire or b"")
+                    else:
+                        vad_result = await self._run_enhanced_vad_pcm16(session, pcm16, int(pcm_rate_hz or 0) or 16000)
+                except Exception:
+                    vad_result = None
+
+            # Energy fallback
+            try:
+                energy = int(vad_result.energy_level) if vad_result else int(audioop.rms(pcm16, 2) if pcm16 else 0)
+            except Exception:
+                energy = 0
+
+            frame_ms = 20
+            confidence = 0.0
+            vad_speech = False
+            webrtc_positive = False
+            if vad_result:
+                frame_ms = max(int(getattr(vad_result, "frame_duration_ms", 20) or 20), 1)
+                confidence = float(getattr(vad_result, "confidence", 0.0) or 0.0)
+                vad_speech = bool(getattr(vad_result, "is_speech", False))
+                webrtc_positive = bool(getattr(vad_result, "webrtc_result", False))
+
+            threshold = int(getattr(cfg, "energy_threshold", 1000))
+            criteria_met = 0
+            if vad_speech:
+                criteria_met += 1
+            if energy >= threshold:
+                criteria_met += 1
+            try:
+                if vad_result and confidence >= float(getattr(self.vad_manager, "confidence_threshold", 0.6)):
+                    criteria_met += 1
+            except Exception:
+                pass
+            if webrtc_positive:
+                criteria_met += 1
+
+            # In provider-fallback mode, require energy above threshold to avoid false positives on near-silence
+            # (webrtc-vad can occasionally fire "speech" on low-energy telephony noise).
+            if energy < threshold:
+                session.barge_in_candidate_ms = 0
+                return
+
+            if criteria_met >= (2 if vad_result else 1):
+                if int(getattr(session, "barge_in_candidate_ms", 0) or 0) == 0:
+                    session.barge_start_ts = now
+                session.barge_in_candidate_ms = int(getattr(session, "barge_in_candidate_ms", 0) or 0) + frame_ms
+            else:
+                session.barge_in_candidate_ms = 0
+
+            # If a barge-in already happened (output suppression active), keep suppression alive while caller speaks.
+            try:
+                sup = session.vad_state.get("output_suppression") or {}
+                until_ts = float(sup.get("until_ts", 0.0) or 0.0)
+                # Only extend on real speech energy (avoid prolonging suppression on silence).
+                if until_ts > now and energy >= threshold:
+                    extend_ms = int(getattr(cfg, "provider_output_suppress_extend_ms", 600))
+                    sup["until_ts"] = max(until_ts, now + (extend_ms / 1000.0))
+                    sup["active"] = True
+                    session.vad_state["output_suppression"] = sup
+            except Exception:
+                pass
+
+            cooldown_ms = int(getattr(cfg, "cooldown_ms", 500))
+            last_barge_in_ts = float(getattr(session, "last_barge_in_ts", 0.0) or 0.0)
+            in_cooldown = (now - last_barge_in_ts) * 1000 < cooldown_ms if last_barge_in_ts else False
+
+            min_ms = int(getattr(cfg, "min_ms", 250))
+            should_trigger = (not in_cooldown) and (int(getattr(session, "barge_in_candidate_ms", 0) or 0) >= min_ms)
+            if not should_trigger:
+                return
+
+            try:
+                if float(getattr(session, "barge_start_ts", 0.0) or 0.0) > 0.0:
+                    reaction_s = max(0.0, now - float(session.barge_start_ts))
+                    _BARGE_REACTION_SECONDS.observe(reaction_s)
+                    session.barge_start_ts = 0.0
+            except Exception:
+                pass
+
+            await self._apply_barge_in_action(
+                call_id,
+                source="local_vad_fallback",
+                reason=f"{provider_name}:{source}",
+            )
+            logger.info(
+                "🎧 BARGE-IN (provider fallback) triggered",
+                call_id=call_id,
+                provider=provider_name,
+                source=source,
+                energy=energy,
+                criteria_met=criteria_met,
+                confidence=round(confidence, 3),
+            )
+        except Exception:
+            logger.debug("Provider barge-in fallback failed", call_id=getattr(session, "call_id", None), exc_info=True)
+
     def _should_use_vad_fallback(self, session: CallSession) -> bool:
         """Determine if we should use fallback audio forwarding when VAD doesn't detect speech."""
         try:
@@ -3455,36 +4233,132 @@ class Engine:
             return bytes([0xFF]) * length  # μ-law silence
         return b"\x00" * length  # PCM16 silence (zeroed samples)
 
+    async def _apply_barge_in_action(self, call_id: str, *, source: str, reason: str) -> None:
+        """Apply platform-owned barge-in actions (flush local output only).
+
+        Contract (Option 2):
+        - Stop/flush local playback immediately (stream + ARI playback).
+        - Do NOT stop provider sessions or pause inbound audio to providers.
+        - Gate on first inbound audio frame so we don't trigger during setup.
+        """
+        try:
+            session = await self.session_store.get_by_call_id(call_id)
+            if not session:
+                return
+
+            if not bool(getattr(session, "media_rx_confirmed", False)):
+                logger.debug(
+                    "Barge-in ignored (media not confirmed)",
+                    call_id=call_id,
+                    source=source,
+                    reason=reason,
+                )
+                return
+
+            # Stop/flush streaming playback first (prevents tail audio).
+            try:
+                await self.streaming_playback_manager.stop_streaming_playback(call_id)
+            except Exception:
+                logger.debug("Streaming playback stop failed during barge-in", call_id=call_id, exc_info=True)
+            # Ensure subsequent provider audio can restart playback cleanly.
+            # If we keep the old queue, on_provider_event will continue enqueueing but never restart streaming.
+            try:
+                self._provider_stream_queues.pop(call_id, None)
+                self._provider_stream_formats.pop(call_id, None)
+                self._provider_coalesce_buf.pop(call_id, None)
+            except Exception:
+                logger.debug("Failed to clear provider stream buffers during barge-in", call_id=call_id, exc_info=True)
+
+            # Stop any active ARI playbacks (file playback and edge cases).
+            try:
+                playback_ids = await self.session_store.list_playbacks_for_call(call_id)
+                for pid in playback_ids:
+                    try:
+                        await self.ari_client.stop_playback(pid)
+                    except Exception:
+                        logger.debug("Playback stop error during barge-in", playback_id=pid, exc_info=True)
+            except Exception:
+                logger.debug("Failed to enumerate playbacks during barge-in", call_id=call_id, exc_info=True)
+
+            # Clear any platform gating tokens (pipelines/file playback only).
+            try:
+                tokens = list(getattr(session, "tts_tokens", set()) or [])
+                for token in tokens:
+                    try:
+                        if self.conversation_coordinator:
+                            await self.conversation_coordinator.on_tts_end(call_id, token, reason="barge-in")
+                        else:
+                            await self.session_store.clear_gating_token(call_id, token)
+                    except Exception:
+                        logger.debug("Failed to clear gating token during barge-in", token=token, exc_info=True)
+            except Exception:
+                logger.debug("Failed to clear gating tokens during barge-in", call_id=call_id, exc_info=True)
+
+            # Reset candidate window and record observability.
+            try:
+                import time
+                now = time.time()
+                session.barge_in_candidate_ms = 0
+                session.last_barge_in_ts = now
+                session.barge_in_count = int(getattr(session, "barge_in_count", 0) or 0) + 1
+                session.audio_diagnostics["barge_in_last_source"] = source
+                session.audio_diagnostics["barge_in_last_reason"] = reason
+                session.audio_diagnostics["barge_in_last_ts"] = float(session.last_barge_in_ts)
+
+                # Provider-owned mode: suppress outbound provider audio briefly so flush isn't immediately undone
+                # by continued provider streaming of the previous sentence.
+                try:
+                    cfg = getattr(self.config, "barge_in", None)
+                    suppress_ms = int(getattr(cfg, "provider_output_suppress_ms", 0)) if cfg else 0
+                    if suppress_ms > 0:
+                        sup = session.vad_state.setdefault("output_suppression", {})
+                        prev_until = float(sup.get("until_ts", 0.0) or 0.0)
+                        until_ts = max(prev_until, now + (suppress_ms / 1000.0))
+                        sup["until_ts"] = until_ts
+                        sup["active"] = True
+                        sup["source"] = source
+                        sup["reason"] = reason
+                        sup["set_ts"] = now
+                except Exception:
+                    logger.debug("Failed to set output suppression during barge-in", call_id=call_id, exc_info=True)
+                await self._save_session(session)
+            except Exception:
+                logger.debug("Failed to record barge-in state", call_id=call_id, exc_info=True)
+
+            logger.info("🎧 BARGE-IN action applied", call_id=call_id, source=source, reason=reason)
+        except Exception:
+            logger.error("Barge-in action failed", call_id=call_id, source=source, reason=reason, exc_info=True)
+
     async def _export_config_metrics(self, call_id: str) -> None:
-        """Expose configured knobs as Prometheus gauges for this call."""
+        """Expose configured knobs as Prometheus gauges (aggregate, no per-call labels)."""
         try:
             b = getattr(self.config, 'barge_in', None)
             if b:
-                _CFG_BARGE_MS.labels(call_id, "initial_protection_ms").set(int(getattr(b, 'initial_protection_ms', 0)))
-                _CFG_BARGE_MS.labels(call_id, "min_ms").set(int(getattr(b, 'min_ms', 0)))
-                _CFG_BARGE_MS.labels(call_id, "post_tts_end_protection_ms").set(int(getattr(b, 'post_tts_end_protection_ms', 0)))
-                _CFG_BARGE_MS.labels(call_id, "greeting_protection_ms").set(int(getattr(b, 'greeting_protection_ms', 0)))
-                _CFG_BARGE_THRESHOLD.labels(call_id).set(int(getattr(b, 'energy_threshold', 0)))
+                _CFG_BARGE_MS.labels("initial_protection_ms").set(int(getattr(b, 'initial_protection_ms', 0)))
+                _CFG_BARGE_MS.labels("min_ms").set(int(getattr(b, 'min_ms', 0)))
+                _CFG_BARGE_MS.labels("post_tts_end_protection_ms").set(int(getattr(b, 'post_tts_end_protection_ms', 0)))
+                _CFG_BARGE_MS.labels("greeting_protection_ms").set(int(getattr(b, 'greeting_protection_ms', 0)))
+                _CFG_BARGE_THRESHOLD.set(int(getattr(b, 'energy_threshold', 0)))
         except Exception:
             pass
         try:
             s = getattr(self.config, 'streaming', None)
             if s:
-                _CFG_STREAM_MS.labels(call_id, "min_start_ms").set(int(getattr(s, 'min_start_ms', 0)))
-                _CFG_STREAM_MS.labels(call_id, "greeting_min_start_ms").set(int(getattr(s, 'greeting_min_start_ms', 0)))
-                _CFG_STREAM_MS.labels(call_id, "low_watermark_ms").set(int(getattr(s, 'low_watermark_ms', 0)))
-                _CFG_STREAM_MS.labels(call_id, "jitter_buffer_ms").set(int(getattr(s, 'jitter_buffer_ms', 0)))
-                _CFG_STREAM_MS.labels(call_id, "fallback_timeout_ms").set(int(getattr(s, 'fallback_timeout_ms', 0)))
+                _CFG_STREAM_MS.labels("min_start_ms").set(int(getattr(s, 'min_start_ms', 0)))
+                _CFG_STREAM_MS.labels("greeting_min_start_ms").set(int(getattr(s, 'greeting_min_start_ms', 0)))
+                _CFG_STREAM_MS.labels("low_watermark_ms").set(int(getattr(s, 'low_watermark_ms', 0)))
+                _CFG_STREAM_MS.labels("jitter_buffer_ms").set(int(getattr(s, 'jitter_buffer_ms', 0)))
+                _CFG_STREAM_MS.labels("fallback_timeout_ms").set(int(getattr(s, 'fallback_timeout_ms', 0)))
         except Exception:
             pass
         try:
             pblock = (getattr(self.config, 'providers', {}) or {}).get('openai_realtime', {})
             td = (pblock or {}).get('turn_detection') or {}
             if td:
-                _CFG_TD_MS.labels(call_id, "silence_duration_ms").set(int(td.get('silence_duration_ms', 0)))
-                _CFG_TD_MS.labels(call_id, "prefix_padding_ms").set(int(td.get('prefix_padding_ms', 0)))
+                _CFG_TD_MS.labels("silence_duration_ms").set(int(td.get('silence_duration_ms', 0)))
+                _CFG_TD_MS.labels("prefix_padding_ms").set(int(td.get('prefix_padding_ms', 0)))
                 try:
-                    _CFG_TD_THRESHOLD.labels(call_id).set(float(td.get('threshold', 0.0)))
+                    _CFG_TD_THRESHOLD.set(float(td.get('threshold', 0.0)))
                 except Exception:
                     pass
         except Exception:
@@ -3524,57 +4398,146 @@ class Engine:
         except Exception as exc:
             logger.error("Error handling AudioSocket DTMF", conn_id=conn_id, error=str(exc), exc_info=True)
 
-    async def _on_rtp_audio(self, ssrc: int, pcm_16k: bytes) -> None:
-        """Route inbound ExternalMedia RTP audio (PCM16 @ 16 kHz) to the active provider.
+    async def _on_rtp_audio(self, caller_channel_id: str, ssrc: int, pcm_16k: bytes) -> None:
+        """Route inbound ExternalMedia RTP audio to the active provider.
 
-        This mirrors the gating/barge-in logic of `_audiosocket_handle_audio` and
-        establishes an SSRC→call_id mapping the first time we see a new SSRC.
+        IMPORTANT: `caller_channel_id` must be provided by RTPServer (per-session context).
+        Do not infer SSRC→call mappings in the engine; that is not concurrency-safe.
         """
         try:
-            # Resolve call_id from SSRC mapping or infer from sessions awaiting SSRC
-            caller_channel_id = self.ssrc_to_caller.get(ssrc)
-            if not caller_channel_id:
-                # Choose the most recent session that has an ExternalMedia channel and no SSRC yet
-                sessions = await self.session_store.get_all_sessions()
-                candidate = None
-                for s in sessions:
-                    try:
-                        if getattr(s, 'external_media_id', None) and not getattr(s, 'ssrc', None):
-                            if candidate is None or float(getattr(s, 'created_at', 0.0)) > float(getattr(candidate, 'created_at', 0.0)):
-                                candidate = s
-                    except Exception:
-                        continue
-                if candidate:
-                    caller_channel_id = candidate.caller_channel_id
-                    self.ssrc_to_caller[ssrc] = caller_channel_id
-                    try:
-                        candidate.ssrc = ssrc
-                        await self._save_session(candidate)
-                    except Exception:
-                        pass
-                    try:
-                        if getattr(self, 'rtp_server', None) and hasattr(self.rtp_server, 'map_ssrc_to_call_id'):
-                            self.rtp_server.map_ssrc_to_call_id(ssrc, caller_channel_id)
-                        
-                    except Exception:
-                        pass
-
-            if not caller_channel_id:
-                logger.debug("RTP audio received for unknown SSRC", ssrc=ssrc, bytes=len(pcm_16k))
-                return
-
             session = await self.session_store.get_by_call_id(caller_channel_id)
             if not session:
-                logger.debug("No session for caller; dropping RTP audio", ssrc=ssrc, caller_channel_id=caller_channel_id)
+                logger.debug(
+                    "No session for call; dropping RTP audio",
+                    caller_channel_id=caller_channel_id,
+                    ssrc=ssrc,
+                    bytes=len(pcm_16k),
+                )
                 return
+
+            # Record SSRC on the session for diagnostics (RTPServer maintains SSRC mapping internally).
+            try:
+                if not getattr(session, "ssrc", None):
+                    session.ssrc = ssrc
+                    await self._save_session(session)
+            except Exception:
+                pass
+
+            # Media-path confirmation: first inbound audio frame observed.
+            # Used to gate barge-in actions so we don't trigger during setup races.
+            try:
+                if not bool(getattr(session, "media_rx_confirmed", False)):
+                    session.media_rx_confirmed = True
+                    session.first_media_rx_ts = time.time()
+                    await self._save_session(session)
+                    logger.info("Media RX confirmed (ExternalMedia)", call_id=caller_channel_id)
+            except Exception:
+                logger.debug("Failed to set media_rx_confirmed (ExternalMedia)", call_id=caller_channel_id, exc_info=True)
 
             # Check for pipeline mode FIRST (before continuous_input provider routing)
             # Pipeline adapters need audio in their queue, not sent to monolithic providers
-            if self._pipeline_forced.get(caller_channel_id):
+            pipeline_forced = self._pipeline_forced.get(caller_channel_id)
+            logger.debug(
+                "RTP audio routing check",
+                call_id=caller_channel_id,
+                pipeline_forced=pipeline_forced,
+                audio_capture_enabled=session.audio_capture_enabled,
+                has_queue=caller_channel_id in self._pipeline_queues,
+            )
+            if pipeline_forced:
                 # AAVA-28: Check gating to prevent agent from hearing its own TTS output
                 if not session.audio_capture_enabled:
-                    # Drop audio during TTS playback (gating active)
-                    return
+                    # Pipelines: allow barge-in detection during TTS gating, but do not forward audio until triggered.
+                    cfg = getattr(self.config, "barge_in", None)
+                    if not cfg or not getattr(cfg, "enabled", True):
+                        return
+                    # If TALK_DETECT is enabled for this pipeline, prefer it over local energy checks.
+                    try:
+                        td = (session.vad_state or {}).get("pipeline_talk_detect", {}) or {}
+                        if bool(td.get("enabled", False)):
+                            return
+                    except Exception:
+                        pass
+                    now = time.time()
+                    tts_elapsed_ms = 0
+                    try:
+                        if getattr(session, "tts_started_ts", 0.0) > 0:
+                            tts_elapsed_ms = int((now - float(session.tts_started_ts)) * 1000)
+                    except Exception:
+                        tts_elapsed_ms = 0
+                    initial_protect = int(getattr(cfg, "initial_protection_ms", 200))
+                    try:
+                        if getattr(session, "conversation_state", None) == "greeting":
+                            greet_ms = int(getattr(cfg, "greeting_protection_ms", 0))
+                            if greet_ms > initial_protect:
+                                initial_protect = greet_ms
+                    except Exception:
+                        pass
+                    if tts_elapsed_ms < initial_protect:
+                        return
+                    try:
+                        energy = audioop.rms(pcm_16k, 2)
+                    except Exception:
+                        energy = 0
+                    threshold = int(getattr(cfg, "pipeline_energy_threshold", 0) or getattr(cfg, "energy_threshold", 1000))
+                    frame_ms = 20
+                    if energy >= threshold:
+                        if int(getattr(session, "barge_in_candidate_ms", 0)) == 0:
+                            try:
+                                session.barge_start_ts = now
+                            except Exception:
+                                session.barge_start_ts = 0.0
+                        session.barge_in_candidate_ms = int(getattr(session, "barge_in_candidate_ms", 0)) + frame_ms
+                    else:
+                        session.barge_in_candidate_ms = 0
+
+                    # Debug monitor (rate-limited) so we can see why pipeline barge-in is/isn't firing.
+                    try:
+                        mon = session.vad_state.setdefault("pipeline_barge_mon", {})
+                        last = float(mon.get("last_ts", 0.0) or 0.0)
+                        if now - last >= 1.0:
+                            mon["last_ts"] = now
+                            logger.debug(
+                                "Pipeline barge-in monitor (RTP)",
+                                call_id=caller_channel_id,
+                                tts_elapsed_ms=tts_elapsed_ms,
+                                energy=energy,
+                                threshold=threshold,
+                                candidate_ms=int(getattr(session, "barge_in_candidate_ms", 0) or 0),
+                                audio_capture_enabled=session.audio_capture_enabled,
+                            )
+                    except Exception:
+                        pass
+
+                    cooldown_ms = int(getattr(cfg, "cooldown_ms", 500))
+                    last_barge_in_ts = float(getattr(session, "last_barge_in_ts", 0.0) or 0.0)
+                    in_cooldown = (now - last_barge_in_ts) * 1000 < cooldown_ms if last_barge_in_ts else False
+                    min_ms = int(getattr(cfg, "pipeline_min_ms", 0) or getattr(cfg, "min_ms", 250))
+                    if not in_cooldown and int(getattr(session, "barge_in_candidate_ms", 0)) >= min_ms:
+                        try:
+                            try:
+                                if float(getattr(session, "barge_start_ts", 0.0) or 0.0) > 0.0:
+                                    reaction_s = max(0.0, now - float(session.barge_start_ts))
+                                    _BARGE_REACTION_SECONDS.observe(reaction_s)
+                                    session.barge_start_ts = 0.0
+                            except Exception:
+                                pass
+                            await self._apply_barge_in_action(
+                                caller_channel_id,
+                                source="local_vad",
+                                reason="pipeline_tts_overlap",
+                            )
+                            session.audio_capture_enabled = True
+                            logger.info("🎧 BARGE-IN (RTP/pipeline) triggered", call_id=caller_channel_id)
+                        except Exception:
+                            logger.error("Error triggering RTP pipeline barge-in", call_id=caller_channel_id, exc_info=True)
+                    else:
+                        if energy > 0 and self.conversation_coordinator:
+                            try:
+                                self.conversation_coordinator.note_audio_during_tts(caller_channel_id)
+                            except Exception:
+                                pass
+                        return
                 
                 q = self._pipeline_queues.get(caller_channel_id)
                 if q:
@@ -3590,20 +4553,21 @@ class Engine:
             # Check if provider requires continuous audio input using capabilities
             # Full agents with native VAD need uninterrupted audio flow for turn-taking
             provider_name = getattr(session, 'provider_name', None) or self.config.default_provider
-            provider = self.providers.get(provider_name)
+            provider = self._call_providers.get(caller_channel_id)
+            provider_caps_source = provider or self.providers.get(provider_name)
             continuous_input = False
             try:
                 capabilities = None
-                if provider and hasattr(provider, 'get_capabilities'):
+                if provider_caps_source and hasattr(provider_caps_source, 'get_capabilities'):
                     try:
-                        capabilities = provider.get_capabilities()
+                        capabilities = provider_caps_source.get_capabilities()
                     except Exception:
                         pass
                 
                 if capabilities and capabilities.requires_continuous_audio:
                     continuous_input = True
                 else:
-                    pcfg = getattr(provider, 'config', None)
+                    pcfg = getattr(provider_caps_source, 'config', None)
                     if isinstance(pcfg, dict):
                         continuous_input = bool(pcfg.get('continuous_input', False))
                     else:
@@ -3616,9 +4580,13 @@ class Engine:
             # to prevent the provider from hearing its own audio as "user speech"
             if continuous_input:
                 if not provider or not hasattr(provider, 'send_audio'):
-                    logger.debug("Provider unavailable for continuous RTP audio", provider=provider_name)
+                    if caller_channel_id not in self._provider_start_tasks and not getattr(session, "provider_session_active", False):
+                        self._kickoff_provider_session_start(caller_channel_id)
                     return
                 
+                # Preserve original inbound audio for local barge-in fallback checks (never run VAD on silence-substituted frames).
+                pcm_for_barge_in = pcm_16k
+
                 # CRITICAL: Check if audio capture is disabled (TTS playing)
                 # For Google Live: Send silence frames to maintain stream continuity (like AudioSocket)
                 # For OpenAI/Deepgram: Can drop audio (they handle gaps gracefully)
@@ -3640,6 +4608,8 @@ class Engine:
                         call_id=caller_channel_id,
                         provider=provider_name,
                     )
+                    return
+                if not getattr(session, "provider_session_active", False):
                     return
                 # Encode audio for provider (same as AudioSocket path)
                 try:
@@ -3668,6 +4638,18 @@ class Engine:
                     await provider.send_audio(prov_payload, sample_rate=prov_rate, encoding=prov_enc)
                 except Exception as exc:
                     logger.debug("Continuous-input RTP forward error", call_id=caller_channel_id, error=str(exc))
+
+                # Provider-owned mode: local VAD fallback may flush local output (never cancels provider).
+                try:
+                    await self._maybe_provider_barge_in_fallback(
+                        session,
+                        pcm16=pcm_for_barge_in,
+                        pcm_rate_hz=int(getattr(self.rtp_server, 'sample_rate', 16000) if self.rtp_server else 16000),
+                        audiosocket_wire=None,
+                        source="externalmedia",
+                    )
+                except Exception:
+                    logger.debug("Provider barge-in fallback check failed (ExternalMedia/continuous)", call_id=caller_channel_id, exc_info=True)
                 return
 
             # Below: standard gating/barge-in logic for hybrid (P2) providers only
@@ -3746,31 +4728,18 @@ class Engine:
                 min_ms = int(getattr(cfg, 'min_ms', 250))
                 if not in_cooldown and session.barge_in_candidate_ms >= min_ms:
                     try:
-                        playback_ids = await self.session_store.list_playbacks_for_call(caller_channel_id)
-                        for pid in playback_ids:
-                            try:
-                                await self.ari_client.stop_playback(pid)
-                            except Exception:
-                                logger.debug("Playback stop error during RTP barge-in", playback_id=pid, exc_info=True)
-
-                        tokens = list(getattr(session, 'tts_tokens', set()) or [])
-                        for token in tokens:
-                            try:
-                                if self.conversation_coordinator:
-                                    await self.conversation_coordinator.on_tts_end(caller_channel_id, token, reason="barge-in")
-                            except Exception:
-                                logger.debug("Failed to clear gating token during RTP barge-in", token=token, exc_info=True)
-
-                        session.barge_in_candidate_ms = 0
-                        session.last_barge_in_ts = now
                         try:
                             if float(getattr(session, 'barge_start_ts', 0.0) or 0.0) > 0.0:
                                 reaction_s = max(0.0, now - float(session.barge_start_ts))
-                                _BARGE_REACTION_SECONDS.labels(caller_channel_id).observe(reaction_s)
+                                _BARGE_REACTION_SECONDS.observe(reaction_s)
                                 session.barge_start_ts = 0.0
                         except Exception:
                             pass
-                        await self._save_session(session)
+                        await self._apply_barge_in_action(
+                            caller_channel_id,
+                            source="local_vad",
+                            reason="tts_overlap",
+                        )
                         logger.info("🎧 BARGE-IN (RTP) triggered", call_id=caller_channel_id)
                     except Exception:
                         logger.error("Error triggering RTP barge-in", call_id=caller_channel_id, exc_info=True)
@@ -3802,13 +4771,28 @@ class Engine:
                         return
 
             provider_name = session.provider_name or self.config.default_provider
-            provider = self.providers.get(provider_name)
+            provider = self._call_providers.get(caller_channel_id)
             if not provider or not hasattr(provider, 'send_audio'):
+                if not provider and caller_channel_id not in self._provider_start_tasks and not getattr(session, "provider_session_active", False):
+                    self._kickoff_provider_session_start(caller_channel_id)
                 logger.debug("Provider unavailable for RTP audio", provider=provider_name)
+                return
+            if not getattr(session, "provider_session_active", False):
                 return
 
             # Forward PCM16 16k frames to provider
             await provider.send_audio(pcm_16k)
+            # Provider-owned mode: local VAD fallback may flush local output (never cancels provider).
+            try:
+                await self._maybe_provider_barge_in_fallback(
+                    session,
+                    pcm16=pcm_16k,
+                    pcm_rate_hz=16000,
+                    audiosocket_wire=None,
+                    source="externalmedia",
+                )
+            except Exception:
+                logger.debug("Provider barge-in fallback check failed (ExternalMedia)", call_id=caller_channel_id, exc_info=True)
         except Exception as exc:
             logger.error("Error handling RTP audio", ssrc=ssrc, error=str(exc), exc_info=True)
 
@@ -4177,6 +5161,51 @@ class Engine:
                 logger.warning("Provider event for unknown call", event_type=etype, call_id=call_id)
                 return
 
+            # Option 2: Provider-owned VAD/barge-in. Provider signals interruption; platform flushes local output only.
+            # - OpenAI Realtime emits `ProviderBargeIn` on `input_audio_buffer.speech_started` cancellation.
+            # - ElevenLabs emits `interruption` when it detects barge-in.
+            if etype in ("ProviderBargeIn", "interruption"):
+                try:
+                    # Guard against provider VAD noise when we're not actually outputting audio.
+                    # This matters for OpenAI AudioSocket: `input_audio_buffer.speech_started` can occur
+                    # even when there is no cancellable response, while local output may or may not be active.
+                    try:
+                        cfg = getattr(self.config, "barge_in", None)
+                        cooldown_ms = int(getattr(cfg, "cooldown_ms", 500)) if cfg else 500
+                        import time
+                        now = time.time()
+                        last_barge_in_ts = float(getattr(session, "last_barge_in_ts", 0.0) or 0.0)
+                        if last_barge_in_ts and (now - last_barge_in_ts) * 1000 < cooldown_ms:
+                            return
+                    except Exception:
+                        pass
+
+                    output_active = False
+                    try:
+                        output_active = bool(self.streaming_playback_manager.is_stream_active(call_id))
+                    except Exception:
+                        output_active = False
+                    if not output_active:
+                        try:
+                            playback_ids = await self.session_store.list_playbacks_for_call(call_id)
+                            output_active = bool(playback_ids)
+                        except Exception:
+                            output_active = False
+                    if not output_active and not bool(getattr(session, "tts_playing", False)):
+                        # No local output to flush; ignore noisy provider barge-in signals.
+                        return
+
+                    provider_evt = event.get("event") or event.get("reason") or ""
+                    reason = provider_evt if etype == "ProviderBargeIn" else (provider_evt or etype)
+                    await self._apply_barge_in_action(
+                        call_id,
+                        source="provider_event",
+                        reason=str(reason or etype),
+                    )
+                except Exception:
+                    logger.error("Failed to apply provider barge-in", call_id=call_id, event_type=etype, exc_info=True)
+                return
+
             # Provider requests early TTS gating clear (e.g., OpenAI greeting complete)
             if etype == "ClearTtsGating":
                 try:
@@ -4249,6 +5278,54 @@ class Engine:
                 chunk: bytes = event.get("data") or b""
                 if not chunk:
                     return
+                # If barge-in fired, suppress provider audio locally for a short window so streaming
+                # doesn't immediately restart with the remainder of the previous sentence.
+                try:
+                    import time
+
+                    now = time.time()
+                    sup = session.vad_state.get("output_suppression") or {}
+                    until_ts = float(sup.get("until_ts", 0.0) or 0.0)
+                    if until_ts and now < until_ts:
+                        # Keep suppression alive while chunks keep arriving so we don't unmute mid-tail.
+                        try:
+                            cfg = getattr(self.config, "barge_in", None)
+                            extend_ms = int(getattr(cfg, "provider_output_suppress_chunk_extend_ms", 0)) if cfg else 0
+                            if extend_ms > 0:
+                                sup["until_ts"] = max(until_ts, now + (extend_ms / 1000.0))
+                                until_ts = float(sup.get("until_ts", until_ts) or until_ts)
+                        except Exception:
+                            pass
+                        sup["active"] = True
+                        sup["dropped_chunks"] = int(sup.get("dropped_chunks", 0) or 0) + 1
+                        sup["dropped_bytes"] = int(sup.get("dropped_bytes", 0) or 0) + len(chunk)
+                        last_log = float(sup.get("last_log_ts", 0.0) or 0.0)
+                        if (now - last_log) > 0.75:
+                            remaining_ms = int(max(0.0, (until_ts - now)) * 1000)
+                            logger.info(
+                                "🔇 OUTPUT SUPPRESSED - Dropping provider audio",
+                                call_id=call_id,
+                                provider=getattr(session, "provider_name", None),
+                                remaining_ms=remaining_ms,
+                                dropped_chunks=sup.get("dropped_chunks"),
+                                dropped_bytes=sup.get("dropped_bytes"),
+                            )
+                            sup["last_log_ts"] = now
+                        session.vad_state["output_suppression"] = sup
+                        return
+                    if until_ts and now >= until_ts and bool(sup.get("active", False)):
+                        sup["active"] = False
+                        sup["until_ts"] = 0.0
+                        session.vad_state["output_suppression"] = sup
+                        logger.info(
+                            "🔈 OUTPUT SUPPRESSION ended",
+                            call_id=call_id,
+                            provider=getattr(session, "provider_name", None),
+                            dropped_chunks=sup.get("dropped_chunks"),
+                            dropped_bytes=sup.get("dropped_bytes"),
+                        )
+                except Exception:
+                    logger.debug("Output suppression check failed", call_id=call_id, exc_info=True)
                 encoding = event.get("encoding")
                 if isinstance(encoding, bytes):
                     try:
@@ -4411,14 +5488,14 @@ class Engine:
                         if not source_sample_rate:
                             # Fallback: use provider's configured output rate (prevents 8kHz default)
                             try:
-                                provider = self.providers.get(session.provider_name)
+                                provider = self._call_providers.get(call_id) or self.providers.get(session.provider_name)
                                 if provider and hasattr(provider, '_dg_output_rate'):
                                     source_sample_rate = provider._dg_output_rate
                                     logger.debug(
                                         "Using provider configured output rate as source_sample_rate fallback",
                                         call_id=call_id,
                                         rate=source_sample_rate,
-                                        reason="fmt_info empty"
+                                        reason="fmt_info empty",
                                     )
                             except Exception:
                                 pass
@@ -4497,8 +5574,10 @@ class Engine:
                             if remediation:
                                 session.audio_diagnostics["codec_remediation"] = remediation
                             src_encoding = fmt_info.get("encoding") or encoding
-                            provider_obj = self.providers.get(session.provider_name)
-                            src_rate = fmt_info.get("sample_rate") or sample_rate_int or (getattr(provider_obj, "_dg_output_rate", None) if provider_obj else None)
+                            provider_obj = self._call_providers.get(call_id) or self.providers.get(session.provider_name)
+                            src_rate = fmt_info.get("sample_rate") or sample_rate_int or (
+                                getattr(provider_obj, "_dg_output_rate", None) if provider_obj else None
+                            )
                             
                             # DOWNSTREAM_MODE GATING: Check if streaming playback is allowed
                             use_streaming = self.config.downstream_mode != "file"
@@ -4559,6 +5638,23 @@ class Engine:
                     except asyncio.QueueFull:
                         logger.debug("Provider streaming queue full; dropping chunk", call_id=call_id)
             elif etype == "AgentAudioDone":
+                # If we were suppressing output due to barge-in, end suppression at a segment boundary.
+                # This prevents cutting into the next (new) response once the provider finishes the interrupted one.
+                try:
+                    sup = session.vad_state.get("output_suppression") or {}
+                    if bool(sup.get("active", False)) or float(sup.get("until_ts", 0.0) or 0.0) > 0.0:
+                        sup["active"] = False
+                        sup["until_ts"] = 0.0
+                        session.vad_state["output_suppression"] = sup
+                        logger.info(
+                            "🔈 OUTPUT SUPPRESSION cleared on AgentAudioDone",
+                            call_id=call_id,
+                            provider=getattr(session, "provider_name", None),
+                            dropped_chunks=sup.get("dropped_chunks"),
+                            dropped_bytes=sup.get("dropped_bytes"),
+                        )
+                except Exception:
+                    logger.debug("Failed clearing output suppression on AgentAudioDone", call_id=call_id, exc_info=True)
                 continuous = bool(getattr(self.streaming_playback_manager, 'continuous_stream', False))
                 q = self._provider_stream_queues.get(call_id)
                 if continuous:
@@ -4822,7 +5918,7 @@ class Engine:
                             # For local provider, we need to synthesize farewell via TTS
                             farewell = "Goodbye"  # Keep it simple and short
                             provider_name = getattr(session, 'provider_name', None)
-                            local_provider = self.providers.get(provider_name) if provider_name else None
+                            local_provider = self._call_providers.get(call_id) if provider_name else None
                             
                             logger.info(
                                 "🎤 Preparing farewell TTS",
@@ -4972,6 +6068,12 @@ class Engine:
         q: asyncio.Queue = asyncio.Queue(maxsize=200)
         self._pipeline_queues[call_id] = q
         self._pipeline_forced[call_id] = bool(forced)
+        # Pipelines: enable Asterisk talk detection so barge-in can trigger even when
+        # ExternalMedia RTP delivery is paused/altered during channel playback.
+        try:
+            await self._enable_pipeline_talk_detect(session)
+        except Exception:
+            logger.debug("Pipeline talk detect enable failed", call_id=call_id, exc_info=True)
         task = asyncio.create_task(self._pipeline_runner(call_id))
         self._pipeline_tasks[call_id] = task
         logger.info("Pipeline runner started", call_id=call_id, pipeline=session.pipeline_name)
@@ -5417,6 +6519,7 @@ class Engine:
                     nonlocal conversation_history
                     response_text = ""
                     tool_calls = []
+                    turn_start_time = time.time()  # Track turn latency for call history
                     
                     pipeline_label = getattr(session, 'pipeline_name', None) or 'none'
                     provider_label = getattr(session, 'provider_name', None) or 'unknown'
@@ -5474,6 +6577,9 @@ class Engine:
                                 if tts_chunk:
                                     if first_tts_ts is None:
                                         first_tts_ts = time.time()
+                                        # Track turn latency for call history (Milestone 21)
+                                        turn_latency_ms = (first_tts_ts - turn_start_time) * 1000
+                                        session.turn_latencies_ms.append(turn_latency_ms)
                                         try:
                                             if t_start is not None:
                                                 _TURN_STT_TO_TTS.labels(pipeline_label, provider_label).observe(max(0.0, first_tts_ts - t_start))
@@ -5562,8 +6668,13 @@ class Engine:
                                                     if chunk:
                                                         wait_bytes.extend(chunk)
                                                 if wait_bytes:
-                                                    await self.playback_manager.play_audio(call_id, bytes(wait_bytes), "pipeline-wait")
-                                                    await asyncio.sleep(len(wait_bytes) / 8000.0 + 0.2)
+                                                    wait_pid = await self.playback_manager.play_audio(call_id, bytes(wait_bytes), "pipeline-wait")
+                                                    if wait_pid:
+                                                        await self.playback_manager.wait_for_playback_end(
+                                                            call_id,
+                                                            wait_pid,
+                                                            timeout_sec=(len(wait_bytes) / 8000.0 + 3.0),
+                                                        )
                                             except Exception:
                                                 logger.debug("Failed to speak slow-response message", call_id=call_id, exc_info=True)
                                     result = await tool_task
@@ -5589,8 +6700,13 @@ class Engine:
                                                     pid = await self.playback_manager.play_audio(call_id, bytes(fw_bytes), "pipeline-farewell")
                                                     # Calculate actual duration: mulaw 8kHz = 8000 bytes/sec
                                                     duration_sec = len(fw_bytes) / 8000.0
-                                                    # Wait for farewell + small buffer to ensure completion
-                                                    await asyncio.sleep(duration_sec + 0.5)
+                                                    # Wait for farewell (interruptible by barge-in) + small buffer
+                                                    if pid:
+                                                        await self.playback_manager.wait_for_playback_end(
+                                                            call_id,
+                                                            pid,
+                                                            timeout_sec=(duration_sec + 3.0),
+                                                        )
                                                     logger.info("Farewell playback completed", duration_sec=duration_sec, call_id=call_id)
                                             except Exception as e:
                                                 logger.error("Farewell TTS failed", error=str(e))
@@ -5648,9 +6764,14 @@ class Engine:
                                                             if chunk:
                                                                 tts_bytes.extend(chunk)
                                                         if tts_bytes:
-                                                            await self.playback_manager.play_audio(call_id, bytes(tts_bytes), "pipeline-tts")
+                                                            pid = await self.playback_manager.play_audio(call_id, bytes(tts_bytes), "pipeline-tts")
                                                             duration_sec = len(tts_bytes) / 8000.0
-                                                            await asyncio.sleep(duration_sec + 0.3)
+                                                            if pid:
+                                                                await self.playback_manager.wait_for_playback_end(
+                                                                    call_id,
+                                                                    pid,
+                                                                    timeout_sec=(duration_sec + 3.0),
+                                                                )
                                                 
                                                 # Handle tool calls (with or without text)
                                                 if getattr(llm_response, 'tool_calls', None):
@@ -5675,8 +6796,13 @@ class Engine:
                                                                             if chunk:
                                                                                 wait_bytes.extend(chunk)
                                                                         if wait_bytes:
-                                                                            await self.playback_manager.play_audio(call_id, bytes(wait_bytes), "pipeline-wait")
-                                                                            await asyncio.sleep(len(wait_bytes) / 8000.0 + 0.2)
+                                                                            wait_pid = await self.playback_manager.play_audio(call_id, bytes(wait_bytes), "pipeline-wait")
+                                                                            if wait_pid:
+                                                                                await self.playback_manager.wait_for_playback_end(
+                                                                                    call_id,
+                                                                                    wait_pid,
+                                                                                    timeout_sec=(len(wait_bytes) / 8000.0 + 3.0),
+                                                                                )
                                                                     except Exception:
                                                                         logger.debug("Failed to speak slow-response message", call_id=call_id, exc_info=True)
                                                             next_result = await next_task
@@ -5689,8 +6815,13 @@ class Engine:
                                                                 async for chunk in pipeline.tts_adapter.synthesize(call_id, farewell, pipeline.tts_options):
                                                                     fw_bytes.extend(chunk)
                                                                 if fw_bytes:
-                                                                    await self.playback_manager.play_audio(call_id, bytes(fw_bytes), "pipeline-farewell")
-                                                                    await asyncio.sleep(len(fw_bytes) / 8000.0 + 0.5)
+                                                                    fw_pid = await self.playback_manager.play_audio(call_id, bytes(fw_bytes), "pipeline-farewell")
+                                                                    if fw_pid:
+                                                                        await self.playback_manager.wait_for_playback_end(
+                                                                            call_id,
+                                                                            fw_pid,
+                                                                            timeout_sec=(len(fw_bytes) / 8000.0 + 3.0),
+                                                                        )
                                                                 await self.ari_client.hangup_channel(getattr(session, 'channel_id', call_id))
                                                                 return
                                         except Exception as e:
@@ -6053,7 +7184,7 @@ class Engine:
             provider_name = session.provider_name or self.config.default_provider
         
         # Get provider instance
-        provider = self.providers.get(provider_name)
+        provider = self._call_providers.get(session.call_id) or self.providers.get(provider_name)
         if not provider:
             logger.warning(
                 "Provider not found for audio profile resolution (pipeline mode will use context_name)",
@@ -6114,68 +7245,25 @@ class Engine:
                     error=str(exc),
                 )
             
-            # CRITICAL FIX: Apply wire format settings to provider's target config
-            # The provider needs to emit the same format/rate that AudioSocket expects
-            # BUT: P1 continuous_input providers (OpenAI Realtime, Deepgram Voice Agent)
-            # handle their own internal format needs and should NOT be overridden
+            # Store per-call provider overrides (do NOT mutate global provider templates).
             try:
-                provider = self.providers.get(provider_name)
-                if provider and hasattr(provider, 'config'):
-                    # Check if this is a continuous_input provider using capabilities
-                    is_continuous_input = False
-                    try:
-                        capabilities = None
-                        if hasattr(provider, 'get_capabilities'):
-                            try:
-                                capabilities = provider.get_capabilities()
-                            except Exception:
-                                pass
-                        
-                        if capabilities and capabilities.requires_continuous_audio:
-                            is_continuous_input = True
-                        else:
-                            # Fallback for legacy providers
-                            pcfg = getattr(provider, 'config', None)
-                            if isinstance(pcfg, dict):
-                                is_continuous_input = bool(pcfg.get('continuous_input', False))
-                            else:
-                                is_continuous_input = bool(getattr(pcfg, 'continuous_input', False))
-                    except Exception:
-                        is_continuous_input = False
-                    
-                    if not is_continuous_input:
-                        # Only update target config for P2/hybrid providers
-                        # Wire format = what AudioSocket channel expects = what provider should emit
-                        provider.config.target_encoding = transport.wire_encoding
-                        provider.config.target_sample_rate_hz = transport.wire_sample_rate
-                        logger.info(
-                            "Applied wire format to provider target config",
-                            call_id=session.call_id,
-                            provider=provider_name,
-                            target_encoding=transport.wire_encoding,
-                            target_sample_rate_hz=transport.wire_sample_rate,
-                        )
-                    else:
-                        logger.debug(
-                            "Skipping wire format override for continuous_input provider",
-                            call_id=session.call_id,
-                            provider=provider_name,
-                            reason="P1 provider manages its own format needs"
-                        )
-            except Exception as exc:
-                logger.warning(
-                    "Failed to apply transport settings to provider config",
+                session.provider_overrides = dict(getattr(session, "provider_overrides", {}) or {})
+                session.provider_overrides["target_encoding"] = transport.wire_encoding
+                session.provider_overrides["target_sample_rate_hz"] = transport.wire_sample_rate
+                await self._save_session(session)
+            except Exception:
+                logger.debug(
+                    "Failed to store transport overrides on session",
                     call_id=session.call_id,
-                    provider=provider_name,
-                    error=str(exc),
+                    exc_info=True,
                 )
-            
-            # Get context config for prompt/greeting and apply to provider
+
+            # Get context config for prompt/greeting and store as per-call overrides.
             context_config = None
             logger.debug(
                 "Checking context config",
                 call_id=session.call_id,
-                transport_context=transport.context if hasattr(transport, 'context') else None,
+                transport_context=transport.context if hasattr(transport, "context") else None,
             )
             if transport.context:
                 context_config = self.transport_orchestrator.get_context_config(transport.context)
@@ -6188,100 +7276,58 @@ class Engine:
                     has_prompt=context_config.prompt if context_config else None,
                 )
                 if context_config:
-                    # Inject context greeting/prompt into provider config NOW (not later)
                     try:
-                        # Apply template substitution for personalized greetings
                         greeting_to_apply = context_config.greeting
                         if greeting_to_apply:
                             try:
-                                caller_name = getattr(session, 'caller_name', None) or "there"
-                                caller_number = getattr(session, 'caller_number', None) or "unknown"
+                                caller_name = getattr(session, "caller_name", None) or "there"
+                                caller_number = getattr(session, "caller_number", None) or "unknown"
                                 greeting_to_apply = greeting_to_apply.format(
                                     caller_name=caller_name,
-                                    caller_number=caller_number
+                                    caller_number=caller_number,
                                 )
                                 logger.debug(
                                     "Applied greeting template substitution for provider",
                                     call_id=session.call_id,
-                                    caller_name=caller_name
+                                    caller_name=caller_name,
                                 )
                             except (KeyError, ValueError) as e:
                                 logger.warning(
                                     "Greeting template substitution failed for provider",
                                     call_id=session.call_id,
-                                    error=str(e)
+                                    error=str(e),
                                 )
-                        
-                        if isinstance(provider.config, dict):
-                            if greeting_to_apply:
-                                provider.config['greeting'] = greeting_to_apply
-                                logger.info(
-                                    "Applied context greeting to provider",
-                                    call_id=session.call_id,
-                                    context=transport.context,
-                                    greeting_preview=greeting_to_apply[:50] + "...",
-                                )
-                            if context_config.prompt:
-                                provider.config['prompt'] = context_config.prompt
-                                logger.info(
-                                    "Applied context prompt to provider",
-                                    call_id=session.call_id,
-                                    context=transport.context,
-                                    prompt_length=len(context_config.prompt),
-                                )
-                        elif hasattr(provider.config, '__dict__'):
-                            if greeting_to_apply and hasattr(provider.config, 'greeting'):
-                                setattr(provider.config, 'greeting', greeting_to_apply)
-                                logger.info(
-                                    "Applied context greeting to provider",
-                                    call_id=session.call_id,
-                                    context=transport.context,
-                                    greeting_preview=greeting_to_apply[:50] + "...",
-                                )
-                        
-                        # Also update LocalProvider's _initial_greeting directly (for play_initial_greeting)
-                        if greeting_to_apply and hasattr(provider, 'set_initial_greeting'):
-                            provider.set_initial_greeting(greeting_to_apply)
-                            logger.debug(
-                                "Updated LocalProvider initial greeting",
+
+                        if greeting_to_apply:
+                            session.provider_overrides["greeting"] = greeting_to_apply
+                            logger.info(
+                                "Stored context greeting for provider session",
                                 call_id=session.call_id,
                                 context=transport.context,
+                                greeting_preview=(
+                                    (greeting_to_apply[:50] + "...")
+                                    if len(greeting_to_apply) > 50
+                                    else greeting_to_apply
+                                ),
                             )
-                        
                         if context_config.prompt:
-                            # Try 'prompt' field first, then 'instructions' (OpenAI uses this)
-                            if hasattr(provider.config, 'prompt'):
-                                setattr(provider.config, 'prompt', context_config.prompt)
-                                logger.info(
-                                    "Applied context prompt to provider",
-                                    call_id=session.call_id,
-                                    context=transport.context,
-                                    prompt_length=len(context_config.prompt),
-                                )
-                            elif hasattr(provider.config, 'instructions'):
-                                setattr(provider.config, 'instructions', context_config.prompt)
-                                logger.info(
-                                    "Applied context prompt to provider (as instructions)",
-                                    call_id=session.call_id,
-                                    context=transport.context,
-                                    prompt_length=len(context_config.prompt),
-                                )
-                            else:
-                                logger.debug(
-                                    "Provider config does not support prompt or instructions field",
-                                    call_id=session.call_id,
-                                    provider=provider_name,
-                                    context=transport.context,
-                                )
+                            session.provider_overrides["prompt"] = context_config.prompt
+                            logger.info(
+                                "Stored context prompt for provider session",
+                                call_id=session.call_id,
+                                context=transport.context,
+                                prompt_length=len(context_config.prompt),
+                            )
+                        await self._save_session(session)
                     except Exception as exc:
                         logger.error(
-                            "Failed to apply context config to provider",
+                            "Failed to store context config for provider",
                             call_id=session.call_id,
                             context=transport.context,
                             error=str(exc),
                             exc_info=True,
                         )
-                    
+
                     # Start background music if configured for this context (AAVA-89)
                     if context_config.background_music:
                         await self._start_background_music(session, context_config.background_music)
@@ -6427,6 +7473,17 @@ class Engine:
             "slin16": "slin16",
         }
         return mapping.get(token, token)
+
+    @staticmethod
+    def _clone_config(obj: Any) -> Any:
+        """Best-effort deep clone for provider config objects (Pydantic, dicts, dataclasses)."""
+        try:
+            copier = getattr(obj, "model_copy", None)
+            if callable(copier):
+                return copier(deep=True)
+        except Exception:
+            pass
+        return copy.deepcopy(obj)
 
     @staticmethod
     def _should_force_mulaw(force_flag: bool, audiosocket_fmt: Optional[str]) -> bool:
@@ -6795,8 +7852,8 @@ class Engine:
                 "sample_rate": sample_rate,
                 "updated": time.time(),
             }
-            _AUDIO_RMS_GAUGE.labels(session.call_id, stage).set(rms)
-            _AUDIO_DC_OFFSET.labels(session.call_id, stage).set(dc_offset)
+            _AUDIO_RMS_GAUGE.labels(stage).set(rms)
+            _AUDIO_DC_OFFSET.labels(stage).set(dc_offset)
             first_sample_key = f"{stage}_first_sample_logged"
             if not session.audio_diagnostics.get(first_sample_key):
                 session.audio_diagnostics[first_sample_key] = True
@@ -6978,7 +8035,7 @@ class Engine:
             "sample_rate": transport_rate,
         }
 
-        provider = self.providers.get(provider_name)
+        provider = self._call_providers.get(session.call_id) or self.providers.get(provider_name)
         
         # CRITICAL FIX: Read provider INPUT format (what provider receives)
         # NOT target format (what provider outputs)
@@ -7028,7 +8085,7 @@ class Engine:
         session.codec_alignment_ok = aligned
         session.codec_alignment_message = remediation
         try:
-            _CODEC_ALIGNMENT.labels(session.call_id, provider_name).set(1 if aligned else 0)
+            _CODEC_ALIGNMENT.labels(provider_name).set(1 if aligned else 0)
         except Exception:
             pass
 
@@ -7146,12 +8203,104 @@ class Engine:
  
         return resolution
  
+    async def _ensure_provider_session_started(self, call_id: str) -> None:
+        """Single-flight wrapper around _start_provider_session (prevents duplicate concurrent starts)."""
+        task = self._provider_start_tasks.get(call_id)
+        if task:
+            await task
+            return
+        task = asyncio.create_task(self._start_provider_session(call_id), name=f"provider-start-{call_id}")
+        self._provider_start_tasks[call_id] = task
+        try:
+            await task
+        finally:
+            if self._provider_start_tasks.get(call_id) is task:
+                self._provider_start_tasks.pop(call_id, None)
+
+    def _kickoff_provider_session_start(self, call_id: str) -> None:
+        """Fire-and-forget provider start with exception swallowing (used from audio hot paths)."""
+        if call_id in self._provider_start_tasks:
+            return
+        bg_task = asyncio.create_task(self._ensure_provider_session_started(call_id), name=f"provider-start-bg-{call_id}")
+
+        def _done(t: asyncio.Task, *, _call_id: str = call_id) -> None:
+            try:
+                t.result()
+            except Exception:
+                logger.debug("Background provider start failed", call_id=_call_id, exc_info=True)
+
+        bg_task.add_done_callback(_done)
+
+    def _apply_provider_overrides(self, provider: AIProviderInterface, session: CallSession) -> None:
+        """Apply per-call overrides (greeting/prompt/target format) to a provider instance."""
+        overrides = {}
+        try:
+            overrides = dict(getattr(session, "provider_overrides", {}) or {})
+        except Exception:
+            overrides = {}
+
+        # Always align provider output target to the resolved transport for this call.
+        try:
+            transport = getattr(session, "transport_profile", None)
+            if transport:
+                overrides.setdefault("target_encoding", getattr(transport, "wire_encoding", None))
+                overrides.setdefault("target_sample_rate_hz", getattr(transport, "wire_sample_rate", None))
+        except Exception:
+            pass
+
+        cfg = getattr(provider, "config", None)
+        if not cfg:
+            return
+
+        greeting = overrides.get("greeting")
+        prompt = overrides.get("prompt")
+        target_encoding = overrides.get("target_encoding")
+        target_rate = overrides.get("target_sample_rate_hz")
+
+        try:
+            if isinstance(cfg, dict):
+                if greeting:
+                    cfg["greeting"] = greeting
+                if prompt:
+                    # Some providers call this "prompt", others "instructions"
+                    cfg.setdefault("prompt", prompt)
+                    cfg.setdefault("instructions", prompt)
+                if target_encoding:
+                    cfg["target_encoding"] = target_encoding
+                if target_rate:
+                    cfg["target_sample_rate_hz"] = target_rate
+            else:
+                if greeting and hasattr(cfg, "greeting"):
+                    setattr(cfg, "greeting", greeting)
+                if prompt:
+                    if hasattr(cfg, "prompt"):
+                        setattr(cfg, "prompt", prompt)
+                    if hasattr(cfg, "instructions"):
+                        setattr(cfg, "instructions", prompt)
+                if target_encoding and hasattr(cfg, "target_encoding"):
+                    setattr(cfg, "target_encoding", target_encoding)
+                if target_rate and hasattr(cfg, "target_sample_rate_hz"):
+                    setattr(cfg, "target_sample_rate_hz", target_rate)
+        except Exception:
+            logger.debug("Failed applying provider overrides", call_id=session.call_id, exc_info=True)
+
+        # LocalProvider uses an explicit initial greeting helper.
+        try:
+            if greeting and hasattr(provider, "set_initial_greeting"):
+                provider.set_initial_greeting(greeting)
+        except Exception:
+            logger.debug("Provider set_initial_greeting failed", call_id=session.call_id, exc_info=True)
+
     async def _start_provider_session(self, call_id: str) -> None:
         """Start the provider session for a call when media path is ready."""
+        provider: Optional[AIProviderInterface] = None
         try:
             session = await self.session_store.get_by_call_id(call_id)
             if not session:
                 logger.error("Start provider session called for unknown call", call_id=call_id)
+                return
+            # Idempotent fast-path.
+            if getattr(session, "provider_session_active", False) and call_id in self._call_providers:
                 return
 
             # Preserve any per-call override previously applied. Only assign a pipeline
@@ -7182,12 +8331,12 @@ class Engine:
                 return
 
             provider_name = session.provider_name or self.config.default_provider
-            provider = self.providers.get(provider_name)
+            factory = self.provider_factories.get(provider_name)
 
-            if not provider:
+            if not factory:
                 fallback_name = self.config.default_provider
-                fallback_provider = self.providers.get(fallback_name)
-                if fallback_provider:
+                fallback_factory = self.provider_factories.get(fallback_name)
+                if fallback_factory:
                     logger.warning(
                         "Milestone7 pipeline provider unavailable; falling back to default provider",
                         call_id=call_id,
@@ -7195,7 +8344,7 @@ class Engine:
                         fallback_provider=fallback_name,
                     )
                     provider_name = fallback_name
-                    provider = fallback_provider
+                    factory = fallback_factory
                     if session.provider_name != fallback_name:
                         session.provider_name = fallback_name
                         await self._save_session(session)
@@ -7207,6 +8356,26 @@ class Engine:
                         fallback_provider=fallback_name,
                     )
                     return
+
+            # Create a per-call provider instance (providers are NOT concurrency-safe across calls).
+            provider = factory()
+            # Apply per-call context/prompt/transport overrides before start_session reads config.
+            self._apply_provider_overrides(provider, session)
+            # Inject shared runtime helpers (latency tracking, tool context helpers).
+            try:
+                if hasattr(provider, "set_session_store"):
+                    provider.set_session_store(self.session_store)
+                elif hasattr(provider, "_session_store"):
+                    provider._session_store = self.session_store
+            except Exception:
+                logger.debug("Provider session_store injection failed", call_id=call_id, provider=provider_name, exc_info=True)
+            try:
+                if hasattr(provider, "_ari_client"):
+                    provider._ari_client = self.ari_client
+            except Exception:
+                logger.debug("Provider ari_client injection failed", call_id=call_id, provider=provider_name, exc_info=True)
+            # Make provider instance discoverable during start_session (providers can emit events while starting).
+            self._call_providers[call_id] = provider
 
             if pipeline_resolution:
                 logger.info(
@@ -7332,33 +8501,19 @@ class Engine:
                     pass
             logger.info("Provider session started", call_id=call_id, provider=provider_name)
             
-            # Record call metadata for dashboard
-            try:
-                caller_name = getattr(session, 'caller_name', None) or "Unknown"
-                caller_number = getattr(session, 'caller_number', None) or "Unknown"
-                pipeline_name = getattr(session, 'pipeline_name', None) or "default"
-                context_name = getattr(session, 'context_name', None) or "default"
-                
-                # Set call metadata gauge (value=1 means active)
-                _CALL_METADATA.labels(
-                    call_id=call_id,
-                    caller_name=caller_name,
-                    caller_number=caller_number,
-                    pipeline=pipeline_name,
-                    provider=provider_name,
-                    context=context_name
-                ).set(1)
-                
-                logger.debug("Recorded call metadata", 
-                            call_id=call_id,
-                            caller_name=caller_name,
-                            pipeline=pipeline_name,
-                            provider=provider_name,
-                            context=context_name)
-            except Exception as e:
-                logger.debug("Failed to record call metadata", call_id=call_id, error=str(e))
+            # Call metadata is persisted to Call History (SQLite); do not export per-call labels to Prometheus.
                 
         except Exception as exc:
+            # Best-effort cleanup if provider was partially started.
+            try:
+                self._call_providers.pop(call_id, None)
+            except Exception:
+                pass
+            if provider and hasattr(provider, "stop_session"):
+                try:
+                    await provider.stop_session()
+                except Exception:
+                    pass
             logger.error("Failed to start provider session", call_id=call_id, error=str(exc), exc_info=True)
 
     async def _on_playback_finished(self, event: Dict[str, Any]):
@@ -7414,6 +8569,7 @@ class Engine:
             app.router.add_post('/reload', self._reload_handler)
             app.router.add_get('/mcp/status', self._mcp_status_handler)
             app.router.add_post('/mcp/test/{server_id}', self._mcp_test_handler)
+            app.router.add_get('/sessions/stats', self._sessions_stats_handler)
             runner = web.AppRunner(app)
             await runner.setup()
             # Host/port configurable via YAML health block with environment overrides (AAVA-30)
@@ -7437,6 +8593,24 @@ class Engine:
             logger.info("Health endpoint started", host=health_host, port=health_port)
         except Exception as exc:
             logger.error("Failed to start health endpoint", error=str(exc), exc_info=True)
+
+    async def _sessions_stats_handler(self, request):
+        """Return active session statistics for Admin UI (Milestone 21).
+        
+        SECURITY: Requires localhost or HEALTH_API_TOKEN.
+        """
+        # SECURITY: Gate sensitive endpoint to prevent operational data leak
+        if not self._is_request_authorized(request):
+            return web.json_response(
+                {"active_calls": 0, "error": "Forbidden: requires localhost or valid HEALTH_API_TOKEN"},
+                status=403
+            )
+        try:
+            stats = await self.session_store.get_session_stats()
+            return web.json_response(stats, status=200)
+        except Exception as exc:
+            logger.debug("Sessions stats handler failed", error=str(exc), exc_info=True)
+            return web.json_response({"active_calls": 0, "error": str(exc)}, status=500)
 
     async def _mcp_status_handler(self, request):
         """Return MCP server/tool status for Admin UI (sanitized)."""
@@ -7497,9 +8671,10 @@ class Engine:
         from src.tools.registry import tool_registry
         
         provider_name = getattr(session, 'provider_name', None) or self.config.default_provider
-        provider = self.providers.get(provider_name)
+        provider = self._call_providers.get(call_id)
 
         result = {"status": "error", "message": f"Tool '{function_name}' not found"}
+        tool_start_time = time.time()
 
         try:
             # Determine allowlisted tools for this call.
@@ -7578,6 +8753,24 @@ class Engine:
             )
             result = {"status": "error", "message": str(e)}
         
+        # Log tool call to session for call history (Milestone 21)
+        try:
+            tool_duration_ms = (time.time() - tool_start_time) * 1000
+            tool_record = {
+                "name": function_name,
+                "params": parameters,
+                "result": result.get("status", "unknown"),
+                "message": result.get("message", ""),
+                "timestamp": datetime.now().isoformat(),
+                "duration_ms": round(tool_duration_ms, 2),
+            }
+            if not hasattr(session, 'tool_calls') or session.tool_calls is None:
+                session.tool_calls = []
+            session.tool_calls.append(tool_record)
+            await self.session_store.upsert_call(session)
+        except Exception as e:
+            logger.debug("Failed to log tool call to session", call_id=call_id, error=str(e))
+        
         # Send result back to provider
         if provider and hasattr(provider, 'send_tool_result'):
             try:
@@ -7632,14 +8825,18 @@ class Engine:
                     reason = f"error: {str(e)}"
                 providers_info[name] = {"ready": ready, "reason": reason} if reason else {"ready": ready}
 
-            # Compute readiness - default provider must be ready
+            # Compute readiness - default provider OR default pipeline must be ready.
             default_ready = False
-            if self.config and getattr(self.config, 'default_provider', None) in (self.providers or {}):
-                prov = self.providers[self.config.default_provider]
+            default_target = getattr(self.config, "default_provider", None) if self.config else None
+
+            if default_target in (self.providers or {}):
+                prov = self.providers[default_target]
                 try:
-                    default_ready = bool(prov.is_ready()) if hasattr(prov, 'is_ready') else False
+                    default_ready = bool(prov.is_ready()) if hasattr(prov, "is_ready") else False
                 except Exception:
                     default_ready = False
+            elif self.config and hasattr(self.config, "pipelines") and default_target in (self.config.pipelines or {}):
+                default_ready = bool(getattr(self, "pipeline_orchestrator", None) and self.pipeline_orchestrator.started)
             ari_connected = bool(self.ari_client and self.ari_client.running)
             audiosocket_listening = self.audio_socket_server is not None if self.config.audio_transport == 'audiosocket' else True
             is_ready = ari_connected and audiosocket_listening and default_ready
@@ -7697,20 +8894,27 @@ class Engine:
                 transport_ok = self.audio_socket_server is not None
             elif self.config.audio_transport == 'externalmedia':
                 transport_ok = self.rtp_server is not None
+            default_target = getattr(self.config, "default_provider", None) if self.config else None
             provider_ok = False
-            if self.config and getattr(self.config, 'default_provider', None) in (self.providers or {}):
-                prov = self.providers[self.config.default_provider]
+            pipeline_ok = False
+
+            if default_target in (self.providers or {}):
+                prov = self.providers[default_target]
                 try:
-                    provider_ok = bool(prov.is_ready()) if hasattr(prov, 'is_ready') else True
+                    provider_ok = bool(prov.is_ready()) if hasattr(prov, "is_ready") else True
                 except Exception:
                     provider_ok = True
+            elif self.config and hasattr(self.config, "pipelines") and default_target in (self.config.pipelines or {}):
+                pipeline_ok = bool(getattr(self, "pipeline_orchestrator", None) and self.pipeline_orchestrator.started)
 
-            is_ready = ari_connected and transport_ok and provider_ok
+            default_ok = provider_ok or pipeline_ok
+            is_ready = ari_connected and transport_ok and default_ok
             status = 200 if is_ready else 503
             return web.json_response({
                 "ari_connected": ari_connected,
                 "transport_ok": transport_ok,
                 "provider_ok": provider_ok,
+                "pipeline_ok": pipeline_ok,
                 "ready": is_ready,
             }, status=status)
         except Exception as exc:

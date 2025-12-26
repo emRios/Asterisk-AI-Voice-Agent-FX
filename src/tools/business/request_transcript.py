@@ -7,7 +7,7 @@ AI captures email via speech, validates, confirms, and sends transcript.
 
 import os
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, Any, Optional
 import structlog
 from jinja2 import Template
@@ -342,12 +342,16 @@ class RequestTranscriptTool(Tool):
         # Extract metadata
         caller_name = getattr(session, "caller_name", None)
         caller_number = getattr(session, "caller_number", "Unknown")
-        start_time = getattr(session, "start_time", None) or datetime.now()
-        end_time = datetime.now()
+        start_time = getattr(session, "start_time", None) or datetime.now(timezone.utc)
+        end_time = datetime.now(timezone.utc)
         
-        # Calculate duration
+        # Calculate duration - ensure both datetimes are timezone-aware
         if hasattr(session, "start_time") and session.start_time:
-            duration_seconds = int((end_time - session.start_time).total_seconds())
+            # Handle both naive and aware datetimes for backward compatibility
+            session_start = session.start_time
+            if session_start.tzinfo is None:
+                session_start = session_start.replace(tzinfo=timezone.utc)
+            duration_seconds = int((end_time - session_start).total_seconds())
             duration_str = self._format_duration(duration_seconds)
         else:
             duration_str = "Unknown"

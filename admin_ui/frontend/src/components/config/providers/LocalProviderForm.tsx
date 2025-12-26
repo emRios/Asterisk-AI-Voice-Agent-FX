@@ -103,6 +103,46 @@ const LocalProviderForm: React.FC<LocalProviderFormProps> = ({ config, onChange 
             {currentStatus && (
                 <div className="bg-blue-50/50 dark:bg-blue-900/10 p-4 rounded-md border border-blue-200 dark:border-blue-900/30">
                     <h4 className="font-semibold text-sm mb-3 text-blue-800 dark:text-blue-300">📊 Currently Loaded</h4>
+                    {(!!currentStatus?.config?.degraded || !!currentStatus?.config?.mock_models) && (
+                        <div className="mb-3 space-y-2">
+                            {!!currentStatus?.config?.mock_models && (
+                                <div className="p-2 bg-blue-500/10 border border-blue-500/30 rounded text-xs text-blue-700 dark:text-blue-300 flex items-start gap-2">
+                                    <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />
+                                    <div>
+                                        <div className="font-medium">Mock models enabled</div>
+                                        <div className="opacity-80">`LOCAL_AI_MOCK_MODELS=1` is set; status may not reflect real model loading.</div>
+                                    </div>
+                                </div>
+                            )}
+
+                            {!!currentStatus?.config?.degraded && (
+                                <div className="p-2 bg-yellow-500/10 border border-yellow-500/30 rounded text-xs text-yellow-700 dark:text-yellow-300">
+                                    <div className="flex items-start gap-2">
+                                        <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />
+                                        <div>
+                                            <div className="font-medium">Degraded mode</div>
+                                            <div className="opacity-80">Some components failed to initialize on startup.</div>
+                                        </div>
+                                    </div>
+                                    {currentStatus?.config?.startup_errors && Object.keys(currentStatus.config.startup_errors).length > 0 && (
+                                        <details className="mt-2">
+                                            <summary className="cursor-pointer opacity-90">
+                                                Startup errors ({Object.keys(currentStatus.config.startup_errors).length})
+                                            </summary>
+                                            <ul className="mt-2 space-y-1 opacity-90">
+                                                {Object.entries(currentStatus.config.startup_errors).map(([k, v]: any) => (
+                                                    <li key={k} className="flex gap-2">
+                                                        <span className="font-mono">{k}:</span>
+                                                        <span className="break-words">{String(v)}</span>
+                                                    </li>
+                                                ))}
+                                            </ul>
+                                        </details>
+                                    )}
+                                </div>
+                            )}
+                        </div>
+                    )}
                     <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-sm">
                         {/* STT Status */}
                         <div className="space-y-1">

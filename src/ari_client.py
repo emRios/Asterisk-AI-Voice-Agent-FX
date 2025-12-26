@@ -371,6 +371,55 @@ class ARIClient:
         logger.info("Playing media on channel", channel_id=channel_id, media_uri=media_uri)
         return await self.send_command("POST", f"channels/{channel_id}/play", data={"media": media_uri})
 
+    async def play_media_on_channel_with_id(self, channel_id: str, media_uri: str, playback_id: str) -> bool:
+        """Play media on a channel with a deterministic playback ID."""
+        try:
+            data = {"media": media_uri, "playbackId": playback_id}
+            response = await self.send_command("POST", f"channels/{channel_id}/play", data=data)
+            if response and response.get("id") == playback_id:
+                logger.info(
+                    "Channel playback started with deterministic ID",
+                    channel_id=channel_id,
+                    media_uri=media_uri,
+                    playback_id=playback_id,
+                )
+                return True
+            logger.error(
+                "Failed to start channel playback with deterministic ID",
+                channel_id=channel_id,
+                media_uri=media_uri,
+                playback_id=playback_id,
+                response=response,
+            )
+            return False
+        except Exception:
+            logger.error(
+                "Error starting channel playback with deterministic ID",
+                channel_id=channel_id,
+                media_uri=media_uri,
+                playback_id=playback_id,
+                exc_info=True,
+            )
+            return False
+
+    async def set_channel_var(self, channel_id: str, variable: str, value: str = "") -> bool:
+        """Set a channel variable via ARI.
+
+        Note: Asterisk allows setting dialplan function-like vars (e.g. TALK_DETECT(set))
+        through the same interface, which is required to enable talk detection events.
+        """
+        try:
+            resp = await self.send_command(
+                "POST",
+                f"channels/{channel_id}/variable",
+                data={"variable": variable, "value": value},
+            )
+            # Some ARI implementations return {} on success.
+            return resp is not None
+        except Exception:
+            logger.error("Failed to set channel variable", channel_id=channel_id, variable=variable, exc_info=True)
+            return False
+
 
     async def create_bridge(self, bridge_type: str = "mixing") -> Optional[str]:
         """Create a new bridge for channel mixing."""
@@ -480,6 +529,17 @@ class ARIClient:
             if status is not None:
                 if 200 <= int(status) < 300:
                     logger.info("Channel added to bridge", bridge_id=bridge_id, channel_id=channel_id, status=status)
+                    return True
+                # Idempotency: Asterisk can return a conflict if the channel is already in the bridge.
+                # Treat this as success to make attach retries safe.
+                reason = str(response.get("reason", "") or "")
+                if int(status) in (409, 422) and ("already" in reason.lower()) and ("bridge" in reason.lower()):
+                    logger.info(
+                        "Channel already in bridge (treated as success)",
+                        bridge_id=bridge_id,
+                        channel_id=channel_id,
+                        status=status,
+                    )
                     return True
                 else:
                     logger.error("Failed to add channel to bridge", bridge_id=bridge_id, channel_id=channel_id, status=status, response=response)
@@ -1037,4 +1097,3 @@ class ARIClient:
         except Exception as e:
             logger.error("Error destroying bridge", bridge_id=bridge_id, error=str(e))
             return False
-

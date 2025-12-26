@@ -11,10 +11,8 @@
 #   docker compose build ai-engine
 #   docker compose up -d
 #
-# For optional monitoring (Prometheus + Grafana), use:
-#   docker compose -f docker-compose.monitoring.yml up -d
-#
-# See monitoring/README.md for details.
+# Prometheus-format metrics are available at `http://<host>:15000/metrics`.
+# Per-call debugging is via Admin UI → Call History.
 
 services:
   ai-engine:
@@ -37,13 +35,17 @@ services:
       - ./scripts:/app/scripts
       - ./models:/app/models
       - ./asterisk_media:/mnt/asterisk_media
+      - ./data:/app/data
     env_file:
       - .env
     environment:
       - PYTHONPATH=/app
       - PYTHONUNBUFFERED=1
-      # HEALTH_BIND_HOST defaults to 127.0.0.1 (secure). Set explicitly to 0.0.0.0 only if needed.
-      # - HEALTH_BIND_HOST=0.0.0.0
+      # Timezone for consistent timestamp display and call history records
+      # Configurable via .env (default: America/Phoenix)
+      - TZ=${TZ:-America/Phoenix}
+      # Enable health endpoint access from other containers (admin-ui needs /sessions/stats)
+      - HEALTH_BIND_HOST=0.0.0.0
       - ASTERISK_HOST=${ASTERISK_HOST:-127.0.0.1}
     tty: true
     stdin_open: true
@@ -57,6 +59,9 @@ services:
       dockerfile: Dockerfile
       args:
         - INCLUDE_KROKO_EMBEDDED=${INCLUDE_KROKO_EMBEDDED:-false}
+        - INCLUDE_FASTER_WHISPER=${INCLUDE_FASTER_WHISPER:-false}
+        - INCLUDE_WHISPER_CPP=${INCLUDE_WHISPER_CPP:-false}
+        - INCLUDE_MELOTTS=${INCLUDE_MELOTTS:-false}
     container_name: local_ai_server
     network_mode: host
     env_file:
@@ -167,11 +172,15 @@ services:
       # The admin-ui image installs Docker CLI + Compose plugin internally.
       # Optional fallback (host binaries): use `docker compose -f docker-compose.yml -f docker-compose.admin-ui-host-binaries.yml up -d admin-ui`
       - /etc/os-release:/host/etc/os-release:ro
+      - ./data:/app/data
     env_file:
       - .env
     environment:
       - PROJECT_ROOT=/app/project
-      - UVICORN_HOST=${UVICORN_HOST:-127.0.0.1}
+      - UVICORN_HOST=${UVICORN_HOST:-0.0.0.0}
       - UVICORN_PORT=${UVICORN_PORT:-3003}
       - JWT_SECRET=${JWT_SECRET:-}
+      # Timezone for consistent timestamp display in Admin UI
+      # Configurable via .env (default: America/Phoenix)
+      - TZ=${TZ:-America/Phoenix}
     restart: unless-stopped

@@ -467,6 +467,289 @@ async def get_system_metrics():
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
+@router.get("/docker/disk-usage")
+async def get_docker_disk_usage():
+    """
+    Get Docker disk usage breakdown (images, containers, build cache, volumes).
+    This helps identify what's consuming disk space.
+    """
+    import subprocess
+    
+    try:
+        # Run docker system df to get disk usage
+        result = subprocess.run(
+            ["docker", "system", "df", "-v", "--format", "json"],
+            capture_output=True,
+            text=True,
+            timeout=30
+        )
+        
+        if result.returncode != 0:
+            # Fallback to non-JSON format
+            result = subprocess.run(
+                ["docker", "system", "df"],
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+            
+            # Parse the text output
+            lines = result.stdout.strip().split('\n')
+            usage = {
+                "images": {"total": 0, "active": 0, "size": "0B", "reclaimable": "0B"},
+                "containers": {"total": 0, "active": 0, "size": "0B", "reclaimable": "0B"},
+                "volumes": {"total": 0, "active": 0, "size": "0B", "reclaimable": "0B"},
+                "build_cache": {"total": 0, "active": 0, "size": "0B", "reclaimable": "0B"},
+            }
+            
+            for line in lines[1:]:  # Skip header
+                parts = line.split()
+                if len(parts) >= 5:
+                    type_name = parts[0].lower()
+                    if type_name == "images":
+                        usage["images"] = {
+                            "total": int(parts[1]) if parts[1].isdigit() else 0,
+                            "active": int(parts[2]) if parts[2].isdigit() else 0,
+                            "size": parts[3],
+                            "reclaimable": parts[4] if len(parts) > 4 else "0B"
+                        }
+                    elif type_name == "containers":
+                        usage["containers"] = {
+                            "total": int(parts[1]) if parts[1].isdigit() else 0,
+                            "active": int(parts[2]) if parts[2].isdigit() else 0,
+                            "size": parts[3],
+                            "reclaimable": parts[4] if len(parts) > 4 else "0B"
+                        }
+                    elif type_name == "local" and len(parts) > 1 and parts[1].lower() == "volumes":
+                        usage["volumes"] = {
+                            "total": int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0,
+                            "active": int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0,
+                            "size": parts[4] if len(parts) > 4 else "0B",
+                            "reclaimable": parts[5] if len(parts) > 5 else "0B"
+                        }
+                    elif type_name == "build":
+                        usage["build_cache"] = {
+                            "total": int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0,
+                            "active": int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0,
+                            "size": parts[4] if len(parts) > 4 else "0B",
+                            "reclaimable": parts[5] if len(parts) > 5 else "0B"
+                        }
+            
+            return usage
+        
+        # Parse JSON output and transform to expected format
+        import json
+        data = json.loads(result.stdout)
+        
+        # Transform the verbose JSON format to our expected structure
+        def format_bytes(size_bytes):
+            """Convert bytes to human readable string."""
+            if size_bytes == 0:
+                return "0B"
+            for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
+                if abs(size_bytes) < 1024.0:
+                    return f"{size_bytes:.1f}{unit}"
+                size_bytes /= 1024.0
+            return f"{size_bytes:.1f}PB"
+        
+        # Calculate totals from the detailed JSON data
+        images = data.get("Images", []) or []
+        containers = data.get("Containers", []) or []
+        volumes = data.get("Volumes", []) or []
+        build_cache = data.get("BuildCache", []) or []
+        
+        def parse_size(size_str):
+            """Parse size string like '10.2GB' to bytes."""
+            if not size_str or size_str == "0B":
+                return 0
+            try:
+                # Check longer units first to avoid "GB" matching "B"
+                units = [('TB', 1024**4), ('GB', 1024**3), ('MB', 1024**2), ('KB', 1024), ('B', 1)]
+                size_upper = size_str.upper()
+                for unit, multiplier in units:
+                    if size_upper.endswith(unit):
+                        return float(size_str[:-len(unit)]) * multiplier
+                return float(size_str)
+            except:
+                return 0
+        
+        def safe_int(val, default=0):
+            """Safely convert value to int."""
+            if val is None:
+                return default
+            try:
+                return int(val)
+            except (ValueError, TypeError):
+                return default
+        
+        # Calculate image stats
+        img_total_size = sum(parse_size(img.get("Size", "0B")) for img in images)
+        img_reclaimable = sum(parse_size(img.get("Size", "0B")) for img in images if safe_int(img.get("Containers")) == 0)
+        img_active = sum(1 for img in images if safe_int(img.get("Containers")) > 0)
+        
+        # Calculate container stats  
+        cont_total_size = sum(parse_size(c.get("Size", "0B")) for c in containers)
+        cont_reclaimable = sum(parse_size(c.get("Size", "0B")) for c in containers if c.get("State") != "running")
+        cont_active = sum(1 for c in containers if c.get("State") == "running")
+        
+        # Calculate volume stats
+        vol_total_size = sum(parse_size(v.get("Size", "0B")) for v in volumes)
+        vol_active = sum(1 for v in volumes if safe_int(v.get("Links")) > 0)
+        
+        # Calculate build cache stats
+        bc_total_size = sum(parse_size(bc.get("Size", "0B")) for bc in build_cache)
+        bc_reclaimable = sum(parse_size(bc.get("Size", "0B")) for bc in build_cache if bc.get("InUse") == "false")
+        bc_active = sum(1 for bc in build_cache if bc.get("InUse") == "true")
+        
+        return {
+            "images": {
+                "total": len(images),
+                "active": img_active,
+                "size": format_bytes(img_total_size),
+                "reclaimable": format_bytes(img_reclaimable)
+            },
+            "containers": {
+                "total": len(containers),
+                "active": cont_active,
+                "size": format_bytes(cont_total_size),
+                "reclaimable": format_bytes(cont_reclaimable)
+            },
+            "volumes": {
+                "total": len(volumes),
+                "active": vol_active,
+                "size": format_bytes(vol_total_size),
+                "reclaimable": "0B"  # Volumes shouldn't be auto-reclaimed
+            },
+            "build_cache": {
+                "total": len(build_cache),
+                "active": bc_active,
+                "size": format_bytes(bc_total_size),
+                "reclaimable": format_bytes(bc_reclaimable)
+            }
+        }
+        
+    except subprocess.TimeoutExpired:
+        raise HTTPException(status_code=500, detail="Timeout getting Docker disk usage")
+    except Exception as e:
+        logger.error(f"Error getting Docker disk usage: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class PruneRequest(BaseModel):
+    prune_build_cache: bool = True
+    prune_images: bool = False  # Dangerous - only unused images
+    prune_containers: bool = False  # Stopped containers only
+    prune_volumes: bool = False  # Very dangerous - data loss
+
+
+class PruneResponse(BaseModel):
+    success: bool
+    space_reclaimed: str
+    details: dict
+
+
+@router.post("/docker/prune", response_model=PruneResponse)
+async def prune_docker_resources(request: PruneRequest):
+    """
+    Clean up Docker resources to free disk space.
+    
+    WARNING: This operation is destructive and cannot be undone.
+    - Build cache: Safe to prune (will rebuild as needed)
+    - Images: Removes unused images (tagged images in use are preserved)
+    - Containers: Removes stopped containers only
+    - Volumes: DANGEROUS - can cause data loss
+    """
+    import subprocess
+    
+    total_reclaimed = 0
+    details = {}
+    
+    try:
+        # Always prune build cache first (safest, often largest)
+        # Use -a to remove ALL build cache, not just unused layers
+        if request.prune_build_cache:
+            result = subprocess.run(
+                ["docker", "builder", "prune", "-a", "-f"],
+                capture_output=True,
+                text=True,
+                timeout=120
+            )
+            if result.returncode == 0:
+                # Parse reclaimed space from output
+                output = result.stdout + result.stderr
+                details["build_cache"] = "pruned"
+                # Try to extract size
+                for line in output.split('\n'):
+                    if 'reclaimed' in line.lower() or 'freed' in line.lower():
+                        details["build_cache_output"] = line.strip()
+            else:
+                details["build_cache"] = f"error: {result.stderr}"
+        
+        # Prune unused images (all images not used by containers)
+        # Use -a to remove ALL unused images, not just dangling ones
+        if request.prune_images:
+            result = subprocess.run(
+                ["docker", "image", "prune", "-a", "-f"],
+                capture_output=True,
+                text=True,
+                timeout=120
+            )
+            if result.returncode == 0:
+                details["images"] = "pruned"
+                for line in result.stdout.split('\n'):
+                    if 'reclaimed' in line.lower():
+                        details["images_output"] = line.strip()
+            else:
+                details["images"] = f"error: {result.stderr}"
+        
+        # Prune stopped containers
+        if request.prune_containers:
+            result = subprocess.run(
+                ["docker", "container", "prune", "-f"],
+                capture_output=True,
+                text=True,
+                timeout=60
+            )
+            if result.returncode == 0:
+                details["containers"] = "pruned"
+            else:
+                details["containers"] = f"error: {result.stderr}"
+        
+        # Prune unused volumes (DANGEROUS)
+        if request.prune_volumes:
+            result = subprocess.run(
+                ["docker", "volume", "prune", "-f"],
+                capture_output=True,
+                text=True,
+                timeout=60
+            )
+            if result.returncode == 0:
+                details["volumes"] = "pruned"
+            else:
+                details["volumes"] = f"error: {result.stderr}"
+        
+        # Run system prune to get total reclaimed (without volumes for safety)
+        result = subprocess.run(
+            ["docker", "system", "df"],
+            capture_output=True,
+            text=True,
+            timeout=30
+        )
+        
+        return PruneResponse(
+            success=True,
+            space_reclaimed=details.get("build_cache_output", "Unknown"),
+            details=details
+        )
+        
+    except subprocess.TimeoutExpired:
+        raise HTTPException(status_code=500, detail="Timeout during Docker prune")
+    except Exception as e:
+        logger.error(f"Error pruning Docker resources: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/health")
 async def get_system_health():
     """
@@ -477,12 +760,20 @@ async def get_system_health():
             import websockets
             import json
             import asyncio
+            from settings import get_setting
             
             # With host networking, use localhost instead of container name
             uri = os.getenv("HEALTH_CHECK_LOCAL_AI_URL", "ws://127.0.0.1:8765")
             logger.debug("Checking Local AI at %s", uri)
             async with websockets.connect(uri, open_timeout=5) as websocket:
                 logger.debug("Local AI connected, sending status...")
+                auth_token = (get_setting("LOCAL_WS_AUTH_TOKEN", os.getenv("LOCAL_WS_AUTH_TOKEN", "")) or "").strip()
+                if auth_token:
+                    await websocket.send(json.dumps({"type": "auth", "auth_token": auth_token}))
+                    raw = await asyncio.wait_for(websocket.recv(), timeout=5)
+                    auth_data = json.loads(raw)
+                    if auth_data.get("type") != "auth_response" or auth_data.get("status") != "ok":
+                        raise RuntimeError(f"Local AI auth failed: {auth_data}")
                 await websocket.send(json.dumps({"type": "status"}))
                 logger.debug("Local AI sent, waiting for response...")
                 response = await asyncio.wait_for(websocket.recv(), timeout=5)

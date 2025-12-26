@@ -10,7 +10,17 @@ from jose import JWTError, jwt
 from settings import USERS_PATH
 
 # Configuration
-SECRET_KEY = os.getenv("JWT_SECRET", "dev-secret-key-change-in-prod")
+DEFAULT_DEV_SECRET = "dev-secret-key-change-in-prod"
+PLACEHOLDER_SECRETS = {
+    "",
+    "change-me-please",
+    "changeme",
+    DEFAULT_DEV_SECRET,
+}
+
+_raw_secret = (os.getenv("JWT_SECRET", "") or "").strip()
+SECRET_KEY = _raw_secret or DEFAULT_DEV_SECRET
+USING_PLACEHOLDER_SECRET = SECRET_KEY in PLACEHOLDER_SECRETS
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24  # 24 hours
 

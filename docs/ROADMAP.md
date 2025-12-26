@@ -369,26 +369,24 @@ Each milestone includes scope, implementation details, and verification criteria
 - **Dependencies**: Milestones 5–7 in place so streaming telemetry, pipeline metadata, and configuration hot-reload already work.
 - **Workstreams & Tasks**:
   1. **Observability Foundation**
-     - Add Prometheus & Grafana services to `docker-compose.yml` with persistent volumes and optional compose profile.
-     - Expose Make targets (`monitor-up`, `monitor-down`, `monitor-logs`, `monitor-status`) plus SSH-friendly variants in `tools/ide/Makefile.ide` if needed.
-     - Ensure `ai-engine` and `local-ai-server` `/metrics` export call/pipeline labels (`session_uuid`, `pipeline_name`, `provider_id`, `model_variant`).
+     - Keep `/metrics` strictly low-cardinality (no per-call identifiers like `session_uuid`/`call_id`).
+     - Document a bring-your-own Prometheus/Grafana stack for operators who want time-series monitoring.
   2. **Call Analytics & Storage**
      - Extend `SessionStore` (or dedicated collector) to emit end-of-call summaries: duration, turn count, fallback/jitter totals, sentiment score placeholder, pipeline + model names.
-     - Archive transcripts and the associated config snapshot per call (e.g., `monitoring/call_sessions/<uuid>.jsonl` + `settings.json`).
-     - Publish Prometheus metrics for recommendations (`ai_agent_setting_recommendation_total{field="streaming.low_watermark_ms"}`) and sentiment/quality trends.
+     - Archive transcripts and the associated config snapshot per call in Call History storage (avoid per-call time-series labels).
+     - Publish aggregate Prometheus metrics for recommendations (`ai_agent_setting_recommendation_total{field="streaming.low_watermark_ms"}`) and sentiment/quality trends.
   3. **Recommendations & Feedback Loop**
      - Implement rule-based analyzer that inspects call summaries and suggests YAML tweaks (buffer warmup, fallback timeouts, pipeline swaps) exposed via Prometheus labels and a lightweight `/feedback/latest` endpoint.
      - Document how to interpret each recommendation and where to edit (`config/ai-agent.yaml`).
   4. **Dashboards & UX**
      - Curate Grafana dashboards: real-time call board, pipeline/model leaderboards, sentiment timeline, recommendation feed, transcript quick links.
-     - Keep dashboards auto-provisioned (`monitoring/dashboards/`) so `make monitor-up` renders data without manual import.
+     - Keep dashboards/provisioning as a bring-your-own workflow (the project no longer ships `monitoring/` assets in the main repo path).
   5. **Guided Setup for Non-Linux Users**
-     - Deliver a helper script (e.g., `scripts/setup_monitoring.py`) that checks Docker, scaffolds `.env`, snapshots current YAML, enables the monitoring profile, and prints Grafana credentials/URL.
+     - Deliver a helper script (e.g., `scripts/setup_observability.py`) that checks Docker, prints scrape endpoints, and links to Call History inspection tools/docs.
      - Update docs/Architecture, Agents.md, `.cursor/…`, `.windsurf/…`, `Gemini.md` to mention the optional workflow.
 - **Acceptance & Fast Verification**:
-  - `make monitor-up` (or helper script) starts Prometheus + Grafana; Grafana reachable on documented port with dashboards populated during a smoke call.
-  - After a call, a transcript + metrics artifact is created and the recommendation endpoint lists at least one actionable suggestion referencing YAML keys.
-  - Disabling the stack (`make monitor-down`) leaves core services unaffected and removes Prometheus/Grafana containers.
+  - After a call, a Call History entry is created (including transcript/metadata), and the recommendation endpoint lists at least one actionable suggestion referencing YAML keys.
+  - Metrics remain low-cardinality under load (no per-call labels).
 
 Keep this roadmap updated after each milestone to help any collaborator—or future AI assistant—pick up where we left off.
 
@@ -445,6 +443,46 @@ Keep this roadmap updated after each milestone to help any collaborator—or fut
 - Call 1763610866.6294: local_hybrid pipeline, 54.57s, tool execution successful
 - Call 1763582071.6214: transfer tool, ringgroup resolution working
 - Zero false configuration warnings in production
+
+---
+
+### v4.5.3 (December 2025) - Security Hardening Sprint
+
+**Release Date**: December 17, 2025  
+**Focus**: Security hardening, resilience, and Admin UI production readiness
+
+**Security Hardening** (AAVA-131):
+
+- Default network bindings changed to localhost (127.0.0.1) for all services
+- Admin UI requires `JWT_SECRET` and `UVICORN_HOST=0.0.0.0` for remote access
+- local_ai_server fail-closed auth enforcement for non-loopback binds
+- Health endpoint binds to localhost by default
+
+**Resilience Improvements** (AAVA-136, AAVA-137):
+
+- ARI runtime reconnect supervisor with exponential backoff
+- Removed blocking IO from async runtime paths (`time.sleep` → `asyncio.sleep`)
+- `/ready` endpoint reflects true ARI connection state
+
+**Admin UI Adoption Readiness** (AAVA-130):
+
+- Fixed JWT_SECRET load-order vulnerability
+- Fixed config export crash (`CONFIG_PATH.exists()`)
+- Atomic writes for all config-mutating endpoints
+- CORS restricted by default with env override
+
+**Documentation Updates** (AAVA-132, AAVA-133, AAVA-134, AAVA-135):
+
+- Updated resilience.md from v3.0 to v4.x
+- Fixed transport default documentation (ExternalMedia is default)
+- Added Kroko binary integrity verification (SHA256)
+- Added Admin-UI control plane hardening documentation
+
+**Local AI Server Logging**:
+
+- Suppressed noisy websockets handshake errors via log filter
+- Added client connection logging at INFO level
+- Aligned main.py defaults with docker-compose.yml
 
 ---
 
@@ -531,6 +569,25 @@ Keep this roadmap updated after each milestone to help any collaborator—or fut
 
 ---
 
+### 🚧 Next: Milestone 21 - Call History & Analytics Dashboard
+
+**Status**: In Progress  
+**Branch**: `feature/call-history`  
+**Estimated Effort**: 7 days
+
+Comprehensive call history with debugging capabilities:
+
+- SQLite persistence for call records
+- Full conversation transcripts with timestamps
+- Tool execution logging and debugging
+- Stats dashboard with charts (calls/day, outcomes, provider usage)
+- Search by caller, provider, pipeline, context, outcome
+- CSV/JSON export
+
+See: `docs/contributing/milestones/milestone-21-call-history.md`
+
+---
+
 ### v4.5 Planning (Q1 2026)
 
 **Testing & Quality**:
@@ -541,14 +598,14 @@ Keep this roadmap updated after each milestone to help any collaborator—or fut
 - 🎯 Increase CI coverage threshold to 30% then 40% (currently 27%)
 - ⏳ Automated regression test suite (foundation in place)
 
-**Admin UI Adoption Readiness**:
+**Admin UI Adoption Readiness** (AAVA-130 - ✅ COMPLETED Dec 2025):
 
-- 🔥 AAVA-130: Fix JWT secret load-order vulnerability; tighten CORS defaults
-- 🔥 AAVA-130: Fix config export crash (`CONFIG_PATH.exists()`)
-- 🔥 AAVA-130: Atomic writes for remaining hotspots (`wizard.py`, `local_ai.py`, `system.py`)
-- 🔥 AAVA-130: Lightweight config validation endpoint (syntax + basic schema/footguns)
-- 🔄 Restart orchestration improvements (restart vs recreate, readiness verification via `/ready`)
-- 🔄 ARI scheme/port alignment across wizard → `.env` → engine runtime
+- ✅ AAVA-130: Fix JWT secret load-order vulnerability; tighten CORS defaults
+- ✅ AAVA-130: Fix config export crash (`CONFIG_PATH.exists()`)
+- ✅ AAVA-130: Atomic writes for remaining hotspots (`wizard.py`, `local_ai.py`, `system.py`)
+- ✅ AAVA-130: Lightweight config validation endpoint (syntax + basic schema/footguns)
+- ✅ Restart orchestration improvements (restart vs recreate, readiness verification via `/ready`)
+- ✅ ARI scheme/port alignment across wizard → `.env` → engine runtime
 
 **Additional Tool Categories**:
 
@@ -710,5 +767,5 @@ For detailed implementation plans and specifications:
 
 ---
 
-**Last Updated**: December 8, 2025  
-**Roadmap Version**: 2.5 (Added v4.4.1 Admin UI, v4.4.2 Local AI Enhancements)
+**Last Updated**: December 17, 2025  
+**Roadmap Version**: 2.6 (Added v4.5.3 Security Hardening Sprint, updated v4.5 Planning status)
