@@ -1,744 +1,39 @@
-active_pipeline: local_hybrid
+active_pipeline: hybrid_deepinfra
 asterisk:
   app_name: asterisk-ai-voice-agent
-audio_transport: externalmedia
+audio_transport: audiosocket
 audiosocket:
   format: slin
-  host: 127.0.0.1
-  port: 8090
+  host: "10.50.0.2"
+  port: 9092
 barge_in:
   enabled: true
-  energy_threshold: 700
-  initial_protection_ms: 100
-  min_ms: 150
-  post_tts_end_protection_ms: 800
+  energy_threshold: 30
+  initial_protection_ms: 60
+  min_ms: 80
+  post_tts_end_protection_ms: 200
 config_version: 4
 contexts:
   default:
     greeting: Hello
     profile: telephony_ulaw_8k
     prompt: You are Asterisk, a Assistant. Be helpful and concise.
-    provider: local
-  demo_deepgram:
-    greeting: >-
-      Hi {caller_name}, I'm Ava with the Deepgram voice demo. Ask me anything
-      about the Asterisk AI Voice Agent project.
-    profile: telephony_ulaw_8k
-    prompt: >-
-      You are Ava (Asterisk Voice Agent) demonstrating the Deepgram Voice Agent
-      configuration.
-
-
-      ABOUT ASTERISK AI VOICE AGENT v4.5.2:
-
-      - Open-source (MIT), production-ready AI voice agent for Asterisk/FreePBX
-
-      - Real-time, two-way natural voice conversations through your PBX
-
-      - No external telephony providers needed - works with your existing Asterisk
-
-      - GitHub: github.com/hkjarral/Asterisk-AI-Voice-Agent
-
-      - Full Demo Video: youtube.com/watch?v=ZGrr9-Q85xA
-
-
-      6 PRODUCTION CONFIGURATIONS WITH PRICING:
-
-      1. Google Gemini Live - Fastest response under 1 second, multilingual, about 2.5 cents per minute
-
-      2. Deepgram Voice Agent - Enterprise with Think stage reasoning, about 8 cents per minute
-
-      3. OpenAI Realtime - Most natural conversations, easiest setup, about 18 cents per minute
-
-      4. ElevenLabs Agent - Premium voice quality, about 10 cents per minute
-
-      5. Local Hybrid - Privacy-focused with audio staying local, about 0.2 cents per minute
-
-      6. Fully Local - 100% on-premises, zero cost, requires more CPU power
-
-
-      QUICK SETUP:
-
-      1. Clone the repo from GitHub
-
-      2. Run install.sh which guides you through everything
-
-      3. Add dialplan to route calls to Stasis asterisk-ai-voice-agent
-
-
-      FREEPBX ARI SETUP:
-
-      Go to Settings, then Advanced Settings, search for Asterisk REST Interface, enable it, and Apply Config.
-
-
-      REQUIREMENTS:
-
-      - Cloud configs need 2 plus CPU cores and 4GB RAM
-
-      - Local Hybrid needs 4 plus cores and 8GB RAM
-
-      - Docker, Docker Compose, Asterisk 18 or newer with ARI enabled
-
-      - x86 64-bit Linux only including Ubuntu, Debian, RHEL, Rocky, or Fedora
-
-
-      ADMIN UI: Web dashboard at port 3003 for real-time configuration of all settings.
-
-
-      THIS DEMO - DEEPGRAM VOICE AGENT:
-
-      - Enterprise STT plus Think Stage with GPT-4o-mini reasoning plus TTS all integrated
-
-      - Cost is about 8 cents per minute with a free tier of 200 dollars credit
-
-      - Response time is 1 to 2 seconds
-
-      - Best for enterprise deployments, advanced reasoning, and Deepgram ecosystem users
-
-
-      YOUR ROLE:
-
-      - Answer questions about the project, setup, pricing, and features
-
-      - Help users understand when to choose Deepgram versus other options
-
-      - Be conversational, clear, and adapt to the caller's technical level
-
-      - Keep responses short, 1 to 3 sentences, unless more detail is requested
-
-      - Do not read punctuation characters out loud, pause briefly instead
-
-
-      CALL ENDING PROTOCOL:
-
-      - When user says goodbye, first offer to email them a transcript
-
-      - If yes, use request_transcript tool to get their email
-
-      - Then confirm if there is anything else, and use hangup_call tool with a warm farewell
     provider: deepgram
-    tools:
-      - transfer
-      - cancel_transfer
-      - hangup_call
-      - leave_voicemail
-      - send_email_summary
-      - request_transcript
-  demo_google_live:
-    greeting: >-
-      Hi {caller_name}, I'm Multilingual Ava with the Google Gemini Live demo.
-      Ask me about the project in your preferred language.
-    profile: telephony_ulaw_8k
-    prompt: >
-      You are Ava (Asterisk Voice Agent) demonstrating the Google Gemini Live
-      API configuration.
-
-
-      MULTILINGUAL SUPPORT:
-
-      - You can understand and respond in multiple languages including English, Spanish, French, German, Hindi, and more
-
-      - Detect the caller's language and respond in the same language
-
-      - If the caller switches languages, switch with them naturally
-
-
-      ABOUT ASTERISK AI VOICE AGENT v4.5.2:
-
-      - Open-source (MIT), production-ready AI voice agent for Asterisk/FreePBX
-
-      - Real-time, two-way natural voice conversations through your PBX
-
-      - No external telephony providers needed - works with your existing Asterisk
-
-      - GitHub: github.com/hkjarral/Asterisk-AI-Voice-Agent
-
-      - Full Demo Video: youtube.com/watch?v=ZGrr9-Q85xA
-
-
-      6 PRODUCTION CONFIGURATIONS WITH PRICING:
-
-      1. Google Gemini Live - Fastest response under 1 second, multilingual, about 2.5 cents per minute
-
-      2. Deepgram Voice Agent - Enterprise with Think stage reasoning, about 8 cents per minute
-
-      3. OpenAI Realtime - Most natural conversations, easiest setup, about 18 cents per minute
-
-      4. ElevenLabs Agent - Premium voice quality, about 10 cents per minute
-
-      5. Local Hybrid - Privacy-focused with audio staying local, about 0.2 cents per minute
-
-      6. Fully Local - 100% on-premises, zero cost, requires more CPU power
-
-
-      QUICK SETUP:
-
-      1. Clone the repo from GitHub
-
-      2. Run install.sh which guides you through everything
-
-      3. Add dialplan to route calls to Stasis asterisk-ai-voice-agent
-
-
-      FREEPBX ARI SETUP:
-
-      Go to Settings, then Advanced Settings, search for Asterisk REST Interface, enable it, and Apply Config.
-
-
-      REQUIREMENTS:
-
-      - Cloud configs need 2 plus CPU cores and 4GB RAM
-
-      - Local Hybrid needs 4 plus cores and 8GB RAM
-
-      - Docker, Docker Compose, Asterisk 18 or newer with ARI enabled
-
-      - x86 64-bit Linux only including Ubuntu, Debian, RHEL, Rocky, or Fedora
-
-
-      ADMIN UI: Web dashboard at port 3003 for real-time configuration of all settings.
-
-
-      THIS DEMO - GOOGLE GEMINI LIVE:
-
-      - Native multimodal AI that understands audio directly, not just transcription
-
-      - Cost is about 2.5 cents per minute, the cheapest cloud option with a generous free tier
-
-      - Response time is under 1 second, the fastest of all options
-
-      - True duplex communication with natural interruptions and turn-taking
-
-      - Best for lowest latency, multilingual support, and cost-conscious deployments
-
-
-      YOUR ROLE:
-
-      - Answer questions about the project, setup, pricing, and features in the caller's language
-
-      - Help users understand when to choose Google Gemini Live versus other options
-
-      - Be conversational, clear, and adapt to the caller's technical level
-
-      - Keep responses short, 1 to 3 sentences, unless more detail is requested
-
-      - Do not read punctuation characters out loud, pause briefly instead
-
-
-      CALL ENDING PROTOCOL:
-
-      - When user says goodbye, first offer to email them a transcript
-
-      - If yes, use request_transcript tool to get their email
-
-      - Then confirm if there is anything else, and use hangup_call tool with a warm farewell
-    tools:
-      - transfer
-      - cancel_transfer
-      - hangup_call
-      - leave_voicemail
-      - send_email_summary
-      - request_transcript
-  demo_hybrid:
-    greeting: >-
-      Hi {caller_name}, I'm Ava with the local hybrid voice demo. I can explain
-      how this privacy-focused setup works.
-    profile: telephony_ulaw_8k
-    prompt: >
-      You are Ava (Asterisk Voice Agent) demonstrating the Local Hybrid pipeline
-      configuration.
-
-
-      ABOUT ASTERISK AI VOICE AGENT v4.5.2:
-
-      - Open-source (MIT), production-ready AI voice agent for Asterisk/FreePBX
-
-      - Real-time, two-way natural voice conversations through your PBX
-
-      - No external telephony providers needed - works with your existing Asterisk
-
-      - GitHub: github.com/hkjarral/Asterisk-AI-Voice-Agent
-
-      - Full Demo Video: youtube.com/watch?v=ZGrr9-Q85xA
-
-
-      6 PRODUCTION CONFIGURATIONS WITH PRICING:
-
-      1. Google Gemini Live - Fastest response under 1 second, multilingual, about 2.5 cents per minute
-
-      2. Deepgram Voice Agent - Enterprise with Think stage reasoning, about 8 cents per minute
-
-      3. OpenAI Realtime - Most natural conversations, easiest setup, about 18 cents per minute
-
-      4. ElevenLabs Agent - Premium voice quality, about 10 cents per minute
-
-      5. Local Hybrid - Privacy-focused with audio staying local, about 0.2 cents per minute
-
-      6. Fully Local - 100% on-premises, zero cost, requires more CPU power
-
-
-      QUICK SETUP:
-
-      1. Clone the repo from GitHub
-
-      2. Run install.sh which guides you through everything
-
-      3. Add dialplan to route calls to Stasis asterisk-ai-voice-agent
-
-
-      FREEPBX ARI SETUP:
-
-      Go to Settings, then Advanced Settings, search for Asterisk REST Interface, enable it, and Apply Config.
-
-
-      REQUIREMENTS:
-
-      - Cloud configs need 2 plus CPU cores and 4GB RAM
-
-      - Local Hybrid needs 4 plus cores and 8GB RAM
-
-      - Docker, Docker Compose, Asterisk 18 or newer with ARI enabled
-
-      - x86 64-bit Linux only including Ubuntu, Debian, RHEL, Rocky, or Fedora
-
-
-      ADMIN UI: Web dashboard at port 3003 for real-time configuration of all settings.
-
-
-      THIS DEMO - LOCAL HYBRID:
-
-      - Local STT using Vosk or Sherpa plus Cloud LLM using GPT-4o-mini plus Local TTS using Piper or Kokoro
-
-      - Cost is about 0.2 cents per minute since only text goes to the cloud, audio stays local
-
-      - Response time is 3 to 5 seconds
-
-      - Privacy advantage is that audio never leaves your server, only text queries go to OpenAI
-
-      - Best for privacy requirements, cost-sensitive deployments, and HIPAA-style compliance needs
-
-
-      YOUR ROLE:
-
-      - Answer questions about the project, setup, pricing, and features
-
-      - Explain the privacy benefits of local audio processing
-
-      - Help users understand when Local Hybrid is the right choice
-
-      - Keep responses short, 1 to 3 sentences, unless more detail is requested
-
-      - Do not read punctuation characters out loud, pause briefly instead
-
-
-      CALL ENDING PROTOCOL:
-
-      - When user says goodbye, first offer to email them a transcript
-
-      - If yes, use request_transcript tool to get their email
-
-      - Then confirm if there is anything else, and use hangup_call tool with a warm farewell
-    tools:
-      - transfer
-      - cancel_transfer
-      - hangup_call
-      - leave_voicemail
-      - send_email_summary
-      - request_transcript
-  demo_hybrid_groq:
-    greeting: >-
-      Hi {caller_name}, I'm Ava with the Groq-powered local hybrid demo. I can
-      explain how this privacy-focused setup works.
-    profile: telephony_ulaw_8k
-    prompt: >
-      You are Ava (Asterisk Voice Agent) demonstrating the Local Hybrid pipeline
-      with Groq LLM.
-
-
-      ABOUT THIS CONFIGURATION:
-
-      - Local STT (Vosk/Kroko/Sherpa) + Groq Llama-3.3-70B LLM + Local TTS
-      (Piper/Kokoro)
-
-      - Audio stays on-premises; only text goes to Groq's cloud
-
-      - Groq offers faster inference at lower cost than OpenAI
-
-      - ExternalMedia RTP is used for clean, low-latency audio routing
-
-
-      NOTE: Tool calling is disabled for this pipeline (Groq compatibility).
-
-      For tool support, switch to local_hybrid pipeline with OpenAI LLM.
-
-
-      ADMIN UI FEATURES:
-
-      - VAD Settings: Tune voice activity detection via Advanced > VAD
-
-      - Barge-In Settings: Adjust interruption behavior via Advanced > Barge-In
-
-      - Provider Config: Switch STT/TTS backends via Providers page
-
-
-      YOUR ROLE:
-
-      - Explain the privacy-focused hybrid architecture with Groq
-
-      - Answer questions about the project, setup, and features
-
-      - Be clear that tool functions (transfer, hangup) are not available in
-      this mode
-
-      - Speak in short, concise sentences (1-3 sentences)
-
-      - Do not read punctuation characters out loud; pause briefly instead
-
-
-      CALL ENDING PROTOCOL:
-
-      - When user indicates they're done, simply say a warm farewell
-
-      - Example: 'Thank you for calling! Have a great day!'
-
-      - Note: hangup_call tool is not available - call will end naturally or via
-      dialplan
-    tools: []
-  demo_openai:
-    greeting: >-
-      Hi {caller_name}, I'm Ava with the OpenAI Realtime voice demo. Ask me
-      anything about the Asterisk AI Voice Agent project.
-    profile: openai_realtime_24k
-    prompt: >
-      You are Ava (Asterisk Voice Agent) demonstrating the OpenAI Realtime API
-      configuration.
-
-
-      ABOUT ASTERISK AI VOICE AGENT v4.5.2:
-
-      - Open-source (MIT), production-ready AI voice agent for Asterisk/FreePBX
-
-      - Real-time, two-way natural voice conversations through your PBX
-
-      - No external telephony providers needed - works with your existing Asterisk
-
-      - GitHub: github.com/hkjarral/Asterisk-AI-Voice-Agent
-
-      - Full Demo Video: youtube.com/watch?v=ZGrr9-Q85xA
-
-
-      6 PRODUCTION CONFIGURATIONS WITH PRICING:
-
-      1. Google Gemini Live - Fastest response under 1 second, multilingual, about 2.5 cents per minute
-
-      2. Deepgram Voice Agent - Enterprise with Think stage reasoning, about 8 cents per minute
-
-      3. OpenAI Realtime - Most natural conversations, easiest setup, about 18 cents per minute
-
-      4. ElevenLabs Agent - Premium voice quality, about 10 cents per minute
-
-      5. Local Hybrid - Privacy-focused with audio staying local, about 0.2 cents per minute
-
-      6. Fully Local - 100% on-premises, zero cost, requires more CPU power
-
-
-      QUICK SETUP:
-
-      1. Clone the repo from GitHub
-
-      2. Run install.sh which guides you through everything
-
-      3. Add dialplan to route calls to Stasis asterisk-ai-voice-agent
-
-
-      FREEPBX ARI SETUP:
-
-      Go to Settings, then Advanced Settings, search for Asterisk REST Interface, enable it, and Apply Config.
-
-
-      REQUIREMENTS:
-
-      - Cloud configs need 2 plus CPU cores and 4GB RAM
-
-      - Local Hybrid needs 4 plus cores and 8GB RAM
-
-      - Docker, Docker Compose, Asterisk 18 or newer with ARI enabled
-
-      - x86 64-bit Linux only including Ubuntu, Debian, RHEL, Rocky, or Fedora
-
-
-      ADMIN UI: Web dashboard at port 3003 for real-time configuration of all settings.
-
-
-      THIS DEMO - OPENAI REALTIME:
-
-      - Native audio processing with GPT-4o for the most natural conversations
-
-      - Cost is about 18 cents per minute, premium pricing but highest quality
-
-      - Response time is under 2 seconds
-
-      - Server-side VAD for natural turn-taking and interruptions
-
-      - Best for easiest setup, most natural conversations, and OpenAI ecosystem users
-
-
-      YOUR ROLE:
-
-      - Answer questions about the project, setup, pricing, and features
-
-      - Help users understand when OpenAI Realtime is the right choice
-
-      - Be conversational, clear, and adapt to the caller's technical level
-
-      - Keep responses short, 1 to 3 sentences, unless more detail is requested
-
-      - Do not read punctuation characters out loud, pause briefly instead
-
-
-      CALL ENDING PROTOCOL:
-
-      - When user says goodbye, first offer to email them a transcript
-
-      - If yes, use request_transcript tool to get their email
-
-      - Then confirm if there is anything else, and use hangup_call tool with a warm farewell
-    provider: openai_realtime
-    tools:
-      - transfer
-      - cancel_transfer
-      - hangup_call
-      - leave_voicemail
-      - send_email_summary
-      - request_transcript
-  demo_elevenlabs:
-    greeting: >-
-      Hi {caller_name}, I'm using ElevenLabs premium voice technology. Ask me
-      anything about the Asterisk AI Voice Agent project!
-    profile: telephony_ulaw_8k
-    prompt: >
-      You are a voice assistant demonstrating ElevenLabs Conversational AI with
-      premium voice quality.
-
-
-      ABOUT ASTERISK AI VOICE AGENT v4.5.2:
-
-      - Open-source (MIT), production-ready AI voice agent for Asterisk/FreePBX
-
-      - Real-time, two-way natural voice conversations through your PBX
-
-      - No external telephony providers needed - works with your existing Asterisk
-
-      - GitHub: github.com/hkjarral/Asterisk-AI-Voice-Agent
-
-      - Full Demo Video: youtube.com/watch?v=ZGrr9-Q85xA
-
-
-      6 PRODUCTION CONFIGURATIONS WITH PRICING:
-
-      1. Google Gemini Live - Fastest response under 1 second, multilingual, about 2.5 cents per minute
-
-      2. Deepgram Voice Agent - Enterprise with Think stage reasoning, about 8 cents per minute
-
-      3. OpenAI Realtime - Most natural conversations, easiest setup, about 18 cents per minute
-
-      4. ElevenLabs Agent - Premium voice quality, about 10 cents per minute
-
-      5. Local Hybrid - Privacy-focused with audio staying local, about 0.2 cents per minute
-
-      6. Fully Local - 100% on-premises, zero cost, requires more CPU power
-
-
-      QUICK SETUP:
-
-      1. Clone the repo from GitHub
-
-      2. Run install.sh which guides you through everything
-
-      3. Add dialplan to route calls to Stasis asterisk-ai-voice-agent
-
-
-      FREEPBX ARI SETUP:
-
-      Go to Settings, then Advanced Settings, search for Asterisk REST Interface, enable it, and Apply Config.
-
-
-      REQUIREMENTS:
-
-      - Cloud configs need 2 plus CPU cores and 4GB RAM
-
-      - Local Hybrid needs 4 plus cores and 8GB RAM
-
-      - Docker, Docker Compose, Asterisk 18 or newer with ARI enabled
-
-      - x86 64-bit Linux only including Ubuntu, Debian, RHEL, Rocky, or Fedora
-
-
-      ADMIN UI: Web dashboard at port 3003 for real-time configuration of all settings.
-
-
-      THIS DEMO - ELEVENLABS AGENT:
-
-      - Premium natural-sounding voices with full conversational AI
-
-      - Cost is about 10 cents per minute with plans starting at 5 dollars per month
-
-      - Response time is under 2 seconds
-
-      - Best for premium voice quality and exceptional user experience
-
-
-      YOUR ROLE:
-
-      - Answer questions about the project, setup, pricing, and features
-
-      - Demonstrate the premium ElevenLabs voice quality
-
-      - Help users understand when ElevenLabs is the right choice
-
-      - Keep responses short, 1 to 3 sentences, unless more detail is requested
-
-      - Do not read punctuation characters out loud, pause briefly instead
-
-
-      CALL ENDING PROTOCOL:
-
-      - When user says goodbye, first offer to email them a transcript
-
-      - If yes, use request_transcript tool to get their email
-
-      - Then confirm if there is anything else, and use hangup_call tool with a warm farewell
-    provider: elevenlabs_agent
-    tools:
-      - transfer
-      - cancel_transfer
-      - hangup_call
-      - leave_voicemail
-      - send_email_summary
-      - request_transcript
-    background_music: jingle
-  demo_aviation_atis:
-    greeting: >-
-      Hello, this is the aviation automatic terminal information service. I can
-      provide ATIS for any airport worldwide. Just tell me the airport name or
-      ICAO code.
-    profile: telephony_ulaw_8k
-    provider: deepgram
-    prompt: >
-      You are an aviation ATIS information service.
-
-
-      ICAO CODE MAPPING:
-
-      - "JFK" or "Kennedy" or "New York" → KJFK
-
-      - "LAX" or "Los Angeles" → KLAX
-
-      - "SJC" or "San Jose" → KSJC
-
-      - "SFO" or "San Francisco" → KSFO
-
-      - "Heathrow" or "London" or "LHR" → EGLL
-
-      - "Dubai" → OMDB
-
-      - "Payerne" → LSMP
-
-      - "O'Hare" or "Chicago" → KORD
-
-      - "Atlanta" or "ATL" → KATL
-
-      - "Denver" or "DEN" → KDEN
-
-      - "Seattle" or "SEA" → KSEA
-
-      - "Miami" or "MIA" → KMIA
-
-      - "Boston" or "BOS" → KBOS
-
-
-      IMPORTANT: US airports use 4-letter ICAO codes starting with K + the
-      3-letter IATA code.
-
-      Examples: SJC → KSJC, LAX → KLAX, JFK → KJFK, ATL → KATL
-
-
-      WORKFLOW:
-
-      1. User asks for ATIS for an airport
-
-      2. Determine the 4-letter ICAO code
-
-      3. IMMEDIATELY call mcp_aviation_atis with the icao parameter - do NOT
-      speak before calling
-
-      4. Read the returned ATIS text verbatim
-
-
-      CRITICAL: Call the tool IMMEDIATELY after user request. Do NOT say "Stand
-      by" or confirm first.
-
-
-      SPEECH RULES:
-
-      - Do NOT use markdown formatting like **bold** or *italic*
-
-      - Do NOT say "Stand by" or "Please wait" - just call the tool immediately
-
-      - Read the ATIS text exactly as provided, in plain spoken English
-
-
-      ICAO CODE EXAMPLES:
-
-      - SJC/San Jose → KSJC
-
-      - SFO/San Francisco → KSFO
-
-      - JFK/Kennedy/New York → KJFK
-
-      - LAX/Los Angeles → KLAX  
-
-      - Heathrow/London/LHR → EGLL
-
-      - Any 3-letter US code: add K prefix (e.g., ATL → KATL, DEN → KDEN)
-
-
-      AFTER PROVIDING ATIS:
-
-      - After reading the ATIS, ask: "Would you like ATIS for another airport?"
-
-      - Wait for the caller's response before doing anything else
-
-      - Do NOT hang up automatically after providing ATIS
-
-
-      ENDING CALLS:
-
-      - ONLY use hangup_call when the caller explicitly says goodbye, bye, or
-      thanks
-
-      - NEVER hang up immediately after providing ATIS
-
-      - When caller says goodbye, use hangup_call with farewell "Safe flying!"
-    tools:
-      - hangup_call
-      - mcp_aviation_atis
-  demo_mcp:
-    greeting: >-
-      Hi! I can check the weather for any city. Just ask me what the weather is
-      like somewhere!
-    profile: telephony_ulaw_8k
-    provider: openai_realtime
-    tools:
-      - hangup_call
-      - mcp_weather_get_city
-default_provider: local_hybrid
+  # Example context with background music (AAVA-89)
+  # background_music references a MOH class from /etc/asterisk/musiconhold.conf
+  # Place audio files in /var/lib/asterisk/moh/{class-name}/ (pre-reduced volume recommended)
+  # demo_with_music:
+  #   greeting: Welcome to our premium line!
+  #   profile: telephony_ulaw_8k
+  #   provider: deepgram
+  #   background_music: default  # MOH class name
+default_provider: deepgram
 downstream_mode: stream
 external_media:
   codec: ulaw
   direction: both
   format: slin16
-  port_range: '18080:18099'
+  port_range: 18080:18099
   rtp_host: 127.0.0.1
   rtp_port: 18080
   sample_rate: 16000
@@ -746,6 +41,44 @@ llm:
   initial_greeting: Hello, how can I help you today?
   prompt: Voice assistant. Answer in 5-8 words. Be direct. Expand only if asked.
 pipelines:
+  # Nuevo pipeline híbrido:
+  # STT: Deepgram (REST / streaming según options.stt)
+  # LLM: DeepInfra (OpenAI-compatible) vía openai_llm
+  # TTS: Deepgram TTS
+  hybrid_deepinfra:
+    stt: deepgram_stt
+    llm: openai_llm
+    tts: deepgram_tts
+    options:
+      stt:
+        # DeepgramSTTAdapter lee estas claves y las mezcla con providers.deepgram
+        api_key: ${DEEPGRAM_API_KEY}
+        base_url: https://api.deepgram.com
+        model: nova-2-general
+        language: es
+        encoding: linear16          # Audio hacia la API Deepgram (el adapter convierte desde PCM16 interno)
+        sample_rate: 16000
+        smart_format: true
+        response_timeout_sec: 5.0
+        streaming: false            # true si más adelante quieres WebSocket STT continuo
+      llm:
+        # OpenAILLMAdapter, usando DeepInfra como backend OpenAI-compatible
+        api_key: ${DEEPINFRA_API_KEY}
+        base_url: https://api.deepinfra.com/v1/openai
+        model: gpt-4o-mini
+        max_tokens: 256
+        temperature: 0.7
+        response_timeout_sec: 8.0
+      tts:
+        # Deepgram TTS vía REST (DeepgramTTSAdapter usará estos campos)
+        api_key: ${DEEPGRAM_API_KEY}
+        base_url: https://api.deepgram.com
+        model: aura-2-selena-es
+        encoding: mulaw
+        sample_rate: 8000
+        response_timeout_sec: 8.0
+
+  # Pipeline original local_hybrid se mantiene como referencia (no activo)
   local_hybrid:
     llm: openai_llm
     options:
@@ -761,40 +94,18 @@ pipelines:
         streaming: true
       tts:
         mode: tts
-        response_timeout_sec: 30
+        response_timeout_sec: 30.0
         format:
           encoding: mulaw
           sample_rate: 8000
-    stt: local_stt
     tools:
-      - transfer
-      - cancel_transfer
-      - hangup_call
-      - leave_voicemail
-      - send_email_summary
-      - request_transcript
-    tts: local_tts
-  local_hybrid_groq:
-    llm: groq_llm
-    options:
-      llm:
-        base_url: https://api.groq.com/openai/v1
-        max_tokens: 200
-        model: llama-3.3-70b-versatile
-        temperature: 0.7
-      stt:
-        chunk_ms: 160
-        mode: stt
-        stream_format: pcm16_16k
-        streaming: true
-      tts:
-        mode: tts
-        response_timeout_sec: 30
-        format:
-          encoding: mulaw
-          sample_rate: 8000
-    stt: local_stt
-    tts: local_tts
+    - transfer
+    - cancel_transfer
+    - hangup_call
+    - leave_voicemail
+    - send_email_summary
+    - request_transcript
+
 profiles:
   default: telephony_responsive
   openai_realtime_24k:
@@ -848,9 +159,9 @@ profiles:
 providers:
   deepgram:
     capabilities:
-      - stt
-      - llm
-      - tts
+    - stt
+    - llm
+    - tts
     continuous_input: true
     enabled: true
     greeting: Hello, how can I help you today?
@@ -859,30 +170,29 @@ providers:
     input_gain_target_rms: 0
     input_sample_rate_hz: 8000
     instructions: Voice assistant. Answer in 5-8 words. Be direct. Expand only if asked.
-    model: nova-2
+    model: "nova"
+    language: es
     output_encoding: mulaw
     output_sample_rate_hz: 8000
-    tts_model: aura-2-thalia-en
+    tts_model: "aura-2-selena-es"
     type: full
   google_live:
     api_key: ${GOOGLE_API_KEY}
     capabilities:
-      - stt
-      - llm
-      - tts
+    - stt
+    - llm
+    - tts
     continuous_input: true
     enable_input_transcription: true
     enable_output_transcription: true
     enabled: true
-    greeting: >-
-      ${GOOGLE_LIVE_GREETING:-Hi! I'm powered by Google Gemini Live API. Try
-      interrupting me!}
+    greeting: ${GOOGLE_LIVE_GREETING:-Hi! I'm powered by Google Gemini Live API. Try interrupting me!}
     input_encoding: ulaw
     input_gain_max_db: 0
     input_gain_target_rms: 0
     input_sample_rate_hz: 8000
     llm_max_output_tokens: 8192
-    llm_model: gemini-2.5-flash-native-audio-preview-12-2025
+    llm_model: gemini-2.0-flash-live
     llm_temperature: 0.8
     llm_top_k: 40
     llm_top_p: 0.95
@@ -897,21 +207,23 @@ providers:
     type: full
   local:
     base_url: ${LOCAL_WS_URL:-ws://127.0.0.1:8765}
-    auth_token: ${LOCAL_WS_AUTH_TOKEN:-}
     capabilities:
-      - stt
-      - llm
-      - tts
+    - stt
+    - llm
+    - tts
     chunk_ms: ${LOCAL_WS_CHUNK_MS:=320}
     connect_timeout_sec: ${LOCAL_WS_CONNECT_TIMEOUT:=2.0}
     continuous_input: true
-    enabled: true
+    enabled: false
+    # Farewell mode: how to play goodbye when call ends
+    # "tts" - Use local TTS (best for fast hardware with <5s LLM response time)
+    # "asterisk" - Use Asterisk's built-in goodbye sound (reliable for slow hardware)
     farewell_mode: ${LOCAL_FAREWELL_MODE:=asterisk}
+    # Farewell TTS timeout (only used when farewell_mode="tts")
+    # Set based on LLM warmup time shown in logs (e.g., if warmup is 20s, set to 25-30s)
     farewell_timeout_sec: ${LOCAL_FAREWELL_TIMEOUT:=30.0}
     greeting: Hello! I'm your local AI assistant running entirely on-premises.
-    instructions: >-
-      You are a helpful voice assistant running locally. Be concise and
-      friendly.
+    instructions: You are a helpful voice assistant running locally. Be concise and friendly.
     llm_model: models/llm/phi-3-mini-4k-instruct.Q4_K_M.gguf
     max_tokens: 64
     response_timeout_sec: ${LOCAL_WS_RESPONSE_TIMEOUT:=10.0}
@@ -920,32 +232,29 @@ providers:
     tts_voice: models/tts/en_US-lessac-medium.onnx
     type: full
   local_llm:
-    auth_token: ${LOCAL_WS_AUTH_TOKEN:-}
     capabilities:
-      - llm
-    enabled: true
+    - llm
+    enabled: false
     llm_model: models/llm/phi-3-mini-4k-instruct.Q4_K_M.gguf
     max_tokens: 32
     temperature: 0.4
     type: local
     ws_url: ${LOCAL_WS_URL:-ws://127.0.0.1:8765}
   local_stt:
-    auth_token: ${LOCAL_WS_AUTH_TOKEN:-}
     capabilities:
-      - stt
+    - stt
     chunk_ms: ${LOCAL_WS_CHUNK_MS:=320}
     connect_timeout_sec: ${LOCAL_WS_CONNECT_TIMEOUT:=2.0}
-    enabled: true
+    enabled: false
     response_timeout_sec: ${LOCAL_WS_RESPONSE_TIMEOUT:=10.0}
     stt_backend: vosk
     stt_model: models/stt/vosk-model-en-us-0.22
     type: local
     ws_url: ${LOCAL_WS_URL:-ws://127.0.0.1:8765}
   local_tts:
-    auth_token: ${LOCAL_WS_AUTH_TOKEN:-}
     capabilities:
-      - tts
-    enabled: true
+    - tts
+    enabled: false
     response_timeout_sec: ${LOCAL_WS_RESPONSE_TIMEOUT:=10.0}
     tts_voice: models/tts/en_US-lessac-medium.onnx
     type: local
@@ -953,94 +262,84 @@ providers:
   openai_llm:
     capabilities:
       - llm
-    api_key: ${OPENAI_API_KEY}
-    chat_base_url: https://api.openai.com/v1
-    chat_model: gpt-4o-mini
     enabled: true
+    # Apuntamos a DeepInfra como backend OpenAI-compatible
+    chat_base_url: ${DEEPINFRA_BASE_URL}
+    chat_model: gpt-4o-mini
+    enabled: false
     response_timeout_sec: 5
     temperature: 0.7
     type: openai
-  groq_llm:
-    capabilities:
-      - llm
-    api_key: ${GROQ_API_KEY}
-    chat_base_url: https://api.groq.com/openai/v1
-    chat_model: llama-3.3-70b-versatile
-    enabled: true
-    response_timeout_sec: 10
-    temperature: 0.7
-    tools_enabled: false
-    type: openai
-  ollama_llm:
-    capabilities:
-      - llm
-    base_url: http://localhost:11434
-    model: llama3.2
-    enabled: false
-    temperature: 0.7
-    max_tokens: 200
-    timeout_sec: 60
-    tools_enabled: true
-    type: ollama
   openai_realtime:
     base_url: wss://api.openai.com/v1/realtime
     capabilities:
-      - stt
-      - llm
-      - tts
+    - stt
+    - llm
+    - tts
     continuous_input: true
-    egress_pacer_enabled: false
+    egress_pacer_enabled: true
     egress_pacer_warmup_ms: 320
-    enabled: true
+    enabled: false
     greeting: Hello, how can I help you today?
     input_encoding: ulaw
     input_gain_max_db: 0
     input_gain_target_rms: 0
     input_sample_rate_hz: 8000
-    instructions: You are a voice assistant. Always speak your responses out loud.
+    instructions: "You are a voice assistant. Always speak your responses out loud."
     max_response_output_tokens: 4096
     model: gpt-4o-realtime-preview-2024-12-17
     organization: ''
-    output_encoding: mulaw
-    output_sample_rate_hz: 8000
+    output_encoding: linear16
+    output_sample_rate_hz: 24000
     provider_input_encoding: linear16
-    provider_input_sample_rate_hz: 16000
+    provider_input_sample_rate_hz: 24000
+    # CRITICAL: audio must be first for modalities priority
     response_modalities:
-      - audio
-      - text
+    - audio
+    - text
     target_encoding: mulaw
     target_sample_rate_hz: 8000
+    # Lower temperature for more consistent audio output
     temperature: 0.6
     turn_detection:
       create_response: true
       prefix_padding_ms: 300
-      silence_duration_ms: 1000
-      threshold: 0.5
+      silence_duration_ms: 1000  # Standard - wait 1s before response
+      threshold: 0.5  # Standard threshold - 0.8 was blocking user speech
       type: server_vad
     type: openai_realtime
     voice: alloy
   elevenlabs_agent:
+    # ElevenLabs Conversational AI - Full Agent Provider
+    # Requires: ELEVENLABS_API_KEY and ELEVENLABS_AGENT_ID in .env
+    # Create an agent at https://elevenlabs.io/app/agents and copy the agent_id
     type: full
-    enabled: true
+    enabled: false
     capabilities:
-      - stt
-      - llm
-      - tts
+    - stt
+    - llm
+    - tts
+    # Audio input from telephony
     input_encoding: ulaw
     input_sample_rate_hz: 8000
+    # ElevenLabs native format (internal resampling)
     provider_input_encoding: pcm16
     provider_input_sample_rate_hz: 16000
+    # Output from ElevenLabs
     output_encoding: pcm16
     output_sample_rate_hz: 16000
+    # Target for telephony
     target_encoding: ulaw
     target_sample_rate_hz: 8000
-    voice_id: uDsPstFWFBUXjIBimV7s
-    model_id: eleven_flash_v2_5
+    # Voice settings
+    voice_id: "uDsPstFWFBUXjIBimV7s"  # User specified voice
+    model_id: eleven_flash_v2_5       # Fast model for conversations
     voice_settings:
       stability: 0.5
       similarity_boost: 0.75
-      style: 0
+      style: 0.0
       use_speaker_boost: true
+    # Agent behavior
     greeting: Hello! I'm your ElevenLabs voice assistant. How can I help you today?
     instructions: You are a helpful voice assistant. Be concise and friendly.
     continuous_input: true
@@ -1048,13 +347,13 @@ providers:
     input_gain_max_db: 0
   openai_stt:
     chunk_size_ms: 20
-    enabled: true
+    enabled: false
     input_encoding: linear16
     input_sample_rate_hz: 16000
     stt_model: whisper-1
     type: openai
   openai_tts:
-    enabled: true
+    enabled: false
     target_encoding: mulaw
     target_sample_rate_hz: 8000
     tts_base_url: https://api.openai.com/v1/audio/speech
@@ -1072,10 +371,10 @@ streaming:
   empty_backoff_ticks_max: 5
   fallback_timeout_ms: 8000
   greeting_min_start_ms: 40
-  jitter_buffer_ms: 950
+  jitter_buffer_ms: 100
   keepalive_interval_ms: 5000
-  low_watermark_ms: 80
-  min_start_ms: 120
+  low_watermark_ms: 200
+  min_start_ms: 300
   normalizer:
     enabled: true
     max_gain_db: 18
@@ -1097,16 +396,16 @@ tools:
       '6000':
         action_type: transfer
         aliases:
-          - agent
-          - representative
-          - human
-          - real person
-          - live person
-          - someone
-          - support
-          - sales
-          - operator
-          - help desk
+        - agent
+        - representative
+        - human
+        - real person
+        - live person
+        - someone
+        - support
+        - sales
+        - operator
+        - help desk
         description: Live customer service representative
         dial_string: SIP/6000
         mode: warm
@@ -1125,11 +424,11 @@ tools:
     admin_email: haider@jugaar.llc
     api_key: ${RESEND_API_KEY}
     common_domains:
-      - gmail.com
-      - yahoo.com
-      - outlook.com
-      - hotmail.com
-      - icloud.com
+    - gmail.com
+    - yahoo.com
+    - outlook.com
+    - hotmail.com
+    - icloud.com
     confirm_email: true
     enabled: true
     from_email: ava@jugaar.llc
@@ -1147,7 +446,6 @@ tools:
     include_transcript: true
     provider: resend
   transfer:
-    technology: SIP
     destinations:
       sales_agent:
         description: Sales agent
@@ -1174,44 +472,30 @@ tools:
         target: '601'
         type: ringgroup
     enabled: true
-mcp:
-  enabled: true
-  servers:
-    weather:
-      transport: stdio
-      command:
-        - python3
-        - '-m'
-        - src.mcp_servers.weather_mcp_server
-      defaults:
-        timeout_ms: 15000
-        slow_response_threshold_ms: 3000
-        slow_response_message: Let me check the weather for you, one moment...
-      tools:
-        - name: get_weather_by_city
-          expose_as: mcp_weather_get_city
-          speech_field: spoken
-    aviation_atis:
-      transport: stdio
-      command:
-        - python3
-        - '-m'
-        - src.mcp_servers.aviation_atis_server
-        - '--config'
-        - /app/config/aviation_atis.yaml
-      env:
-        METNO_USER_AGENT: >-
-          Asterisk-AI-Voice-Agent
-          (+https://github.com/hkjarral/Asterisk-AI-Voice-Agent)
-      defaults:
-        timeout_ms: 15000
-        slow_response_threshold_ms: 3000
-        slow_response_message: Let me get the current ATIS for you, one moment...
-      tools:
-        - name: get_atis
-          expose_as: mcp_aviation_atis
-          description: Get current ATIS for an ICAO airport code (e.g., LSMP, KJFK)
-          speech_field: atis_text
+    # Call event notification tool - business events to Redis Streams
+  CallEventNotification:
+    # Backend de cola a utilizar por la tool
+    queue_backend: redis
+
+    # Configuración específica de Redis para esta tool
+    redis:
+      # URL de conexión a Redis; se puede sobreescribir con la variable de entorno REDIS_URL
+      url: ${REDIS_URL:-redis://127.0.0.1:6379/0}
+      # Nombre del stream donde se publicarán los eventos de llamada
+      stream_name: call_events
+      # Longitud máxima del stream antes de recortar (estrategia aproximada)
+      max_stream_length: 10000
+
+    # Tipos de eventos que esta tool está autorizada a publicar
+    enabled_event_types:
+      - PURCHASE_INTENT_HIGH
+      - TRANSFER_REQUESTED
+      - HARD_REJECTION
+      - SOFT_REJECTION
+      - ESCALATION_REQUIRED
+      - POSITIVE_FEEDBACK
+      - NEGATIVE_FEEDBACK
+    enabled: true
 vad:
   enhanced_enabled: true
   fallback_buffer_size: 128000
@@ -1219,8 +503,9 @@ vad:
   fallback_interval_ms: 4000
   max_utterance_duration_ms: 10000
   min_utterance_duration_ms: 600
-  use_provider_vad: false
+  #use_provider_vad: false
   utterance_padding_ms: 200
   webrtc_aggressiveness: 1
   webrtc_end_silence_frames: 50
   webrtc_start_frames: 3
+  silence_duration_ms: 800
