@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 
-_ANSI_RE = re.compile(r"\x1b\\[[0-9;]*[A-Za-z]")
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
 
 def strip_ansi(text: str) -> str:
@@ -186,4 +186,3 @@ def should_hide_payload(event: LogEvent) -> bool:
     if "has_prompt" in t and "has_config" in t:
         return True
     return False
-
