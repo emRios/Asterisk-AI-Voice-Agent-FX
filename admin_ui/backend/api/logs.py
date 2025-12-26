@@ -91,7 +91,7 @@ def _extract_ids_from_kv(kv: Dict[str, str]) -> List[str]:
     ids: List[str] = []
     for k in ("call_id", "channel_id", "caller_channel_id", "local_channel_id", "external_media_id"):
         v = (kv.get(k) or "").strip()
-        if v:
+        if v and v.lower() not in ("none", "null"):
             ids.append(v)
     return ids
 
