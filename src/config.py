@@ -35,11 +35,25 @@ _PROJ_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 class AsteriskConfig(BaseModel):
+    """
+    ARI connection settings.
+
+    - host/port se mantienen para compatibilidad (HTTP local típico 8088).
+    - scheme permite construir base_url como {scheme}://{host}:{port}/ari cuando no se define ari_base_url.
+    - ari_base_url permite definir explícitamente el endpoint (ej: https://fenixdevel-pbx.voxdata.cloud:8089/ari)
+      para escenarios donde ARI REST/Events debe ir por TLS (HTTPS/WSS).
+    """
     host: str
     port: int = Field(default=8088)
     username: str
     password: str
     app_name: str = Field(default="ai-voice-agent")
+
+    # NUEVO: esquema base para construir la URL cuando no se provee ari_base_url
+    scheme: str = Field(default="http")
+
+    # NUEVO: URL completa de ARI (/ari). Si existe, tiene prioridad sobre host/port/scheme.
+    ari_base_url: Optional[str] = Field(default=None)
 
 class ExternalMediaConfig(BaseModel):
     # Network configuration

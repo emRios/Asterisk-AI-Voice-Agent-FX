@@ -317,6 +317,12 @@ After outputting a tool call, provide a brief spoken response.
         except ImportError as e:
             logger.warning(f"Could not import RequestTranscriptTool: {e}")
         
+        try:
+            from src.tools.business.event_notify import CallEventNotification
+            self.register(CallEventNotification)
+        except ImportError as e:
+            logger.warning(f"Could not import CallEventNotification: {e}")
+        
         # Future tools will be registered here:
         # from src.tools.telephony.voicemail import SendToVoicemailTool
         # self.register(SendToVoicemailTool)

@@ -162,6 +162,15 @@ class Component(ABC):
             else:
                 # For service endpoints like /audio/speech, /chat/completions, use as-is
                 test_endpoint = url
+        # DeepInfra OpenAI-compatible endpoint: /v1/openai
+        # Example base_url: https://api.deepinfra.com/v1/openai
+        # Health-check should hit /models, which returns 200 (similar to OpenAI /v1/models)
+        elif "deepinfra.com" in url and "/v1/openai" in url and not url.endswith("/models"):
+            if url.rstrip('/').endswith("/openai"):
+                test_endpoint = f"{url.rstrip('/')}/models"
+            else:
+                # If base_url already points to a more specific service path, use as-is
+                test_endpoint = url
         elif "deepgram.com" in url and not url.endswith("/projects"):
             test_endpoint = f"{url.rstrip('/')}/v1/projects"
         elif "generativelanguage.googleapis.com" in url:

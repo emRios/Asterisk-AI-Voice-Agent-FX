@@ -56,7 +56,7 @@ from .core.transport_orchestrator import TransportOrchestrator, TransportProfile
 from .core.models import CallSession
 from .utils.audio_capture import AudioCaptureManager
 from src.pipelines.base import LLMResponse
-
+from src.utils.ari import build_ari_base_url
 logger = get_logger(__name__)
 
 # -----------------------------------------------------------------------------
@@ -191,7 +191,15 @@ class Engine:
     def __init__(self, config: AppConfig):
         self.config = config
         self._start_time = time.time()  # Track engine start time for uptime
-        base_url = f"http://{config.asterisk.host}:{config.asterisk.port}/ari"
+        # base_url legacy (solo http) queda comentado como referencia
+        # base_url = f"http://{config.asterisk.host}:{config.asterisk.port}/ari"
+        base_url = build_ari_base_url(
+            ari_base_url=getattr(config.asterisk, "ari_base_url", None),
+            scheme=getattr(config.asterisk, "scheme", "http"),
+            host=config.asterisk.host,
+            port=config.asterisk.port,
+        )
+
         self.ari_client = ARIClient(
             username=config.asterisk.username,
             password=config.asterisk.password,

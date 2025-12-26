@@ -6,6 +6,7 @@ Focuses on robust connection and logging to debug startup issues.
 import asyncio
 import json
 import os
+import ssl
 import time
 import uuid
 import audioop
@@ -15,7 +16,7 @@ import aiohttp
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 import websockets
 import structlog
-from urllib.parse import quote
+from urllib.parse import quote, urlparse, urlunparse
 
 from websockets.exceptions import ConnectionClosed
 from websockets.asyncio.client import ClientConnection
@@ -32,11 +33,33 @@ class ARIClient:
         self.username = username
         self.password = password
         self.app_name = app_name
-        self.http_url = base_url
-        ws_host = base_url.replace("http://", "").split('/')[0]
-        safe_username = quote(username)
-        safe_password = quote(password)
-        self.ws_url = f"ws://{ws_host}/ari/events?api_key={safe_username}:{safe_password}&app={app_name}&subscribeAll=true&subscribe=ChannelAudioFrame"
+
+        parsed = urlparse(base_url)
+        scheme = (parsed.scheme or "").lower()
+        if not scheme or not parsed.netloc:
+            raise ValueError(f"Invalid base_url (scheme/netloc required): {base_url!r}")
+        if scheme not in ("http", "https"):
+            raise ValueError(f"Invalid base_url scheme (http/https only): {base_url!r}")
+
+        ws_scheme = "wss" if scheme == "https" else "ws"
+
+        base_path = (parsed.path or "").rstrip("/")
+        if base_path.endswith("/ari"):
+            ari_path = base_path
+        else:
+            ari_path = f"{base_path}/ari" if base_path else "/ari"
+
+        self.http_url = urlunparse((scheme, parsed.netloc, ari_path, "", "", ""))
+
+        safe_username = quote(username, safe="")
+        safe_password = quote(password, safe="")
+        safe_app_name = quote(app_name, safe="")
+        self.ws_url = (
+            f"{ws_scheme}://{parsed.netloc}{ari_path}/events"
+            f"?api_key={safe_username}:{safe_password}"
+            f"&app={safe_app_name}&subscribeAll=true&subscribe=ChannelAudioFrame"
+        )
+
         self.websocket: Optional[ClientConnection] = None
         self.http_session: Optional[aiohttp.ClientSession] = None
         self.running = False
@@ -57,6 +80,28 @@ class ARIClient:
         """Return true ARI connection state for readiness checks."""
         return self._connected and self.running and self.websocket is not None
 
+    async def _connect_websocket(self) -> ClientConnection:
+        """Connect to ARI WebSocket (ws/wss) with optional TLS and ping configuration."""
+        ping_interval = float(os.getenv("ARI_WS_PING_INTERVAL", "20"))
+        ping_timeout = float(os.getenv("ARI_WS_PING_TIMEOUT", "20"))
+
+        ssl_ctx = None
+        if self.ws_url.startswith("wss://"):
+            ca_file = os.getenv("ARI_TLS_CA_FILE")
+            ssl_ctx = ssl.create_default_context(cafile=ca_file if ca_file else None)
+
+            insecure = os.getenv("ARI_TLS_INSECURE", "").strip().lower() in ("1", "true", "yes", "on")
+            if insecure:
+                ssl_ctx.check_hostname = False
+                ssl_ctx.verify_mode = ssl.CERT_NONE
+
+        return await websockets.connect(
+            self.ws_url,
+            ping_interval=ping_interval,
+            ping_timeout=ping_timeout,
+            ssl=ssl_ctx,
+        )
+
     async def connect(self):
         """Connect to the ARI WebSocket and establish an HTTP session."""
         logger.info("Connecting to ARI...", attempt=self._reconnect_attempt + 1)
@@ -72,7 +117,7 @@ class ARIClient:
                 logger.info("Successfully connected to ARI HTTP endpoint.")
 
             # Then, connect to the WebSocket
-            self.websocket = await websockets.connect(self.ws_url)
+            self.websocket = await self._connect_websocket()
             self.running = True
             self._connected = True
             self._reconnect_attempt = 0  # Reset on successful connect
