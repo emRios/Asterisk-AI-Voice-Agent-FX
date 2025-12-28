@@ -85,11 +85,6 @@ const ToolForm = ({ config, onChange }: ToolFormProps) => {
                         onChange={(e) => updateConfig('default_action_timeout', parseInt(e.target.value))}
                         tooltip="Time to wait for tool execution before timing out."
                     />
-                    {config.extensions && (
-                        <div className="text-sm text-muted-foreground">
-                            Extensions (read-only): {Object.keys(config.extensions.internal || {}).length} configured. Edit via YAML for now.
-                        </div>
-                    )}
                 </div>
             </div>
 
@@ -192,6 +187,14 @@ const ToolForm = ({ config, onChange }: ToolFormProps) => {
                                 label="Require Confirmation"
                                 checked={config.hangup_call?.require_confirmation ?? false}
                                 onChange={(e) => updateNestedConfig('hangup_call', 'require_confirmation', e.target.checked)}
+                            />
+                            <FormInput
+                                label="Farewell Hangup Delay (seconds)"
+                                type="number"
+                                step="0.5"
+                                value={config.farewell_hangup_delay_sec ?? 2.5}
+                                onChange={(e) => updateConfig('farewell_hangup_delay_sec', parseFloat(e.target.value) || 2.5)}
+                                tooltip="Time to wait after farewell audio before hanging up. Increase if farewell gets cut off."
                             />
                         </div>
                     )}

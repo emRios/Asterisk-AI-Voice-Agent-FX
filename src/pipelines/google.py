@@ -16,7 +16,7 @@ import aiohttp
 from ..audio import convert_pcm16le_to_target_format, mulaw_to_pcm16le, resample_audio
 from ..config import AppConfig, GoogleProviderConfig
 from ..logging_config import get_logger
-from .base import LLMComponent, STTComponent, TTSComponent
+from .base import LLMComponent, LLMResponse, STTComponent, TTSComponent
 
 logger = get_logger(__name__)
 
@@ -316,7 +316,7 @@ class GoogleLLMAdapter(LLMComponent):
         transcript: str,
         context: Dict[str, Any],
         options: Dict[str, Any],
-    ) -> str:
+    ) -> LLMResponse:
         await self._ensure_session()
         assert self._session is not None
 
@@ -368,7 +368,7 @@ class GoogleLLMAdapter(LLMComponent):
             request_id=request_id,
             preview=text[:80] if text else "(empty)",
         )
-        return text
+        return LLMResponse(text=text or "")
 
     async def _ensure_session(self) -> None:
         if self._session and not self._session.closed:

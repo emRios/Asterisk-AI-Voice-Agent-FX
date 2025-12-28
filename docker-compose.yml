@@ -41,12 +41,12 @@ services:
     environment:
       - PYTHONPATH=/app
       - PYTHONUNBUFFERED=1
-      # Timezone for consistent timestamp display and call history records
-      # Configurable via .env (default: America/Phoenix)
-      - TZ=${TZ:-America/Phoenix}
+      # Note: TZ is loaded from .env via env_file directive above
+      # Do NOT add TZ here with ${TZ:-default} - it prevents UI env changes from taking effect
       # Enable health endpoint access from other containers (admin-ui needs /sessions/stats)
       - HEALTH_BIND_HOST=0.0.0.0
-      - ASTERISK_HOST=${ASTERISK_HOST:-127.0.0.1}
+      # Note: ASTERISK_HOST is loaded from .env via env_file directive above
+      # Do NOT add ASTERISK_HOST here - it prevents UI env changes from taking effect
     tty: true
     stdin_open: true
     restart: unless-stopped
@@ -70,34 +70,9 @@ services:
       - ./models:/app/models
     environment:
       - PYTHONUNBUFFERED=1
-      - LOCAL_LOG_LEVEL=${LOCAL_LOG_LEVEL:-INFO}
-      - LOCAL_DEBUG=${LOCAL_DEBUG:-0}
-      # STT Configuration
-      - LOCAL_STT_BACKEND=${LOCAL_STT_BACKEND:-vosk}
-      - LOCAL_STT_MODEL_PATH=${LOCAL_STT_MODEL_PATH:-/app/models/stt/vosk-model-en-us-0.22}
-      - LOCAL_STT_IDLE_MS=${LOCAL_STT_IDLE_MS:-5000}
-      # LLM Configuration
-      - LOCAL_LLM_MODEL_PATH=${LOCAL_LLM_MODEL_PATH:-/app/models/llm/phi-3-mini-4k-instruct.Q4_K_M.gguf}
-      - LOCAL_LLM_THREADS=${LOCAL_LLM_THREADS:-16}
-      - LOCAL_LLM_CONTEXT=${LOCAL_LLM_CONTEXT:-768}
-      - LOCAL_LLM_BATCH=${LOCAL_LLM_BATCH:-128}
-      - LOCAL_LLM_MAX_TOKENS=${LOCAL_LLM_MAX_TOKENS:-64}
-      - LOCAL_LLM_TEMPERATURE=${LOCAL_LLM_TEMPERATURE:-0.4}
-      - LOCAL_LLM_TOP_P=${LOCAL_LLM_TOP_P:-0.85}
-      - LOCAL_LLM_REPEAT_PENALTY=${LOCAL_LLM_REPEAT_PENALTY:-1.05}
-      - LOCAL_LLM_USE_MLOCK=${LOCAL_LLM_USE_MLOCK:-0}
-      - LOCAL_LLM_INFER_TIMEOUT_SEC=${LOCAL_LLM_INFER_TIMEOUT_SEC:-30}
-      # GPU: 0=CPU only, -1=auto-detect, N=specific layers
-      - LOCAL_LLM_GPU_LAYERS=${LOCAL_LLM_GPU_LAYERS:-0}
-      # TTS Configuration
-      - LOCAL_TTS_BACKEND=${LOCAL_TTS_BACKEND:-piper}
-      - LOCAL_TTS_MODEL_PATH=${LOCAL_TTS_MODEL_PATH:-/app/models/tts/en_US-lessac-medium.onnx}
-      - KOKORO_MODE=${KOKORO_MODE:-local}
-      - KOKORO_API_BASE_URL=${KOKORO_API_BASE_URL:-https://voice-generator.pages.dev/api/v1}
-      - KOKORO_API_KEY=${KOKORO_API_KEY:-}
-      - KOKORO_API_MODEL=${KOKORO_API_MODEL:-model}
-      - KOKORO_VOICE=${KOKORO_VOICE:-af_heart}
-      - LOCAL_LLM_SYSTEM_PROMPT=${LOCAL_LLM_SYSTEM_PROMPT:-You are a helpful AI voice assistant. When the caller wants to end the call or says goodbye, output <tool_call>{"name":"hangup_call","arguments":{"farewell":"Goodbye, have a great day!"}}</tool_call> and say a brief farewell. When the caller asks to email the transcript, output <tool_call>{"name":"request_transcript","arguments":{"email":"caller@example.com"}}</tool_call>. Always provide a spoken response.}
+      # Note: All LOCAL_* variables are loaded from .env via env_file directive above
+      # Do NOT add them here with ${VAR:-default} - it prevents UI env changes from taking effect
+      # The .env file should contain defaults, or use install.sh to set them
     tty: true
     stdin_open: true
     restart: unless-stopped
@@ -177,10 +152,6 @@ services:
       - .env
     environment:
       - PROJECT_ROOT=/app/project
-      - UVICORN_HOST=${UVICORN_HOST:-0.0.0.0}
-      - UVICORN_PORT=${UVICORN_PORT:-3003}
-      - JWT_SECRET=${JWT_SECRET:-}
-      # Timezone for consistent timestamp display in Admin UI
-      # Configurable via .env (default: America/Phoenix)
-      - TZ=${TZ:-America/Phoenix}
+      # Note: UVICORN_HOST, UVICORN_PORT, JWT_SECRET, TZ are loaded from .env via env_file
+      # Do NOT add them here with ${VAR:-default} - it prevents UI env changes from taking effect
     restart: unless-stopped

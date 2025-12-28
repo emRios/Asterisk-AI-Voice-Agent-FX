@@ -8,7 +8,7 @@ import tempfile
 import sys
 from contextlib import contextmanager
 from pydantic import BaseModel
-from typing import Dict, Any
+from typing import Dict, Any, Optional, Union
 import settings
 
 # A11: Maximum number of backups to keep
@@ -279,10 +279,52 @@ async def update_yaml_config(update: ConfigUpdate):
             os.chmod(temp_path, original_mode)
         
         os.replace(temp_path, settings.CONFIG_PATH)  # Atomic on POSIX
+        
+        # Determine recommended apply method based on what changed
+        # hot_reload: contexts, MCP servers, greetings/instructions only
+        # restart: most YAML changes (providers, pipelines, transport, VAD, etc.)
+        # recreate: .env changes (handled separately in /env endpoint)
+        recommended_method = "restart"  # Default for YAML changes
+        
+        # Check if change is limited to hot-reloadable sections
+        try:
+            old_content = None
+            # Read the backup we just created to compare
+            import glob
+            backups = sorted(glob.glob(f"{settings.CONFIG_PATH}.bak.*"), reverse=True)
+            if backups:
+                with open(backups[0], 'r') as f:
+                    old_content = f.read()
+            
+            if old_content:
+                old_parsed = yaml.safe_load(old_content) or {}
+                new_parsed = yaml.safe_load(update.content) or {}
+                
+                # Keys that can be hot-reloaded
+                hot_reload_keys = {'contexts', 'profiles', 'mcp'}
+                
+                # Check if only hot-reloadable keys changed
+                all_keys = set(old_parsed.keys()) | set(new_parsed.keys())
+                changed_keys = set()
+                for key in all_keys:
+                    if old_parsed.get(key) != new_parsed.get(key):
+                        changed_keys.add(key)
+                
+                if changed_keys and changed_keys.issubset(hot_reload_keys):
+                    recommended_method = "hot_reload"
+        except Exception:
+            pass  # Fall back to restart if comparison fails
+        
+        apply_plan = ([{"service": "ai-engine", "method": "hot_reload", "endpoint": "/api/system/containers/ai_engine/reload"}]
+                     if recommended_method == "hot_reload"
+                     else [{"service": "ai-engine", "method": "restart", "endpoint": "/api/system/containers/ai_engine/restart"}])
+
         return {
             "status": "success",
-            "restart_required": True,
-            "message": "Configuration saved. Restart AI Engine to apply changes.",
+            "restart_required": recommended_method != "hot_reload",
+            "recommended_apply_method": recommended_method,
+            "apply_plan": apply_plan,
+            "message": f"Configuration saved. {'Hot reload' if recommended_method == 'hot_reload' else 'Restart'} AI Engine to apply changes.",
             "warnings": warnings,
         }
     except HTTPException:
@@ -308,28 +350,56 @@ async def get_yaml_config():
 
 @router.get("/env")
 async def get_env_config():
+    """
+    Read .env file and return parsed key-value pairs.
+    Uses dotenv_values for correct parsing of quoted/escaped values.
+    """
     env_vars = {}
     if os.path.exists(settings.ENV_PATH):
         try:
+            # Use dotenv_values for proper parsing of quoted values
+            from dotenv import dotenv_values
+            env_vars = dotenv_values(settings.ENV_PATH)
+            # Convert to regular dict (dotenv_values returns OrderedDict)
+            # and filter out None values (unset keys)
+            env_vars = {k: v for k, v in env_vars.items() if v is not None}
+        except ImportError:
+            # Fallback to manual parsing if python-dotenv not available
             with open(settings.ENV_PATH, 'r') as f:
                 for line in f:
                     line = line.strip()
                     if line and not line.startswith('#'):
-                        key, value = line.split('=', 1)
-                        env_vars[key] = value
+                        if '=' in line:
+                            key, value = line.split('=', 1)
+                            # Strip surrounding quotes if present
+                            value = value.strip()
+                            if (value.startswith('"') and value.endswith('"')) or \
+                               (value.startswith("'") and value.endswith("'")):
+                                value = value[1:-1]
+                            env_vars[key.strip()] = value
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
     return env_vars
 
 @router.post("/env")
-async def update_env(env_data: Dict[str, str]):
+async def update_env(env_data: Dict[str, Optional[str]]):
+    """
+    Update .env file with provided key-value pairs.
+    
+    - Pass a string value to set/update a key
+    - Pass None or "__DELETE__" to remove a key entirely (line is removed, not commented)
+    - Values with spaces, #, quotes, $, etc. are automatically quoted
+    - Already-quoted values from UI are stored as-is (no double-quoting)
+    """
     try:
         # A12: Validate env data before writing
         for key, value in env_data.items():
             if not key or not key.strip():
                 raise HTTPException(status_code=400, detail="Empty key not allowed")
-            if '\n' in key or '\n' in str(value):
-                raise HTTPException(status_code=400, detail=f"Newlines not allowed in key or value: {key}")
+            if value is not None and '\n' in str(value):
+                raise HTTPException(status_code=400, detail=f"Newlines not allowed in value: {key}")
+            if '\n' in key:
+                raise HTTPException(status_code=400, detail=f"Newlines not allowed in key: {key}")
             if '=' in key:
                 raise HTTPException(status_code=400, detail=f"Key cannot contain '=': {key}")
         
@@ -350,14 +420,23 @@ async def update_env(env_data: Dict[str, str]):
             with open(settings.ENV_PATH, 'r') as f:
                 lines = f.readlines()
 
-        # Create a map of keys to line numbers
-        key_line_map = {}
+        # Create a map of keys to ALL their line indices (handles duplicates)
+        # SECURITY: Track all occurrences so we can remove duplicates that might contain old secrets
+        from collections import defaultdict
+        key_occurrences = defaultdict(list)  # key -> [line_idx, line_idx, ...]
+        existing_values = {}  # key -> current value (for change detection)
         for i, line in enumerate(lines):
-            line = line.strip()
-            if line and not line.startswith('#'):
-                if '=' in line:
-                    key = line.split('=', 1)[0].strip()
-                    key_line_map[key] = i
+            stripped = line.strip()
+            if stripped and not stripped.startswith('#'):
+                if '=' in stripped:
+                    key, raw_val = stripped.split('=', 1)
+                    key = key.strip()
+                    key_occurrences[key].append(i)
+                    # Parse existing value for change detection (strip quotes)
+                    val = raw_val.strip()
+                    if (val.startswith('"') and val.endswith('"')) or (val.startswith("'") and val.endswith("'")):
+                        val = val[1:-1]
+                    existing_values[key] = val
 
         # Update existing keys or append new ones
         new_lines = lines.copy()
@@ -366,21 +445,82 @@ async def update_env(env_data: Dict[str, str]):
         if new_lines and not new_lines[-1].endswith('\n'):
             new_lines[-1] += '\n'
 
+        # Track keys to delete (value is None or special marker)
+        keys_to_delete = set()
+        # Track keys being updated (to remove duplicate earlier occurrences)
+        keys_to_update = set()
+        
         for key, value in env_data.items():
             # Skip empty keys
             if not key:
                 continue
-                
-            line_content = f"{key}={value}\n"
             
-            if key in key_line_map:
-                # Update existing line
-                new_lines[key_line_map[key]] = line_content
+            # Support deletion: None or special "__DELETE__" marker removes the key
+            # SECURITY: Actually remove the line to avoid leaking old secrets
+            if value is None or value == "__DELETE__":
+                keys_to_delete.add(key)
+                continue
+            
+            str_value = str(value)
+            
+            # Only track as changed if value actually differs from existing
+            existing_val = existing_values.get(key)
+            # Normalize for comparison: strip quotes from incoming if present
+            cmp_value = str_value
+            if (cmp_value.startswith('"') and cmp_value.endswith('"')) or (cmp_value.startswith("'") and cmp_value.endswith("'")):
+                cmp_value = cmp_value[1:-1]
+            if existing_val != cmp_value:
+                keys_to_update.add(key)
+            
+            # Check if value is already properly quoted (from UI round-trip)
+            # Don't double-quote values that are already quoted
+            already_quoted = (
+                (str_value.startswith('"') and str_value.endswith('"') and len(str_value) >= 2) or
+                (str_value.startswith("'") and str_value.endswith("'") and len(str_value) >= 2)
+            )
+            
+            if already_quoted:
+                # Value is already quoted, use as-is
+                line_content = f"{key}={str_value}\n"
+            else:
+                # Determine if quoting is needed
+                needs_quoting = (
+                    not str_value or  # Empty string
+                    ' ' in str_value or  # Spaces
+                    '#' in str_value or  # Comments
+                    '"' in str_value or  # Internal quotes need escaping
+                    "'" in str_value or  # Single quotes
+                    '$' in str_value or  # Variable expansion
+                    '`' in str_value or  # Command substitution
+                    '\\' in str_value    # Backslashes
+                )
+                
+                if needs_quoting:
+                    # Escape internal double quotes and backslashes, then wrap in quotes
+                    escaped_value = str_value.replace('\\', '\\\\').replace('"', '\\"')
+                    line_content = f'{key}="{escaped_value}"\n'
+                else:
+                    line_content = f"{key}={str_value}\n"
+            
+            occurrences = key_occurrences.get(key, [])
+            if occurrences:
+                # Update the LAST occurrence, mark earlier ones for removal
+                last_idx = occurrences[-1]
+                new_lines[last_idx] = line_content
+                # SECURITY: Remove all earlier occurrences (may contain old secrets)
+                for idx in occurrences[:-1]:
+                    new_lines[idx] = None  # Mark for removal
             else:
                 # Append new key
                 new_lines.append(line_content)
-                # Update map for subsequent iterations (though not strictly needed for this simple logic)
-                key_line_map[key] = len(new_lines) - 1
+        
+        # SECURITY: Remove ALL occurrences of deleted keys (not just last)
+        for key in keys_to_delete:
+            for idx in key_occurrences.get(key, []):
+                new_lines[idx] = None  # Mark for removal
+        
+        # Filter out removed lines
+        new_lines = [line for line in new_lines if line is not None]
 
         # A8: Atomic write via temp file + rename (preserve permissions)
         dir_path = os.path.dirname(settings.ENV_PATH)
@@ -399,7 +539,56 @@ async def update_env(env_data: Dict[str, str]):
         
         os.replace(temp_path, settings.ENV_PATH)  # Atomic on POSIX
         
-        return {"status": "success"}
+        changed_keys = sorted(set(keys_to_update) | set(keys_to_delete))
+
+        def _is_prefix(key: str, prefixes: tuple[str, ...]) -> bool:
+            return any(key.startswith(p) for p in prefixes)
+
+        def _ai_engine_env_key(key: str) -> bool:
+            return (
+                _is_prefix(key, ("ASTERISK_", "LOG_", "DIAG_", "CALL_HISTORY_", "HEALTH_"))
+                or key in ("OPENAI_API_KEY", "DEEPGRAM_API_KEY", "GOOGLE_API_KEY", "ELEVENLABS_API_KEY", "ELEVENLABS_AGENT_ID", "TZ", "STREAMING_LOG_LEVEL")
+                or _is_prefix(key, ("AUDIO_TRANSPORT", "DOWNSTREAM_MODE", "AUDIOSOCKET_", "EXTERNAL_MEDIA_", "BARGE_IN_"))
+            )
+
+        def _local_ai_env_key(key: str) -> bool:
+            return (
+                _is_prefix(key, ("LOCAL_", "KROKO_", "FASTER_WHISPER_", "WHISPER_CPP_", "MELOTTS_", "KOKORO_"))
+                or key in ("SHERPA_MODEL_PATH",)
+            )
+
+        def _admin_ui_env_key(key: str) -> bool:
+            return (
+                key in ("JWT_SECRET", "DOCKER_SOCK")
+                or _is_prefix(key, ("UVICORN_", "ADMIN_UI_"))
+            )
+
+        impacts_ai_engine = any(_ai_engine_env_key(k) for k in changed_keys)
+        impacts_local_ai = any(_local_ai_env_key(k) for k in changed_keys)
+        impacts_admin_ui = any(_admin_ui_env_key(k) for k in changed_keys)
+
+        apply_plan = []
+        if impacts_ai_engine:
+            apply_plan.append({"service": "ai-engine", "method": "restart", "endpoint": "/api/system/containers/ai_engine/restart"})
+        if impacts_local_ai:
+            apply_plan.append({"service": "local-ai-server", "method": "restart", "endpoint": "/api/system/containers/local_ai_server/restart"})
+        if impacts_admin_ui:
+            apply_plan.append({"service": "admin-ui", "method": "restart", "endpoint": "/api/system/containers/admin_ui/restart"})
+
+        message = "Environment saved. Restart impacted services to apply changes."
+        if impacts_admin_ui:
+            message += " (Restarting Admin UI will invalidate sessions if JWT_SECRET changed.)"
+
+        return {
+            "status": "success",
+            "restart_required": bool(apply_plan),
+            "recommended_apply_method": "recreate",
+            "apply_plan": apply_plan,
+            "changed_keys": changed_keys,
+            "message": message,
+        }
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -440,20 +629,19 @@ async def test_provider_connection(request: ProviderTestRequest):
                 def replace(match):
                     var_name = match.group(1)
                     default_value = match.group(2)
-                    # Check env var first
-                    val = os.getenv(var_name)
-                    if val is not None and val != "":
-                        return val
-                    # Then check .env file (Admin UI backend typically runs without env vars)
+                    # Check .env file FIRST - this has the latest values from UI edits
+                    # The Admin UI container's os.environ may be stale (from container start)
                     val = get_env_key(var_name)
                     if val:
+                        return val
+                    # Fall back to os.environ (for vars not in .env or set at container start)
+                    val = os.getenv(var_name)
+                    if val is not None and val != "":
                         return val
                     # Then check if we have a default value
                     if default_value is not None:
                         return default_value
-                    # If neither, keep original string (or empty?)
-                    # Keeping original helps debug missing vars, but might break URLs.
-                    # Standard behavior would be empty string if no default.
+                    # If neither, return empty string (standard shell behavior)
                     return "" 
                 
                 return re.sub(pattern, replace, item)
@@ -893,50 +1081,75 @@ async def import_configuration(file: UploadFile = File(...)):
 def update_yaml_provider_field(provider_name: str, field: str, value: Any) -> bool:
     """
     Update a single field in a provider's YAML config.
-    
-    Args:
-        provider_name: Name of the provider (e.g., 'local')
-        field: Field name to update (e.g., 'stt_backend')
-        value: New value for the field
-        
-    Returns:
-        True if successful, False otherwise
+
+    This helper is used by model-management flows (local-ai sync).
+
+    Safety properties (aligned with update_yaml_config):
+    - Creates a timestamped backup and rotates old backups
+    - Validates resulting YAML against the canonical AppConfig schema
+    - Writes atomically (temp file + rename) and preserves file mode
     """
     try:
         if not os.path.exists(settings.CONFIG_PATH):
             return False
-            
+
         with open(settings.CONFIG_PATH, 'r') as f:
             config = yaml.safe_load(f)
-        
-        if not config:
+
+        if not isinstance(config, dict):
             return False
-            
-        # Ensure providers section exists
-        if 'providers' not in config:
-            config['providers'] = {}
-        
-        # Ensure provider exists
-        if provider_name not in config['providers']:
-            config['providers'][provider_name] = {}
-        
-        # Update the field (allow deletion by passing None)
+
+        providers = config.get('providers')
+        if not isinstance(providers, dict):
+            providers = {}
+        provider_block = providers.get(provider_name)
+        if not isinstance(provider_block, dict):
+            provider_block = {}
+
         if value is None:
-            if isinstance(config['providers'].get(provider_name), dict):
-                config['providers'][provider_name].pop(field, None)
+            provider_block.pop(field, None)
         else:
-            config['providers'][provider_name][field] = value
-        
-        # Write back
-        with open(settings.CONFIG_PATH, 'w') as f:
-            yaml.dump(config, f, default_flow_style=False, sort_keys=False)
-        
+            provider_block[field] = value
+
+        providers[provider_name] = provider_block
+        config['providers'] = providers
+
+        content = yaml.dump(config, default_flow_style=False, sort_keys=False)
+
+        # Validate before writing
+        _validate_ai_agent_config(content)
+
+        # Backup + rotate
+        if os.path.exists(settings.CONFIG_PATH):
+            import datetime
+            timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+            backup_path = f"{settings.CONFIG_PATH}.bak.{timestamp}"
+            with open(settings.CONFIG_PATH, 'r') as src:
+                with open(backup_path, 'w') as dst:
+                    dst.write(src.read())
+            _rotate_backups(settings.CONFIG_PATH)
+
+        # Atomic write (preserve permissions)
+        dir_path = os.path.dirname(settings.CONFIG_PATH)
+        original_mode = os.stat(settings.CONFIG_PATH).st_mode if os.path.exists(settings.CONFIG_PATH) else None
+
+        with tempfile.NamedTemporaryFile('w', dir=dir_path, delete=False, suffix='.tmp') as tf:
+            tf.write(content)
+            temp_path = tf.name
+
+        if original_mode is not None:
+            os.chmod(temp_path, original_mode)
+
+        os.replace(temp_path, settings.CONFIG_PATH)
+
         return True
     except Exception as e:
         print(f"Error updating YAML provider field: {e}")
         return False
 
+
 @router.get("/options/{provider_type}")
+
 async def get_provider_options(provider_type: str):
     """Get available options (models, voices) for a specific provider."""
     

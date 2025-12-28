@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { 
+import {
     Phone, Filter, Download, Trash2, 
     ChevronLeft, ChevronRight, RefreshCw, X, MessageSquare,
     Wrench, AlertCircle, CheckCircle, ArrowRightLeft, PhoneOff,
@@ -229,6 +229,20 @@ const CallHistoryPage = () => {
         }
     };
 
+    const openTroubleshoot = (call: CallRecordSummary | CallRecordDetail) => {
+        const callId = call.call_id;
+        const start = (call as any).start_time;
+        const end = (call as any).end_time;
+        const params = new URLSearchParams();
+        params.set('container', 'ai_engine');
+        params.set('mode', 'troubleshoot');
+        params.set('preset', 'important');
+        params.set('call_id', callId);
+        if (start) params.set('since', start);
+        if (end) params.set('until', end);
+        window.location.href = `/logs?${params.toString()}`;
+    };
+
     const clearFilters = () => {
         setFilters({
             caller_number: '',
@@ -295,6 +309,19 @@ const CallHistoryPage = () => {
                     </button>
                 </div>
             </div>
+
+            {/* Quick Troubleshoot */}
+            {modalCall && (
+                <div className="flex items-center gap-2">
+                    <button
+                        onClick={() => openTroubleshoot(modalCall)}
+                        className="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 border border-input bg-background shadow-sm hover:bg-accent hover:text-accent-foreground h-9 px-3"
+                        title="Open Logs filtered to this call"
+                    >
+                        Troubleshoot
+                    </button>
+                </div>
+            )}
 
             {/* Stats Dashboard */}
             {showStats && stats && (
@@ -590,6 +617,13 @@ const CallHistoryPage = () => {
                                 <p className="text-sm text-muted-foreground">{modalCall.call_id}</p>
                             </div>
                             <div className="flex items-center gap-2">
+                                <button
+                                    onClick={() => openTroubleshoot(modalCall)}
+                                    className="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 border border-input bg-background shadow-sm hover:bg-accent hover:text-accent-foreground h-9 px-3"
+                                    title="Open Logs filtered to this call"
+                                >
+                                    Troubleshoot
+                                </button>
                                 <button
                                     onClick={() => handleDelete(modalCall.id)}
                                     className="p-2 hover:bg-destructive/10 rounded-lg text-destructive"

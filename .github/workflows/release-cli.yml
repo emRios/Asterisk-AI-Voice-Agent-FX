@@ -3,7 +3,8 @@ name: Release CLI Binaries
 on:
   push:
     tags:
-      - 'v*'  # Trigger on version tags (v4.1.0, v4.1.1, etc.)
+      - 'v*.*.*'  # Trigger on version tags (v4.1.0, v4.1.1, etc.)
+      - '[0-9]*.[0-9]*.[0-9]*'  # Also allow tags without the v-prefix (4.1.0)
   workflow_dispatch:  # Allow manual trigger
 
 permissions:
@@ -23,7 +24,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.21'
+          go-version: '1.22'
       
       - name: Download Go dependencies
         run: |
@@ -126,7 +127,7 @@ jobs:
             
             See [TROUBLESHOOTING_GUIDE.md](https://github.com/${{ github.repository }}/blob/main/docs/TROUBLESHOOTING_GUIDE.md) for complete documentation.
           draft: false
-          prerelease: false
+          prerelease: ${{ contains(steps.get_version.outputs.version, '-') }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       

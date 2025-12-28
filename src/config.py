@@ -93,6 +93,10 @@ class LocalProviderConfig(BaseModel):
     # Set based on your hardware speed (see LLM warmup time in logs)
     # Fast hardware: 5-10s, Slow hardware: 30-60s
     farewell_timeout_sec: float = Field(default=30.0)
+    # Farewell hangup delay - seconds to wait after farewell audio completes before hangup
+    # Ensures farewell message fully plays through RTP pipeline before disconnecting
+    # Increase if farewell gets cut off (typical farewells need 2-4 seconds)
+    farewell_hangup_delay_sec: float = Field(default=2.5)
     chunk_ms: int = Field(default=200)
     max_tokens: int = Field(default=150)
     temperature: float = Field(default=0.4)
@@ -150,6 +154,8 @@ class DeepgramProviderConfig(BaseModel):
     voice_agent_base_url: str = Field(
         default="wss://agent.deepgram.com/v1/agent/converse"
     )
+    # Provider-specific farewell hangup delay (overrides global)
+    farewell_hangup_delay_sec: Optional[float] = None
 
 
 class OpenAIProviderConfig(BaseModel):
@@ -172,6 +178,8 @@ class OpenAIProviderConfig(BaseModel):
     target_sample_rate_hz: int = Field(default=8000)
     chunk_size_ms: int = Field(default=20)
     response_timeout_sec: float = Field(default=5.0)
+    # Provider-specific farewell hangup delay (overrides global)
+    farewell_hangup_delay_sec: Optional[float] = None
 
 
 class GoogleProviderConfig(BaseModel):
@@ -217,6 +225,8 @@ class GoogleProviderConfig(BaseModel):
     websocket_endpoint: str = Field(
         default="wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"
     )
+    # Provider-specific farewell hangup delay (overrides global)
+    farewell_hangup_delay_sec: Optional[float] = None
 
 
 class ElevenLabsProviderConfig(BaseModel):
@@ -237,6 +247,8 @@ class ElevenLabsProviderConfig(BaseModel):
     similarity_boost: float = Field(default=0.75)
     style: float = Field(default=0.0)
     use_speaker_boost: bool = Field(default=True)
+    # Provider-specific farewell hangup delay (overrides global)
+    farewell_hangup_delay_sec: Optional[float] = None
 
 
 class MCPToolConfig(BaseModel):
@@ -506,6 +518,10 @@ class AppConfig(BaseModel):
     tools: Dict[str, Any] = Field(default_factory=dict)
     # MCP tool configuration (experimental)
     mcp: Optional[MCPConfig] = None
+    # Farewell hangup delay - seconds to wait after farewell audio completes before hangup
+    # Ensures farewell message fully plays through RTP pipeline before disconnecting
+    # Increase if farewell gets cut off (typical farewells need 2-4 seconds)
+    farewell_hangup_delay_sec: float = Field(default=2.5)
 
     # Ensure tests that construct AppConfig(**dict) directly still get normalized pipelines
     # similar to load_config(), which calls _normalize_pipelines().

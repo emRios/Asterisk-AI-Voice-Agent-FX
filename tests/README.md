@@ -35,6 +35,7 @@ Or locally (ensure venv matches requirements):
 
 ```bash
 pip install -r requirements.txt
+pip install -r requirements-dev.txt
 pytest -q
 ```
 
@@ -63,7 +64,7 @@ python3 scripts/test_externalmedia_deployment.py
 Test coverage is enforced via GitHub Actions (`.github/workflows/ci.yml`):
 
 - **Current Coverage**: ~28-29% (111 tool tests)
-- **Enforced Threshold**: 27% (current baseline)
+- **Enforced Threshold**: 26.5% (current baseline)
 - **Next Target**: 30% (need more tests)
 - **Ultimate Target**: 40%+
 - **Coverage Reports**: HTML, XML, and JSON reports uploaded as GitHub Actions artifacts

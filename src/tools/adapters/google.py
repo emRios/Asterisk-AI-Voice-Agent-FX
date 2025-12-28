@@ -60,10 +60,17 @@ class GoogleToolAdapter:
         for tool_name, tool in self.registry._tools.items():
             try:
                 definition = tool.definition
-                declaration = {
-                    "name": tool_name,
-                    "description": definition.description,
-                    "parameters": {
+                
+                # Use input_schema if available (e.g., MCP tools), otherwise build from parameters
+                if isinstance(definition.input_schema, dict) and definition.input_schema:
+                    # MCP tools and others with raw JSON schema
+                    schema = definition.input_schema.copy()
+                    if schema.get("type") is None:
+                        schema["type"] = "object"
+                    parameters = schema
+                else:
+                    # Built-in tools with ToolParameter list
+                    parameters = {
                         "type": "object",
                         "properties": {
                             p.name: p.to_dict()
@@ -71,6 +78,11 @@ class GoogleToolAdapter:
                         },
                         "required": [p.name for p in definition.parameters if p.required]
                     }
+                
+                declaration = {
+                    "name": tool_name,
+                    "description": definition.description,
+                    "parameters": parameters
                 }
                 function_declarations.append(declaration)
             except Exception as e:
@@ -107,10 +119,17 @@ class GoogleToolAdapter:
             # Convert tool schema to Google format
             # Use the tool's definition to get description and parameters
             definition = tool.definition
-            declaration = {
-                "name": tool_name,
-                "description": definition.description,
-                "parameters": {
+            
+            # Use input_schema if available (e.g., MCP tools), otherwise build from parameters
+            if isinstance(definition.input_schema, dict) and definition.input_schema:
+                # MCP tools and others with raw JSON schema
+                schema = definition.input_schema.copy()
+                if schema.get("type") is None:
+                    schema["type"] = "object"
+                parameters = schema
+            else:
+                # Built-in tools with ToolParameter list
+                parameters = {
                     "type": "object",
                     "properties": {
                         p.name: p.to_dict()
@@ -118,10 +137,24 @@ class GoogleToolAdapter:
                     },
                     "required": [p.name for p in definition.parameters if p.required]
                 }
+            
+            declaration = {
+                "name": tool_name,
+                "description": definition.description,
+                "parameters": parameters
             }
             function_declarations.append(declaration)
         
         logger.debug(f"Formatted {len(function_declarations)} tools for Google Live")
+        
+        # Debug: Log tool schema sample to verify format
+        if function_declarations:
+            import json
+            logger.info(
+                "Google Live tool schema sample (format_tools)",
+                first_tool_name=function_declarations[0].get("name"),
+                first_tool_params=json.dumps(function_declarations[0].get("parameters", {}), default=str)[:300]
+            )
         
         return [{
             "functionDeclarations": function_declarations  # camelCase per official API

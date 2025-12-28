@@ -35,6 +35,7 @@ from .openai import OpenAISTTAdapter, OpenAILLMAdapter, OpenAITTSAdapter
 logger = get_logger(__name__)
 
 ComponentFactory = Callable[[str, Dict[str, Any]], Component]
+_PLACEHOLDER_FACTORY_ATTR = "_ava_placeholder_role"
 
 
 class PipelineOrchestratorError(Exception):
@@ -171,6 +172,7 @@ def _make_placeholder_factory(role: str) -> ComponentFactory:
     def factory(component_key: str, options: Dict[str, Any]) -> Component:
         return adapter_cls(component_key, options)
 
+    setattr(factory, _PLACEHOLDER_FACTORY_ATTR, role)
     return factory
 
 
@@ -224,6 +226,7 @@ class PipelineOrchestrator:
         self._started: bool = False
         self._enabled: bool = bool(getattr(config, "pipelines", {}) or {})
         self._active_pipeline_name: Optional[str] = getattr(config, "active_pipeline", None)
+        self._invalid_pipelines: Dict[str, str] = {}
 
     @property
     def started(self) -> bool:
@@ -239,14 +242,42 @@ class PipelineOrchestrator:
             return
 
         pipelines = getattr(self.config, "pipelines", {}) or {}
-        
-        # Phase 1: Validate factory existence
+
+        # Phase 1: Validate pipeline component resolution (and refuse placeholders).
+        self._invalid_pipelines = {}
         for name, entry in pipelines.items():
-            self._validate_pipeline_entry(name, entry)
-        
-        # Phase 2: Validate connectivity for all pipelines
+            try:
+                self._validate_pipeline_entry(name, entry)
+            except PipelineOrchestratorError as exc:
+                self._invalid_pipelines[name] = str(exc)
+                logger.error(
+                    "Pipeline is invalid and will be unavailable",
+                    pipeline=name,
+                    error=str(exc),
+                )
+
+        valid_pipelines = {k: v for k, v in pipelines.items() if k not in self._invalid_pipelines}
+        if not valid_pipelines:
+            details = "; ".join([f"{name}: {err}" for name, err in self._invalid_pipelines.items()])
+            raise PipelineOrchestratorError(f"No valid pipelines available. Fix pipeline configuration. Details: {details}")
+
+        # If the active pipeline is invalid, fall back to the first valid pipeline.
+        if self._active_pipeline_name and self._active_pipeline_name in self._invalid_pipelines:
+            try:
+                fallback = next(iter(valid_pipelines.keys()))
+            except StopIteration:
+                fallback = None
+            logger.warning(
+                "Active pipeline is invalid; falling back to first valid pipeline",
+                requested_pipeline=self._active_pipeline_name,
+                fallback_pipeline=fallback,
+                error=self._invalid_pipelines.get(self._active_pipeline_name),
+            )
+            self._active_pipeline_name = fallback
+
+        # Phase 2: Validate connectivity for valid pipelines
         validation_results = {}
-        for name, entry in pipelines.items():
+        for name, entry in valid_pipelines.items():
             validation_results[name] = await self._validate_pipeline_connectivity(name, entry)
         
         # Check if active pipeline is healthy
@@ -274,7 +305,8 @@ class PipelineOrchestrator:
         logger.info(
             "Pipeline orchestrator initialized",
             active_pipeline=self._active_pipeline_name,
-            pipeline_count=len(pipelines),
+            pipeline_count=len(valid_pipelines),
+            invalid_pipelines=len(self._invalid_pipelines),
             healthy_pipelines=healthy_count,
             unhealthy_pipelines=unhealthy_count,
         )
@@ -312,16 +344,30 @@ class PipelineOrchestrator:
             except StopIteration:
                 logger.error("No pipelines available to assign", call_id=call_id)
                 return None
+        if selected_name in self._invalid_pipelines:
+            logger.warning(
+                "Requested pipeline is invalid; falling back to first valid pipeline",
+                call_id=call_id,
+                requested_pipeline=selected_name,
+                error=self._invalid_pipelines.get(selected_name),
+            )
+            selected_name = None
 
-        entry = pipelines.get(selected_name)
-        if entry is None:
+        entry = pipelines.get(selected_name) if selected_name else None
+        if entry is None or selected_name in self._invalid_pipelines:
             logger.warning(
                 "Requested pipeline not found; falling back to first available pipeline",
                 call_id=call_id,
                 requested_pipeline=selected_name,
             )
             try:
-                selected_name, entry = next(iter(pipelines.items()))
+                for candidate_name, candidate_entry in pipelines.items():
+                    if candidate_name in self._invalid_pipelines:
+                        continue
+                    selected_name, entry = candidate_name, candidate_entry
+                    break
+                else:
+                    return None
             except StopIteration:
                 return None
 
@@ -920,9 +966,38 @@ class PipelineOrchestrator:
         return None
 
     def _validate_pipeline_entry(self, pipeline_name: str, entry: PipelineEntry) -> None:
-        """Validate that component factories exist (static check)."""
+        """Validate pipeline component resolution (static check)."""
         for key in (entry.stt, entry.llm, entry.tts):
-            self._resolve_factory(key)
+            factory = self._resolve_factory(key)
+            if getattr(factory, _PLACEHOLDER_FACTORY_ATTR, None):
+                raise PipelineOrchestratorError(self._format_placeholder_error(pipeline_name, key))
+
+    def _format_placeholder_error(self, pipeline_name: str, component_key: str) -> str:
+        role = "unknown"
+        provider = None
+        try:
+            role = _extract_role(component_key)
+        except Exception:
+            role = "unknown"
+        try:
+            provider = _extract_provider(component_key)
+        except Exception:
+            provider = None
+
+        hints = []
+        if provider in ("openai", "openai_realtime"):
+            hints.append("Set OPENAI_API_KEY (and configure providers.openai for pipeline adapters).")
+        elif provider == "google":
+            hints.append("Set GOOGLE_API_KEY or GOOGLE_APPLICATION_CREDENTIALS.")
+        elif provider == "elevenlabs":
+            hints.append("Set ELEVENLABS_API_KEY.")
+        elif provider == "deepgram":
+            hints.append("Set DEEPGRAM_API_KEY and configure providers.deepgram.")
+        elif provider == "local":
+            hints.append("Ensure providers.local is enabled and local-ai-server is reachable.")
+
+        hint = f" Hint: {' '.join(hints)}" if hints else ""
+        return f"Pipeline '{pipeline_name}' cannot resolve {role} component '{component_key}' (placeholder adapter).{hint}"
     
     async def _validate_pipeline_connectivity(self, pipeline_name: str, entry: PipelineEntry) -> Dict[str, Any]:
         """Validate pipeline components can connect to required services.

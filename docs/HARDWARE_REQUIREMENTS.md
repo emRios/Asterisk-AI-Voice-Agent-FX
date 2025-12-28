@@ -70,7 +70,7 @@ Hardware requirements vary significantly based on your chosen configuration. Thi
 
 **Scaling**:
 - **Bottleneck**: Disk I/O for file-based playback
-- **Storage**: Use SSD for `/mnt/asterisk_media` path
+- **Storage**: Use SSD for the media volume (default: `./asterisk_media` on host, mounted as `/mnt/asterisk_media` in container)
 - **Horizontal**: Multiple instances sharing NFS for audio files
 
 ---
@@ -397,11 +397,11 @@ Push to 150% of expected capacity:
 ### Disk Optimization
 
 **For Deepgram (file mode)**:
-1. Use SSD for `/mnt/asterisk_media/ai-generated`
+1. Use SSD for `./asterisk_media/ai-generated` (mounted as `/mnt/asterisk_media/ai-generated` in container)
 2. Enable discard/TRIM
 3. Periodic cleanup of old audio files:
    ```bash
-   find /mnt/asterisk_media/ai-generated -type f -mtime +7 -delete
+   find ./asterisk_media/ai-generated -type f -mtime +7 -delete
    ```
 
 ### Network Optimization

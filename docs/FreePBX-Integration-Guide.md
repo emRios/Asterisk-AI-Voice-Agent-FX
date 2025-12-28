@@ -1,6 +1,6 @@
 # FreePBX Integration Guide
 
-Complete guide for integrating Asterisk AI Voice Agent v4.5.3+ with FreePBX.
+Complete guide for integrating Asterisk AI Voice Agent v4.6.0+ with FreePBX.
 
 ## 1. Overview
 
@@ -30,12 +30,12 @@ Transport selection is configuration-driven (see `Transport-Mode-Compatibility.m
 
 **For remote deployment** (Asterisk on different host/container):
 - Network connectivity between ai-engine and Asterisk hosts:
-  - **ARI**: TCP port 8088 (Asterisk → ai-engine)
+  - **ARI**: TCP port 8088 (ai-engine → Asterisk)
   - **AudioSocket**: TCP port 8090 (Asterisk → ai-engine)
-  - **ExternalMedia RTP**: UDP port 18080 (bidirectional)
+  - **ExternalMedia RTP**: UDP port 18080 (Asterisk → ai-engine, and ai-engine → Asterisk)
 - **Shared storage** for media files (required for pipeline configurations):
   - NFS mount, Docker volume, or other network filesystem
-  - Both Asterisk and ai-engine must access `/mnt/asterisk_media/ai-generated`
+  - Both Asterisk and ai-engine must access the same generated-audio directory (see “Shared Storage Configuration” below)
 - Set `ASTERISK_HOST` in `.env` to Asterisk's IP/hostname (not 127.0.0.1)
 
 **Note**: Remote deployment requires careful network and storage configuration. See section 2.4 below.
@@ -113,31 +113,74 @@ ASTERISK_HOST=192.168.1.100          # IP address
 ASTERISK_HOST=asterisk.example.com   # Hostname/FQDN
 ```
 
+If your ARI is not the default `http://<host>:8088`:
+
+```env
+ASTERISK_ARI_PORT=8088
+# ASTERISK_ARI_SCHEME=http           # http or https
+# ASTERISK_ARI_SSL_VERIFY=true       # set false for self-signed / hostname mismatch
+```
+
 **Required ports** (open firewall between hosts):
 
 | Port | Protocol | Direction | Purpose |
 |------|----------|-----------|---------|
 | 8088 | TCP | ai-engine → Asterisk | ARI/WebSocket |
 | 8090 | TCP | Asterisk → ai-engine | AudioSocket |
-| 18080 | UDP | Bidirectional | ExternalMedia RTP |
+| 18080 | UDP | Asterisk ↔ ai-engine | ExternalMedia RTP (or your configured `external_media.rtp_port` / `external_media.port_range`) |
+
+**ExternalMedia RTP security (recommended):**
+
+When using ExternalMedia RTP across hosts, configure a stable RTP source policy in `config/ai-agent.yaml`:
+
+```yaml
+external_media:
+  rtp_host: "0.0.0.0"
+  rtp_port: 18080
+  # Optional: allocate per-call RTP ports
+  # port_range: "18080:18099"
+  lock_remote_endpoint: true
+  # Strongly recommended when the Asterisk RTP source IP is stable:
+  allowed_remote_hosts:
+    - "192.168.1.100"  # Asterisk host IP as seen by ai-engine
+```
+
+Notes:
+- If you set `ASTERISK_HOST` to a hostname, **still use IP(s)** for `external_media.allowed_remote_hosts`.
+- If Asterisk is behind NAT, allowlist the IP that `ai-engine` actually observes as the RTP source.
+
+**Firewall guidance (minimum)**
+- Allow inbound **TCP 8090** from Asterisk → ai-engine (AudioSocket).
+- Allow inbound **UDP `external_media.rtp_port`** (or `port_range`) from Asterisk → ai-engine (ExternalMedia RTP).
+- Allow outbound **TCP 8088** (or your `ASTERISK_ARI_PORT`) from ai-engine → Asterisk (ARI).
 
 #### Shared Storage Configuration
 
 **Why needed**: Pipeline configurations (Local Hybrid) generate audio files that Asterisk must playback.
 
-**Path requirement**: Both systems must access the same files at `/mnt/asterisk_media/ai-generated`
+**Path requirement**: Both systems must access the same generated files that Asterisk will play (commonly via `sound:ai-generated/...`).
+
+On the ai-engine host, the default repo mount is:
+- Host path: `<repo>/asterisk_media/ai-generated`
+- Container path: `/mnt/asterisk_media/ai-generated` (via `docker-compose.yml` volume mount)
+
+On the Asterisk/FreePBX host, Asterisk typically serves sounds from `/var/lib/asterisk/sounds`. A common pattern is:
+- `/var/lib/asterisk/sounds/ai-generated` → shared storage directory
 
 **Solutions**:
 
 **Option 1: NFS Mount** (recommended for bare metal)
 
 ```bash
-# On ai-engine host:
+# On ai-engine host (mount shared storage, then point repo storage to it):
 sudo mkdir -p /mnt/asterisk_media/ai-generated
-sudo mount -t nfs asterisk-host:/mnt/asterisk_media/ai-generated /mnt/asterisk_media/ai-generated
+sudo mount -t nfs asterisk-host:/mnt/asterisk_media /mnt/asterisk_media
+
+# Make ai-engine write into the shared storage (repo-local mount is what compose uses)
+ln -sfn /mnt/asterisk_media ./asterisk_media
 
 # Make permanent in /etc/fstab:
-asterisk-host:/mnt/asterisk_media/ai-generated  /mnt/asterisk_media/ai-generated  nfs  defaults  0  0
+asterisk-host:/mnt/asterisk_media  /mnt/asterisk_media  nfs  defaults  0  0
 ```
 
 **Option 2: Docker Named Volume** (for containerized Asterisk)
@@ -197,7 +240,7 @@ spec:
 echo "test" > /mnt/asterisk_media/ai-generated/test.txt
 
 # On Asterisk host/container:
-cat /mnt/asterisk_media/ai-generated/test.txt  # Should output: test
+cat /mnt/asterisk_media/ai-generated/test.txt  # Should output: test (or verify via your mounted path)
 ```
 
 **Note**: Cloud configurations (OpenAI Realtime, Deepgram) use streaming and **don't require shared storage**.
@@ -408,15 +451,17 @@ Pipeline configurations (Local Hybrid) use file-based playback and need media pa
 # Verify the symlink exists
 ls -ld /var/lib/asterisk/sounds/ai-generated
 
-# Should show: /var/lib/asterisk/sounds/ai-generated -> /mnt/asterisk_media/ai-generated
+# Should show a symlink to your generated media directory
+# (common default): /var/lib/asterisk/sounds/ai-generated -> <repo>/asterisk_media/ai-generated
 ```
 
 **If missing**, the installer should have created it. If not:
 
 ```bash
-sudo mkdir -p /mnt/asterisk_media/ai-generated /var/lib/asterisk/sounds
-sudo ln -sfn /mnt/asterisk_media/ai-generated /var/lib/asterisk/sounds/ai-generated
-sudo chown -R asterisk:asterisk /mnt/asterisk_media/ai-generated
+REPO_DIR="/path/to/Asterisk-AI-Voice-Agent"
+sudo mkdir -p "${REPO_DIR}/asterisk_media/ai-generated" /var/lib/asterisk/sounds
+sudo ln -sfn "${REPO_DIR}/asterisk_media/ai-generated" /var/lib/asterisk/sounds/ai-generated
+sudo chown -R asterisk:asterisk "${REPO_DIR}/asterisk_media/ai-generated"
 ```
 
 **Note**: Cloud configurations (OpenAI Realtime, Deepgram) use streaming and don't require this.

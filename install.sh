@@ -20,7 +20,7 @@ if [ "$(id -u)" -ne 0 ]; then SUDO="sudo"; else SUDO=""; fi
 
 # --- Media path setup ---
 setup_media_paths() {
-    print_info "Setting up media directories and symlink for Asterisk playback..."
+    print_info "Setting up media directory and Asterisk symlink for file-based playback..."
 
     # Determine sudo
     if [ "$(id -u)" -ne 0 ]; then SUDO="sudo"; else SUDO=""; fi
@@ -29,48 +29,41 @@ setup_media_paths() {
     AST_UID=$(id -u asterisk 2>/dev/null || echo 995)
     AST_GID=$(id -g asterisk 2>/dev/null || echo 995)
 
-    # Create host media directories
-    $SUDO mkdir -p /mnt/asterisk_media/ai-generated || true
-    $SUDO mkdir -p /var/lib/asterisk/sounds || true
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    # This repo mounts ./asterisk_media into the ai-engine container at /mnt/asterisk_media.
+    # Keep host and container aligned by using the repo-local directory by default.
+    MEDIA_DIR="${AST_MEDIA_DIR:-$SCRIPT_DIR/asterisk_media/ai-generated}"
+    MEDIA_PARENT="$(dirname "$MEDIA_DIR")"
+    ASTERISK_SOUNDS_DIR="/var/lib/asterisk/sounds"
+    ASTERISK_SOUNDS_LINK="${ASTERISK_SOUNDS_DIR}/ai-generated"
 
-    # Ownership and permissions for fast file IO and Asterisk readability
-    $SUDO chown -R "$AST_UID:$AST_GID" /mnt/asterisk_media || true
-    $SUDO chmod 775 /mnt/asterisk_media /mnt/asterisk_media/ai-generated || true
+    $SUDO mkdir -p "$MEDIA_DIR" || true
 
-    # Create/update symlink so sound:ai-generated/... resolves
-    if [ -L /var/lib/asterisk/sounds/ai-generated ] || [ -e /var/lib/asterisk/sounds/ai-generated ]; then
-        $SUDO rm -rf /var/lib/asterisk/sounds/ai-generated || true
-    fi
-    $SUDO ln -sfn /mnt/asterisk_media/ai-generated /var/lib/asterisk/sounds/ai-generated
-    print_success "Linked /var/lib/asterisk/sounds/ai-generated -> /mnt/asterisk_media/ai-generated"
+    # Align group + permissions for container (appuser in asterisk group) and host Asterisk readability.
+    $SUDO chgrp "$AST_GID" "$MEDIA_PARENT" 2>/dev/null || true
+    $SUDO chgrp "$AST_GID" "$MEDIA_DIR" 2>/dev/null || true
+    $SUDO chmod 2775 "$MEDIA_PARENT" 2>/dev/null || true
+    $SUDO chmod 2775 "$MEDIA_DIR" 2>/dev/null || true
 
-    # Optional tmpfs mount for performance (Linux only)
-    if command -v mount >/dev/null 2>&1 && uname | grep -qi linux; then
-        read -p "Mount /mnt/asterisk_media as tmpfs for low‑latency playback? [y/N]: " mount_tmpfs
-        if [[ "$mount_tmpfs" =~ ^[Yy]$ ]]; then
-            if ! mountpoint -q /mnt/asterisk_media 2>/dev/null; then
-                $SUDO mount -t tmpfs -o size=128m,mode=0775,uid=$AST_UID,gid=$AST_GID tmpfs /mnt/asterisk_media && \
-                print_success "Mounted tmpfs at /mnt/asterisk_media (128M)."
-            else
-                print_info "/mnt/asterisk_media is already a mountpoint; skipping tmpfs mount."
-            fi
-            read -p "Persist tmpfs in /etc/fstab (advanced)? [y/N]: " persist_tmpfs
-            if [[ "$persist_tmpfs" =~ ^[Yy]$ ]]; then
-                FSTAB_LINE="tmpfs /mnt/asterisk_media tmpfs defaults,size=128m,mode=0775,uid=$AST_UID,gid=$AST_GID 0 0"
-                if ! grep -q "/mnt/asterisk_media" /etc/fstab 2>/dev/null; then
-                    echo "$FSTAB_LINE" | $SUDO tee -a /etc/fstab >/dev/null && print_success "Added tmpfs entry to /etc/fstab."
-                else
-                    print_info "/etc/fstab already contains an entry for /mnt/asterisk_media; skipping."
-                fi
-            fi
+    # Best-effort: create/update symlink so `sound:ai-generated/...` resolves on the Asterisk host.
+    if [ -d "$ASTERISK_SOUNDS_DIR" ]; then
+        if [ -e "$ASTERISK_SOUNDS_LINK" ] && [ ! -L "$ASTERISK_SOUNDS_LINK" ]; then
+            print_warning "Asterisk sounds path exists but is not a symlink: $ASTERISK_SOUNDS_LINK"
+            print_info "  Fix manually: $SUDO mv '$ASTERISK_SOUNDS_LINK' '${ASTERISK_SOUNDS_LINK}.bak' && $SUDO ln -sf '$MEDIA_DIR' '$ASTERISK_SOUNDS_LINK'"
+        else
+            $SUDO ln -sfn "$MEDIA_DIR" "$ASTERISK_SOUNDS_LINK" || true
+            print_success "Linked $ASTERISK_SOUNDS_LINK -> $MEDIA_DIR"
         fi
+    else
+        print_warning "Asterisk sounds directory not found at $ASTERISK_SOUNDS_DIR (skipping symlink)"
+        print_info "  If Asterisk is installed elsewhere, ensure `ai-generated` is available under your sounds directory."
     fi
 
     # Quick verification
-    if [ -d /var/lib/asterisk/sounds/ai-generated ]; then
-        print_success "Media path ready: /var/lib/asterisk/sounds/ai-generated -> /mnt/asterisk_media/ai-generated"
+    if [ -d "$MEDIA_DIR" ]; then
+        print_success "Media directory ready: $MEDIA_DIR"
     else
-        print_warning "Media path symlink missing; please ensure permissions and rerun setup."
+        print_warning "Media directory missing; please ensure permissions and rerun setup."
     fi
 }
 
@@ -122,6 +115,24 @@ setup_data_directory() {
     # Verify
     if [ -d "$DATA_DIR" ] && [ -w "$DATA_DIR" ]; then
         print_success "Data directory ready for call history DB"
+        # Best-effort: validate we can create an SQLite file inside the data directory.
+        if command -v python3 >/dev/null 2>&1; then
+            if python3 - "$DATA_DIR" <<'PY' 2>/dev/null; then
+import os, sqlite3, sys
+data_dir = sys.argv[1]
+path = os.path.join(data_dir, ".call_history_sqlite_test.db")
+conn = sqlite3.connect(path, timeout=1.0)
+conn.execute("CREATE TABLE IF NOT EXISTS __install_test (id INTEGER PRIMARY KEY)")
+conn.commit()
+conn.close()
+os.remove(path)
+PY
+                print_success "Call history DB: writable (SQLite test passed)"
+            else
+                print_warning "Call history DB: may fail (SQLite file test failed)"
+                print_info "  Common causes: permissions, SELinux contexts, or non-local filesystems that break SQLite locking"
+            fi
+        fi
     else
         print_warning "Data directory may not be writable; call history will NOT be recorded!"
     fi
@@ -145,11 +156,18 @@ validate_ari_connection() {
     local port="${2:-8088}"
     local user="$3"
     local pass="$4"
+    local scheme="${5:-http}"
+    local ssl_verify="${6:-true}"
     
-    print_info "Testing ARI connection to $host:$port..."
+    local curl_ssl_flags=()
+    if [ "$scheme" = "https" ] && [ "$ssl_verify" != "true" ]; then
+        curl_ssl_flags=(-k)
+    fi
+    
+    print_info "Testing ARI connection to ${scheme}://$host:$port..."
     
     local response
-    response=$(curl -sf -u "$user:$pass" "http://$host:$port/ari/asterisk/info" 2>&1)
+    response=$(curl -sf "${curl_ssl_flags[@]}" -u "$user:$pass" "${scheme}://$host:$port/ari/asterisk/info" 2>&1)
     local curl_exit=$?
     
     if [ $curl_exit -eq 0 ] && [ -n "$response" ]; then
@@ -173,7 +191,11 @@ validate_ari_connection() {
         echo "     enabled = yes"
         echo ""
         echo "  3. Test connection manually:"
-        echo "     curl -u $user:**** http://$host:$port/ari/asterisk/info"
+        echo "     curl -u $user:**** ${scheme}://$host:$port/ari/asterisk/info"
+        if [ "$scheme" = "https" ] && [ "$ssl_verify" != "true" ]; then
+            echo "     # (self-signed / hostname mismatch)"
+            echo "     curl -k -u $user:**** ${scheme}://$host:$port/ari/asterisk/info"
+        fi
         echo ""
         print_warning "Setup will continue, but calls may fail without working ARI"
         echo ""
@@ -216,6 +238,37 @@ check_asterisk_modules() {
     asterisk -rx "module show like res_ari_applications" || true
     asterisk -rx "module show like app_audiosocket" || true
     print_info "If modules are not Running, on FreePBX use: asterisk-switch-version (select 18+)."
+}
+
+maybe_run_preflight() {
+    # Install.sh is an interactive wizard; preflight.sh is the canonical system readiness checker.
+    if [ "${INSTALL_NONINTERACTIVE:-0}" = "1" ]; then
+        return 0
+    fi
+    if [ ! -f "./preflight.sh" ]; then
+        print_warning "preflight.sh not found; skipping preflight step"
+        return 0
+    fi
+
+    echo ""
+    print_info "Recommended: run preflight checks before install.sh (creates .env, fixes permissions, detects rootless Docker, etc.)"
+    read -p "Run preflight now (recommended)? [Y/n]: " run_pf
+    run_pf="${run_pf:-Y}"
+    if [[ "$run_pf" =~ ^[Yy]$ ]]; then
+        echo ""
+        print_info "Running: ${SUDO} ./preflight.sh --apply-fixes"
+        ${SUDO} ./preflight.sh --apply-fixes
+        local rc=$?
+        if [ "$rc" -eq 2 ]; then
+            print_warning "Preflight reported failures (exit code 2). Fix the failures above for best results."
+            read -p "Continue install.sh anyway? [y/N]: " continue_anyway
+            if [[ ! "$continue_anyway" =~ ^[Yy]$ ]]; then
+                exit 2
+            fi
+        fi
+    else
+        print_info "Skipping preflight. If you hit permission or Docker issues, run: sudo ./preflight.sh --apply-fixes"
+    fi
 }
 
 # --- Env file helpers ---
@@ -594,6 +647,7 @@ configure_env() {
 
     # Prefill from existing .env if present
     local ASTERISK_HOST_DEFAULT="" ASTERISK_ARI_USERNAME_DEFAULT="" ASTERISK_ARI_PASSWORD_DEFAULT=""
+    local ASTERISK_ARI_PORT_DEFAULT="" ASTERISK_ARI_SCHEME_DEFAULT="" ASTERISK_ARI_SSL_VERIFY_DEFAULT=""
     # API key defaults need to be GLOBAL so prompt_required_api_keys() can access them
     OPENAI_API_KEY_DEFAULT=""
     DEEPGRAM_API_KEY_DEFAULT=""
@@ -601,9 +655,15 @@ configure_env() {
         ASTERISK_HOST_DEFAULT=$(grep -E '^[# ]*ASTERISK_HOST=' .env | tail -n1 | sed -E 's/^[# ]*ASTERISK_HOST=//')
         ASTERISK_ARI_USERNAME_DEFAULT=$(grep -E '^[# ]*ASTERISK_ARI_USERNAME=' .env | tail -n1 | sed -E 's/^[# ]*ASTERISK_ARI_USERNAME=//')
         ASTERISK_ARI_PASSWORD_DEFAULT=$(grep -E '^[# ]*ASTERISK_ARI_PASSWORD=' .env | tail -n1 | sed -E 's/^[# ]*ASTERISK_ARI_PASSWORD=//')
+        ASTERISK_ARI_PORT_DEFAULT=$(grep -E '^[# ]*ASTERISK_ARI_PORT=' .env | tail -n1 | sed -E 's/^[# ]*ASTERISK_ARI_PORT=//')
+        ASTERISK_ARI_SCHEME_DEFAULT=$(grep -E '^[# ]*ASTERISK_ARI_SCHEME=' .env | tail -n1 | sed -E 's/^[# ]*ASTERISK_ARI_SCHEME=//')
+        ASTERISK_ARI_SSL_VERIFY_DEFAULT=$(grep -E '^[# ]*ASTERISK_ARI_SSL_VERIFY=' .env | tail -n1 | sed -E 's/^[# ]*ASTERISK_ARI_SSL_VERIFY=//')
         OPENAI_API_KEY_DEFAULT=$(grep -E '^[# ]*OPENAI_API_KEY=' .env | tail -n1 | sed -E 's/^[# ]*OPENAI_API_KEY=//')
         DEEPGRAM_API_KEY_DEFAULT=$(grep -E '^[# ]*DEEPGRAM_API_KEY=' .env | tail -n1 | sed -E 's/^[# ]*DEEPGRAM_API_KEY=//')
     fi
+    [ -z "$ASTERISK_ARI_PORT_DEFAULT" ] && ASTERISK_ARI_PORT_DEFAULT="8088"
+    [ -z "$ASTERISK_ARI_SCHEME_DEFAULT" ] && ASTERISK_ARI_SCHEME_DEFAULT="http"
+    [ -z "$ASTERISK_ARI_SSL_VERIFY_DEFAULT" ] && ASTERISK_ARI_SSL_VERIFY_DEFAULT="true"
 
     # Asterisk Connection Details
     echo ""
@@ -629,15 +689,38 @@ configure_env() {
         ASTERISK_ARI_PASSWORD="$ASTERISK_ARI_PASSWORD_DEFAULT"
     fi
 
+    read -p "Enter ARI Port [${ASTERISK_ARI_PORT_DEFAULT}]: " ASTERISK_ARI_PORT_INPUT
+    ASTERISK_ARI_PORT="${ASTERISK_ARI_PORT_INPUT:-$ASTERISK_ARI_PORT_DEFAULT}"
+
+    read -p "Enter ARI Scheme (http/https) [${ASTERISK_ARI_SCHEME_DEFAULT}]: " ASTERISK_ARI_SCHEME_INPUT
+    ASTERISK_ARI_SCHEME="${ASTERISK_ARI_SCHEME_INPUT:-$ASTERISK_ARI_SCHEME_DEFAULT}"
+    if [ "$ASTERISK_ARI_SCHEME" != "http" ] && [ "$ASTERISK_ARI_SCHEME" != "https" ]; then
+        print_warning "Invalid scheme '$ASTERISK_ARI_SCHEME' (expected http or https); defaulting to http"
+        ASTERISK_ARI_SCHEME="http"
+    fi
+
+    ASTERISK_ARI_SSL_VERIFY="$ASTERISK_ARI_SSL_VERIFY_DEFAULT"
+    if [ "$ASTERISK_ARI_SCHEME" = "https" ]; then
+        read -p "Verify ARI SSL certificate? (true/false) [${ASTERISK_ARI_SSL_VERIFY_DEFAULT}]: " ASTERISK_ARI_SSL_VERIFY_INPUT
+        ASTERISK_ARI_SSL_VERIFY="${ASTERISK_ARI_SSL_VERIFY_INPUT:-$ASTERISK_ARI_SSL_VERIFY_DEFAULT}"
+        if [ "$ASTERISK_ARI_SSL_VERIFY" != "true" ] && [ "$ASTERISK_ARI_SSL_VERIFY" != "false" ]; then
+            print_warning "Invalid ASTERISK_ARI_SSL_VERIFY '$ASTERISK_ARI_SSL_VERIFY' (expected true/false); defaulting to true"
+            ASTERISK_ARI_SSL_VERIFY="true"
+        fi
+    fi
+
     # Validate ARI connection before proceeding
     echo ""
-    validate_ari_connection "$ASTERISK_HOST" "8088" "$ASTERISK_ARI_USERNAME" "$ASTERISK_ARI_PASSWORD"
+    validate_ari_connection "$ASTERISK_HOST" "$ASTERISK_ARI_PORT" "$ASTERISK_ARI_USERNAME" "$ASTERISK_ARI_PASSWORD" "$ASTERISK_ARI_SCHEME" "$ASTERISK_ARI_SSL_VERIFY"
     echo ""
 
     # API Keys are now handled by prompt_required_api_keys() based on chosen provider
     # This avoids duplicate prompts and only asks for what's needed
     
     upsert_env ASTERISK_HOST "$ASTERISK_HOST"
+    upsert_env ASTERISK_ARI_PORT "$ASTERISK_ARI_PORT"
+    upsert_env ASTERISK_ARI_SCHEME "$ASTERISK_ARI_SCHEME"
+    upsert_env ASTERISK_ARI_SSL_VERIFY "$ASTERISK_ARI_SSL_VERIFY"
     upsert_env ASTERISK_ARI_USERNAME "$ASTERISK_ARI_USERNAME"
     upsert_env ASTERISK_ARI_PASSWORD "$ASTERISK_ARI_PASSWORD"
     # API keys are now set by prompt_required_api_keys() after provider selection
@@ -679,7 +762,7 @@ configure_env() {
 select_config_template() {
     echo ""
     echo "╔═══════════════════════════════════════════════════════════╗"
-    echo "║   Asterisk AI Voice Agent v4.5.3 - Configuration Setup   ║"
+    echo "║   Asterisk AI Voice Agent v4.6.0 - Configuration Setup   ║"
     echo "╚═══════════════════════════════════════════════════════════╝"
     echo ""
     echo "✨ ALL 3 AI voice pipelines will be enabled:"
@@ -698,7 +781,7 @@ select_config_template() {
     echo "      • Enterprise-grade with Think stage"
     echo "      • Uses: DEEPGRAM_API_KEY + OPENAI_API_KEY"
     echo ""
-    echo "  [3] Local Hybrid (Default for v4.5.3)"
+    echo "  [3] Local Hybrid"
     echo "      • Audio privacy, cost control"
     echo "      • Uses: OPENAI_API_KEY + local-ai-server"
     echo ""
@@ -1476,7 +1559,8 @@ main() {
     echo "=========================================="
     echo " Asterisk AI Voice Agent Installation"
     echo "=========================================="
-    
+
+    maybe_run_preflight
     check_docker
     choose_compose_cmd
     check_asterisk_modules

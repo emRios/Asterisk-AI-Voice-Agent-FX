@@ -44,11 +44,28 @@ const PipelinesPage = () => {
         }
     };
 
-    const handleReloadAIEngine = async () => {
+    const handleReloadAIEngine = async (force: boolean = false) => {
         setRestartingEngine(true);
         try {
             // Pipeline changes may require new providers - use restart to ensure they're loaded
-            const response = await axios.post('/api/system/containers/ai_engine/restart');
+            const response = await axios.post(`/api/system/containers/ai_engine/restart?force=${force}`);
+
+            if (response.data.status === 'warning') {
+                const confirmForce = window.confirm(
+                    `${response.data.message}\n\nDo you want to force restart anyway? This may disconnect active calls.`
+                );
+                if (confirmForce) {
+                    setRestartingEngine(false);
+                    return handleReloadAIEngine(true);
+                }
+                return;
+            }
+
+            if (response.data.status === 'degraded') {
+                alert(`AI Engine restarted but may not be fully healthy: ${response.data.output || 'Health check issue'}\n\nPlease verify manually.`);
+                return;
+            }
+
             if (response.data.status === 'success') {
                 setPendingRestart(false);
                 alert('AI Engine restarted! Changes are now active.');
@@ -189,7 +206,7 @@ const PipelinesPage = () => {
                     Changes to pipeline configurations require an AI Engine restart to take effect.
                 </div>
                 <button
-                    onClick={handleReloadAIEngine}
+                    onClick={() => handleReloadAIEngine(false)}
                     disabled={restartingEngine}
                     className={`flex items-center text-xs px-3 py-1.5 rounded transition-colors ${
                         pendingRestart 

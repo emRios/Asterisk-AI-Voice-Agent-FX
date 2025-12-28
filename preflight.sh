@@ -195,6 +195,18 @@ detect_os() {
                 ubuntu|debian|linuxmint) OS_FAMILY="debian" ;;
                 centos|rhel|rocky|almalinux|fedora|sangoma) OS_FAMILY="rhel" ;;
             esac
+            # Best-effort: infer family from ID_LIKE for derivatives (e.g., some Debian 12 variants).
+            if [ "$OS_FAMILY" = "unknown" ] && [ -n "${ID_LIKE:-}" ]; then
+                local id_like
+                id_like="$(echo "${ID_LIKE:-}" | tr '[:upper:]' '[:lower:]')"
+                if [[ "$id_like" == *debian* || "$id_like" == *ubuntu* ]]; then
+                    OS_FAMILY="debian"
+                    log_warn "OS family inferred from ID_LIKE ($ID_LIKE) - best-effort support"
+                elif [[ "$id_like" == *rhel* || "$id_like" == *fedora* || "$id_like" == *centos* ]]; then
+                    OS_FAMILY="rhel"
+                    log_warn "OS family inferred from ID_LIKE ($ID_LIKE) - best-effort support"
+                fi
+            fi
         fi
     fi
     
@@ -254,6 +266,34 @@ detect_os() {
     esac
     
     log_ok "OS: $OS_ID $OS_VERSION ($OS_FAMILY family)"
+}
+
+# ============================================================================
+# IPv6 Check (GA best-effort)
+# ============================================================================
+check_ipv6() {
+    # AAVA runs in host-network mode by default; container-level IPv6 sysctls are not reliable here.
+    # We warn (non-blocking) and recommend host-level disable for GA stability.
+    local IPV6_SYSCTL="/proc/sys/net/ipv6/conf/all/disable_ipv6"
+    [ -r "$IPV6_SYSCTL" ] || return 0
+
+    local disabled
+    disabled="$(cat "$IPV6_SYSCTL" 2>/dev/null | tr -d '[:space:]' || true)"
+    if [ "$disabled" = "0" ]; then
+        local IPV6_DOCS_URL
+        IPV6_DOCS_URL="$(github_docs_url "docs/TROUBLESHOOTING_GUIDE.md" 2>/dev/null || true)"
+        log_warn "IPv6 is enabled (best-effort) - recommend disabling IPv6 on the host for GA stability"
+        log_info "  Recommendation (temporary):"
+        log_info "    sudo sysctl -w net.ipv6.conf.all.disable_ipv6=1"
+        log_info "    sudo sysctl -w net.ipv6.conf.default.disable_ipv6=1"
+        log_info "  Recommendation (persistent):"
+        log_info "    cat <<'EOF' | sudo tee /etc/sysctl.d/99-disable-ipv6.conf"
+        log_info "    net.ipv6.conf.all.disable_ipv6=1"
+        log_info "    net.ipv6.conf.default.disable_ipv6=1"
+        log_info "    EOF"
+        log_info "    sudo sysctl --system"
+        [ -n "$IPV6_DOCS_URL" ] && log_info "  Docs: ${IPV6_DOCS_URL}#ipv6-ga-policy"
+    fi
 }
 
 # ============================================================================
@@ -359,17 +399,37 @@ install_docker_debian() {
     local DOCKER_DISTRO=""
     local DOCKER_CODENAME=""
     
-    # Source os-release to get ID and VERSION_CODENAME
+    # Source os-release to get ID and VERSION_CODENAME.
+    # NOTE: Some environments omit VERSION_CODENAME (or use derivatives), so we fall back to VERSION_ID mappings.
     if [ -f /etc/os-release ]; then
         . /etc/os-release
         case "$ID" in
             ubuntu)
                 DOCKER_DISTRO="ubuntu"
-                DOCKER_CODENAME="${VERSION_CODENAME:-focal}"
+                DOCKER_CODENAME="${VERSION_CODENAME:-${UBUNTU_CODENAME:-}}"
+                if [ -z "$DOCKER_CODENAME" ] && [ -n "${VERSION_ID:-}" ]; then
+                    case "$VERSION_ID" in
+                        24.04*) DOCKER_CODENAME="noble" ;;
+                        23.10*) DOCKER_CODENAME="mantic" ;;
+                        23.04*) DOCKER_CODENAME="lunar" ;;
+                        22.04*) DOCKER_CODENAME="jammy" ;;
+                        20.04*) DOCKER_CODENAME="focal" ;;
+                        18.04*) DOCKER_CODENAME="bionic" ;;
+                    esac
+                fi
                 ;;
             debian)
                 DOCKER_DISTRO="debian"
-                DOCKER_CODENAME="${VERSION_CODENAME:-bullseye}"
+                DOCKER_CODENAME="${VERSION_CODENAME:-}"
+                if [ -z "$DOCKER_CODENAME" ] && [ -n "${VERSION_ID:-}" ]; then
+                    case "$VERSION_ID" in
+                        13*) DOCKER_CODENAME="trixie" ;;   # Debian testing/next (best-effort)
+                        12*) DOCKER_CODENAME="bookworm" ;;
+                        11*) DOCKER_CODENAME="bullseye" ;;
+                        10*) DOCKER_CODENAME="buster" ;;
+                        9*) DOCKER_CODENAME="stretch" ;;
+                    esac
+                fi
                 ;;
             linuxmint)
                 # Linux Mint uses Ubuntu repos - map to Ubuntu base
@@ -390,6 +450,12 @@ install_docker_debian() {
         esac
     else
         log_fail "Cannot detect OS version - /etc/os-release not found"
+        return 1
+    fi
+
+    if [ -z "$DOCKER_CODENAME" ]; then
+        log_fail "Cannot determine Debian/Ubuntu codename for Docker repo (VERSION_CODENAME missing)"
+        log_info "  Please install Docker manually: https://docs.docker.com/engine/install/"
         return 1
     fi
     
@@ -696,6 +762,26 @@ check_directories() {
     # Check data directory (for call history SQLite DB)
     if [ -d "$DATA_DIR" ] && [ -w "$DATA_DIR" ]; then
         log_ok "Data directory: $DATA_DIR"
+        # Best-effort: validate we can create an SQLite file inside the data directory.
+        # Avoid touching the real call_history.db here; use a temp file and delete it.
+        if command -v python3 &>/dev/null; then
+            if python3 - "$DATA_DIR" <<'PY' 2>/dev/null; then
+import os, sqlite3, sys
+data_dir = sys.argv[1]
+path = os.path.join(data_dir, ".call_history_sqlite_test.db")
+conn = sqlite3.connect(path, timeout=1.0)
+conn.execute("CREATE TABLE IF NOT EXISTS __preflight_test (id INTEGER PRIMARY KEY)")
+conn.commit()
+conn.close()
+os.remove(path)
+PY
+                log_ok "Call history DB: writable (SQLite test passed)"
+            else
+                log_warn "Call history DB: may fail (SQLite file test failed)"
+                log_info "  If call history fails at runtime, check container logs for: 'Failed to initialize call history database'"
+                log_info "  Common causes: permissions, SELinux contexts, or non-local filesystems that break SQLite locking"
+            fi
+        fi
     else
         if [ ! -d "$DATA_DIR" ]; then
             if [ "$APPLY_FIXES" = true ]; then
@@ -717,6 +803,7 @@ check_directories() {
             else
                 log_warn "Data directory not writable: $DATA_DIR"
                 log_info "  ⚠️  Call history will NOT be recorded without write access!"
+                log_info "  If you see call history DB errors at runtime, check SELinux contexts and filesystem support for SQLite locks"
                 log_info "  Run: ./preflight.sh --apply-fixes to fix permissions"
                 FIX_CMDS+=("chmod 775 $DATA_DIR")
             fi
@@ -1241,6 +1328,7 @@ main() {
     echo ""
     
     detect_os
+    check_ipv6
     check_docker
     check_compose
     check_directories

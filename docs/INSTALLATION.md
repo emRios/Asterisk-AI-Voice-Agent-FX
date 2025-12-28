@@ -1,10 +1,71 @@
-# Asterisk AI Voice Agent - Installation Guide (v4.5.3)
+# Asterisk AI Voice Agent - Installation Guide (v4.6.0)
 
-This guide provides detailed instructions for setting up the Asterisk AI Voice Agent v4.5.3 on your server.
+This guide provides detailed instructions for setting up the Asterisk AI Voice Agent v4.6.0 on your server.
 
 ## Three Setup Paths
 
 Choose the path that best fits your experience level:
+
+## Upgrade from v4.5.3 → v4.6.0 (Existing Checkout)
+
+This section is for operators upgrading an existing repo checkout (not a fresh install).
+
+### 0) Backup (recommended)
+
+- Backup `.env`
+- Backup `config/ai-agent.yaml`
+- If you rely on Call History persistence, backup `./data` as well
+
+### 1) Pull the new release
+
+Once `v4.6.0` is published:
+
+```bash
+git fetch --tags
+git checkout v4.6.0
+```
+
+If you track branches instead of tags:
+
+```bash
+git checkout main
+git pull
+```
+
+### 2) Re-run preflight (recommended)
+
+```bash
+sudo ./preflight.sh --apply-fixes
+```
+
+### 3) Upgrade checklist (4.5.3 → 4.6.0)
+
+- `.env`:
+  - Review ARI settings: `ASTERISK_ARI_PORT`, `ASTERISK_ARI_SCHEME`, `ASTERISK_ARI_SSL_VERIFY`
+  - If using rootless Docker/Podman, set a persistent `DOCKER_SOCK=...` in `.env` (not only `export ...`)
+- Admin UI “save vs apply”:
+  - `.env` edits from the UI may normalize quoting and remove duplicate keys; this is expected in 4.6+
+- OpenAI Realtime:
+  - Baseline includes a small audio output tweak; validate your call quality if you customized encoding/sample-rate
+
+### 4) Rebuild and recreate containers
+
+```bash
+docker compose up -d --build --force-recreate admin-ui ai-engine
+```
+
+If your configuration requires local inference:
+
+```bash
+docker compose up -d --build --force-recreate local-ai-server
+```
+
+### 5) Verify
+
+```bash
+curl -sS http://localhost:15000/health
+agent doctor
+```
 
 ### Path A: Admin UI Setup Wizard (Recommended)
 
@@ -205,7 +266,7 @@ You will be asked to choose an AI provider.
 
 - **[1] OpenAI Realtime**: Out-of-the-box realtime voice path (cloud).
 - **[2] Deepgram Voice Agent**: Cloud STT/TTS with strong latency/quality.
-- **[3] Local Hybrid (Default for v4.5.3)**: Local STT/TTS + cloud LLM (audio stays local).
+- **[3] Local Hybrid**: Local STT/TTS + cloud LLM (audio stays local).
 
 #### Provider Configuration
 
@@ -334,7 +395,7 @@ Add to `/etc/asterisk/extensions_custom.conf`:
 
 ```asterisk
 [from-ai-agent]
-exten => s,1,NoOp(Asterisk AI Voice Agent v4.5.3)
+exten => s,1,NoOp(Asterisk AI Voice Agent v4.6.0)
  same => n,Stasis(asterisk-ai-voice-agent)
  same => n,Hangup()
 ```
@@ -384,7 +445,7 @@ asterisk -rx "dialplan reload"
   - Check that your API keys in the `.env` file are correct.
 - **Audio Quality Issues**:
   - Confirm AudioSocket is connected (see Asterisk CLI and `ai-engine` logs).
-  - Use a tmpfs for media files (e.g., `/mnt/asterisk_media`) to minimize I/O latency for file-based playback.
+  - Use a tmpfs/SSD for the media volume (default: `./asterisk_media` on host, mounted as `/mnt/asterisk_media` in `ai-engine`) to minimize I/O latency for file-based playback.
   - Verify you are not appending file extensions to ARI `sound:` URIs (Asterisk will add them automatically).
 
 - **No host Python 3 installed (scripts/Makefile)**:

@@ -2,7 +2,7 @@
 
 This document explains every major option in `config/ai-agent.yaml`, the precedence model for greeting/persona, and the impact of fine‑tuning parameters across AudioSocket/ExternalMedia, VAD, Barge‑In, Streaming, and Providers.
 
-## Configuration Architecture (v4.5)
+## Configuration Architecture (v4.6)
 
 Starting in v4.0, the project added a **modular pipeline architecture** alongside monolithic provider support:
 

@@ -33,7 +33,7 @@ Implemented a production-ready web-based administration interface for the Asteri
   - **Advanced Settings**: VAD, streaming, LLM, transport, barge-in
   - **Environment Editor**: Visual `.env` file management
   - **Raw YAML Editor**: Direct config editing with syntax validation
-  - **Logs Viewer**: Live WebSocket log streaming
+  - **Logs**: Raw container logs + call-centric Troubleshoot timeline
   - **Container Management**: Start/stop/restart controls
 
 ### 2. Backend API (FastAPI + Python)
@@ -132,13 +132,17 @@ Implemented a production-ready web-based administration interface for the Asteri
   - Quick status indicators
   - Error handling and display
 
-### 9. Live Logs Viewer
-- **Implementation**:
-  - WebSocket connection to backend
-  - Backend tails Docker container logs
-  - Real-time streaming to frontend
-  - Auto-scroll with user toggle
-  - Container selection (ai-engine, local-ai-server)
+### 9. Logs (Raw + Troubleshoot)
+
+The Admin UI Logs page supports two workflows:
+
+- **Raw** (default): quick level filtering over container logs (tail-based).
+- **Troubleshoot**: a call-centric, filterable timeline built from existing ai-engine logs (no ai-engine logging changes required).
+
+**Implementation**:
+- Backend reads Docker container logs via Docker socket.
+- Frontend polls at short intervals for live updates (and preserves user scroll position unless pinned to bottom).
+- Container selection supported (`ai_engine`, `local_ai_server`, `admin_ui`).
 
 ### 10. Documentation
 - **Files Created**:
@@ -186,6 +190,122 @@ Implemented a production-ready web-based administration interface for the Asteri
 - ✅ Default credentials changeable
 - ✅ Route protection on all APIs
 - ✅ CORS configuration correct
+
+---
+
+## Addendum: Logs & Troubleshoot (Implemented)
+
+**Goal**: Make troubleshooting calls dramatically faster by turning raw container logs into a call-centric, filterable timeline, with a one-click jump from Call History.
+
+This builds on the existing Logs and Call History pages by adding:
+- a structured **Troubleshoot** view over Docker logs
+- call-finding via Call History-style filters
+- correlation using `call_id` plus related channel IDs observed in ai-engine logs
+
+### Problem Statement
+
+Today, users troubleshooting an issue must manually scroll raw logs and grep mentally for:
+- which call they are looking at
+- key milestones (transport start, provider session ACK, audio profile, call end)
+- signal quality issues (resampling, underruns, format switches)
+
+This is slow and error-prone, especially for new users.
+
+### Definitions
+
+- **call_id** (canonical): The Asterisk caller channel id for a call session. In this codebase, `call_id == caller_channel_id`.
+- **Caller ID**: The phone identity (number/name). In Call History: `caller_number`, `caller_name`.
+
+Caller ID is not guaranteed to appear in container logs, so the UI workflow is:
+1) search calls by Caller ID in Call History
+2) select a specific call record → use its `call_id` to filter logs
+
+### User Experience (UX)
+
+#### A) Logs → Raw (default)
+
+Use when you want a quick “what’s currently broken?” view.
+
+Raw features:
+- Container selector
+- **Levels** multi-select (`error`, `warning`, `info`, `debug`) with default `warning+error`
+- Free-text search
+- Preserves ANSI coloring from container output
+
+#### B) Logs → Troubleshoot (call-centric)
+
+Use when you’re investigating a specific call and need an end-to-end narrative.
+
+Troubleshoot features:
+- **Find Call** panel (same filter shape as Call History): caller number/name, provider, pipeline, context, outcome, date range
+- Selecting a call launches a **timeline** for that call
+- Views (server-side focused fetch so mid-call events aren’t dropped):
+  - `Overview` (milestones + warnings/errors)
+  - `Issues` (warnings/errors + “signal” info lines)
+  - `Provider`
+  - `Media` (audio + transport)
+  - `Barge-in / VAD`
+  - `Tools`
+  - `All`
+- Toggles:
+  - **Include debug** (default ON)
+  - **Hide transcripts / payloads** (default ON)
+  - **Hide repeats** (default ON)
+- Correlation:
+  - Filters by `call_id` and automatically expands to related channel IDs observed in logs (ExternalMedia/Local legs).
+  - If `since/until` is not provided, the backend resolves a time window from Call History (best-effort) and pads it, so the call isn’t missed due to tail truncation.
+
+#### B) Call History → “Troubleshoot” (one click)
+
+In Call History call details, add a **Troubleshoot** action:
+- Opens Logs page in **Troubleshoot** mode
+- Pre-fills:
+  - `container=ai_engine`
+  - `call_id=<selected call_id>`
+  - `since=<start_time - padding>` and `until=<end_time + padding>` when available
+
+### Backend API (FastAPI)
+
+Keep existing raw logs endpoint intact:
+- `GET /api/logs/{container}?tail=500` → raw text
+
+Add a new parsed events endpoint:
+- `GET /api/logs/{container}/events`
+
+Query parameters:
+- `call_id` (optional)
+- `levels` (repeatable) or comma-separated
+- `categories` (repeatable) or comma-separated
+- `q` (optional contains match)
+- `hide_payloads=true|false` (default true)
+- `since` / `until` (ISO 8601; optional)
+- `since_seconds_ago` (optional, convenience)
+- `limit` (default 500)
+
+Response:
+- `events: [ { ts, level, msg, component, call_id, provider, context, pipeline, category, milestone, raw } ]`
+
+Parsing requirements:
+- Strip ANSI codes server-side for parsing (Raw view preserves the original ANSI lines).
+- Parse structured log format best-effort:
+  - timestamp, level, message, component/logger, and key=value fields (extract `call_id`, `provider`, `context`, `pipeline` when present).
+- Categorize events using a small, explicit pattern table (maintainable).
+- Mark `milestone=true` for known info-level milestones.
+
+### Acceptance Criteria
+
+- A user can troubleshoot a call in <30 seconds by:
+  1) finding call in Call History
+  2) clicking **Troubleshoot**
+  3) seeing provider/session events, media setup, audio profile, barge-in/VAD, tools, call end, and any warnings/errors in one timeline
+- Filtering by `call_id` yields stable, correct results.
+- “Hide transcripts / payloads” removes transcript/control spam by default.
+- Raw logs view remains available.
+
+### Phase 2 (Deferred)
+
+- Persist event timelines to Call History DB for long retention (outside scope).
+- Multi-container correlation (ai_engine + local_ai_server) in a single merged timeline (outside scope).
 
 **Browser Compatibility**:
 - ✅ Chrome 120+ (primary)

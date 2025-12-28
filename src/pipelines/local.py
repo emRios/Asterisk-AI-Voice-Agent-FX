@@ -26,7 +26,7 @@ from ..config import AppConfig, LocalProviderConfig
 _MAX_RECONNECT_ATTEMPTS = 3
 _RECONNECT_DELAY_BASE_SEC = 0.5
 from ..logging_config import get_logger
-from .base import LLMComponent, STTComponent, TTSComponent
+from .base import LLMComponent, LLMResponse, STTComponent, TTSComponent
 
 logger = get_logger(__name__)
 
@@ -860,7 +860,7 @@ class LocalLLMAdapter(_LocalAdapterBase, LLMComponent):
         transcript: str,
         context: Dict[str, Any],
         options: Dict[str, Any],
-    ) -> str:
+    ) -> LLMResponse:
         runtime_options = options or {}
         
         try:
@@ -872,7 +872,7 @@ class LocalLLMAdapter(_LocalAdapterBase, LLMComponent):
                 call_id=call_id,
                 error=str(exc),
             )
-            return ""  # Return empty response rather than crash
+            return LLMResponse(text="")  # Return empty response rather than crash
 
         merged = self._compose_options(runtime_options)
         logger.debug(
@@ -899,7 +899,7 @@ class LocalLLMAdapter(_LocalAdapterBase, LLMComponent):
                 call_id=call_id,
                 error=str(exc),
             )
-            return ""  # Return empty response rather than crash
+            return LLMResponse(text="")  # Return empty response rather than crash
         
         # Re-fetch session after potential reconnection
         session = self._sessions.get(call_id)
@@ -909,7 +909,7 @@ class LocalLLMAdapter(_LocalAdapterBase, LLMComponent):
                 component=self.component_key,
                 call_id=call_id,
             )
-            return ""
+            return LLMResponse(text="")
 
         # Prefer a dedicated LLM timeout when provided (pipeline or provider level)
         timeout = float(merged.get("llm_response_timeout_sec", merged.get("response_timeout_sec", 5.0)))
@@ -927,7 +927,7 @@ class LocalLLMAdapter(_LocalAdapterBase, LLMComponent):
                         error=str(exc),
                     )
                     self._sessions.pop(call_id, None)
-                    return ""
+                    return LLMResponse(text="")
                 except asyncio.TimeoutError:
                     logger.warning(
                         "LLM response timed out",
@@ -935,7 +935,7 @@ class LocalLLMAdapter(_LocalAdapterBase, LLMComponent):
                         call_id=call_id,
                         timeout_sec=timeout,
                     )
-                    return ""
+                    return LLMResponse(text="")
                     
                 if kind != "json":
                     continue
@@ -951,7 +951,7 @@ class LocalLLMAdapter(_LocalAdapterBase, LLMComponent):
                     latency_ms=round(latency_ms, 2),
                     response_preview=response[:80],
                 )
-                return response
+                return LLMResponse(text=response)
         except Exception as exc:
             logger.error(
                 "LLM receive loop failed unexpectedly",
@@ -960,7 +960,7 @@ class LocalLLMAdapter(_LocalAdapterBase, LLMComponent):
                 error=str(exc),
                 exc_info=True,
             )
-            return ""
+            return LLMResponse(text="")
 
 
 class LocalTTSAdapter(_LocalAdapterBase, TTSComponent):

@@ -457,7 +457,7 @@ class OpenAILLMAdapter(LLMComponent):
                         )
                     
                     logger.info("OpenAI chat completion received", **log_ctx)
-                    return content
+                    return LLMResponse(text=content or "", tool_calls=[], metadata=data.get("usage", {}))
             except aiohttp.ClientError as e:
                 if self._session is None or self._session.closed:
                     logger.info("OpenAI LLM generation cancelled (session closed)", call_id=call_id)

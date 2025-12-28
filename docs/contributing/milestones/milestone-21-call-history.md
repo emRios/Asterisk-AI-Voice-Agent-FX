@@ -162,6 +162,17 @@ Asterisk already handles call recording. This phase would add UI to link/play re
 | Duration | range | Min/max seconds |
 | Has Tool Calls | boolean | Filter calls with tool executions |
 
+## Troubleshoot Integration (Logs)
+
+Call History now provides a one-click jump into the **Logs → Troubleshoot** experience:
+
+- **Where**: Call Details modal (Call History) includes a **Troubleshoot** action.
+- **What it does**: Opens the Logs page in `mode=troubleshoot` and pre-fills:
+  - `container=ai_engine`
+  - `call_id=<selected call_id>`
+  - `since` / `until` (derived from the call record start/end times with padding) so the timeline is focused on the call window
+- **Why it matters**: Operators can start from **Caller ID** in Call History, select the right call record, and immediately see a coherent, call-centric log timeline without manual searching.
+
 ## Stats Dashboard
 
 | Metric | Visualization |

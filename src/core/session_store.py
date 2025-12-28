@@ -104,32 +104,46 @@ class SessionStore:
                 logger.warning("Cannot set gating token - call not found", 
                              call_id=call_id, playback_id=playback_id)
                 return False
-            
-            # Add token and increment refcount
+
+            already_present = playback_id in session.tts_tokens
+            prior_count = int(getattr(session, "tts_active_count", 0) or 0)
+
             session.tts_tokens.add(playback_id)
-            session.tts_active_count += 1
-            session.tts_playing = True
-            session.audio_capture_enabled = False
-            # Record TTS start time for barge-in protection window
-            session.tts_started_ts = time.time()
+            # Invariant: active_count must match the token set size (idempotent under duplicate events).
+            session.tts_active_count = len(session.tts_tokens)
+
+            # Only apply "start" side effects on the 0->1 transition.
+            if prior_count == 0 and session.tts_active_count > 0:
+                session.tts_playing = True
+                session.audio_capture_enabled = False
+                # Record TTS start time for barge-in protection window
+                session.tts_started_ts = time.time()
+
+                # Update VAD state
+                if session.vad_state:
+                    session.vad_state["tts_playing"] = True
+                    # Reset VAD buffers to prevent TTS bleed-through
+                    session.vad_state["webrtc_speech_frames"] = 0
+                    session.vad_state["webrtc_silence_frames"] = 0
+                    session.vad_state["webrtc_last_decision"] = False
+                    # ARCHITECT FIX: Reset both audio_buffer and frame_buffer
+                    if "audio_buffer" in session.vad_state:
+                        session.vad_state["audio_buffer"] = b""
+                    if "frame_buffer" in session.vad_state:
+                        session.vad_state["frame_buffer"] = b""
+            else:
+                # Ensure we remain gated when tokens exist (even if pre-state drifted).
+                if session.tts_active_count > 0:
+                    session.tts_playing = True
+                    session.audio_capture_enabled = False
             
-            # Update VAD state
-            if session.vad_state:
-                session.vad_state["tts_playing"] = True
-                # Reset VAD buffers to prevent TTS bleed-through
-                session.vad_state["webrtc_speech_frames"] = 0
-                session.vad_state["webrtc_silence_frames"] = 0
-                session.vad_state["webrtc_last_decision"] = False
-                # ARCHITECT FIX: Reset both audio_buffer and frame_buffer
-                if "audio_buffer" in session.vad_state:
-                    session.vad_state["audio_buffer"] = b""
-                if "frame_buffer" in session.vad_state:
-                    session.vad_state["frame_buffer"] = b""
-            
-            logger.info("🔇 TTS GATING - Audio capture disabled (token added)",
+            logger.info("🔇 TTS GATING - Token added",
                        call_id=call_id,
                        playback_id=playback_id,
-                       active_count=session.tts_active_count)
+                       active_count=session.tts_active_count,
+                       audio_capture_enabled=session.audio_capture_enabled,
+                       tts_playing=session.tts_playing,
+                       already_present=already_present)
             
             return True
     
@@ -141,13 +155,16 @@ class SessionStore:
                 logger.warning("Cannot clear gating token - call not found",
                              call_id=call_id, playback_id=playback_id)
                 return False
-            
-            # Remove token and decrement refcount
+
+            was_present = playback_id in session.tts_tokens
+            prior_count = int(getattr(session, "tts_active_count", 0) or 0)
+
             session.tts_tokens.discard(playback_id)
-            session.tts_active_count = max(0, session.tts_active_count - 1)
-            
-            # Only re-enable if no more active TTS
-            if session.tts_active_count == 0:
+            # Invariant: active_count must match the token set size (idempotent under duplicate events).
+            session.tts_active_count = len(session.tts_tokens)
+
+            # Only apply "end" side effects on the 1->0 transition.
+            if prior_count > 0 and session.tts_active_count == 0:
                 session.tts_playing = False
                 session.audio_capture_enabled = True
                 # Record TTS end time so the engine can guard a short post-TTS window
@@ -155,7 +172,7 @@ class SessionStore:
                     session.tts_ended_ts = time.time()
                 except Exception:
                     session.tts_ended_ts = 0.0
-                
+
                 # Update VAD state
                 if session.vad_state:
                     session.vad_state["tts_playing"] = False
@@ -164,12 +181,19 @@ class SessionStore:
                         session.vad_state["audio_buffer"] = b""
                     if "frame_buffer" in session.vad_state:
                         session.vad_state["frame_buffer"] = b""
+            else:
+                # Ensure we remain gated if any tokens remain (even if pre-state drifted).
+                if session.tts_active_count > 0:
+                    session.tts_playing = True
+                    session.audio_capture_enabled = False
             
-            logger.info("🔊 TTS GATING - Audio capture enabled (token removed)",
+            logger.info("🔊 TTS GATING - Token removed",
                        call_id=call_id,
                        playback_id=playback_id,
                        active_count=session.tts_active_count,
-                       audio_capture_enabled=session.audio_capture_enabled)
+                       audio_capture_enabled=session.audio_capture_enabled,
+                       tts_playing=session.tts_playing,
+                       was_present=was_present)
             
             return True
     

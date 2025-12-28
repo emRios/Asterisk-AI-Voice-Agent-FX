@@ -241,7 +241,17 @@ Each milestone includes scope, implementation details, and verification criteria
 
 ---
 
-## Milestone 14 — Tool Calling System (✅ Completed Nov 10, 2025)
+## Milestone 14 — Monitoring, Feedback & Guided Setup (Call History–First) (🟡 Iterating)
+
+- **Goal**: Ship an ops/debugging experience that is **Call History–first** (per-call), with **Troubleshoot** workflows in Admin UI + CLI, and **low-cardinality** `/metrics` (optional BYO dashboards).
+- **Implementation Notes**:
+  - Prometheus/Grafana are no longer shipped/provisioned from this repo; treat external dashboards as a bring-your-own workflow.
+  - Per-call debugging lives in Call History and Troubleshoot, not time-series labels.
+- **Docs**: `docs/contributing/milestones/milestone-14-monitoring-stack.md`
+
+---
+
+## Milestone 16 — Tool Calling System (✅ Completed Nov 10, 2025)
 
 - **Goal**: Implement unified, provider-agnostic tool calling architecture enabling AI agents to perform real-world actions. Detailed specifications in `docs/contributing/milestones/milestone-16-tool-calling-system.md`.
 - **What We Shipped**:
@@ -266,127 +276,49 @@ Each milestone includes scope, implementation details, and verification criteria
   - Enabled AI agents to perform complex call workflows
   - Zero audio issues with direct SIP origination
 
----
-
-## Milestone 16 — Tool Testing & Quality Assurance (✅ Completed Nov 12, 2025)
+### Testing & Quality Assurance (Milestone 16 Extension) (✅ Completed Nov 12, 2025)
 
 - **Goal**: Establish comprehensive test coverage for tool calling system with automated CI/CD enforcement to protect critical features and enable confident iteration.
 - **What We Shipped**:
-  - **Test Suite** (2,400 lines across 5 files):
-    - 58 telephony tool tests (transfer, hangup, cancel_transfer)
-    - 53 business tool tests (request_transcript, send_email_summary)
-    - Total: 111 tool-specific tests
-  - **Test Infrastructure**:
-    - Shared pytest fixtures in `tests/tools/conftest.py`
-    - Mock ARI client, SessionStore, Resend, DNS resolver
-    - Async test patterns for background email sending
-  - **CI/CD Integration**:
-    - GitHub Actions enforcing 27% coverage threshold
-    - Automated test runs on every push (~27 seconds)
-    - Coverage reports (HTML, XML, JSON) uploaded as artifacts
-  - **Bug Discovery**: Found and fixed blind transfer parameter bug during test development
-  - **Coverage Impact**: 20% → 28-29% (+8.5% increase)
-- **Test Coverage by Tool**:
-  - `TransferCallTool`: 23 tests (warm/blind modes, extension resolution, error handling)
-  - `HangupCallTool`: 17 tests (farewell messages, session cleanup)
-  - `CancelTransferTool`: 18 tests (in-progress cancellation, state validation)
-  - `RequestTranscriptTool`: 28 tests (email parsing, DNS validation, async sending)
-  - `SendEmailSummaryTool`: 25 tests (auto-triggered, duration formatting, HTML templates)
-- **Verification (2025-11-12)**:
-  - All 276 tests passing in CI
-  - Coverage: 27.18% (meets 27% threshold)
-  - Test execution time: ~27 seconds
-  - Email async behavior validated and documented
-- **Acceptance**:
-  - All tool execution paths tested in isolation
-  - Error handling validated for edge cases
-  - Mock configurations working correctly
-  - CI prevents regressions on every commit
-- **Impact**:
-  - Protected mission-critical features (call control, email delivery)
-  - Enabled confident iteration on tool system
-  - Established testing patterns for future tools
-  - Discovered 1 production bug before deployment
+  - **Test Suite** (2,400 lines across 5 files): 111 tool-specific tests
+  - **CI/CD Integration**: baseline coverage gate on `staging`/`main` (`.github/workflows/ci.yml`)
+  - **Regression hardening**: extended checks on `staging`/`main` merges (`.github/workflows/regression-hardening.yml`)
+- **Docs**: `tests/README.md`
 
 ---
 
-## Milestone 15 — AudioSocket + Pipeline Validation & Tool Execution (✅ Completed Nov 19, 2025)
+## Milestone 17 — Google Live Provider (✅ Completed Nov 14, 2025)
 
-- **Goal**: Validate AudioSocket transport with pipeline mode and enable tool execution for modular pipelines, achieving full transport/mode parity.
-- **What We Shipped**:
-  - **AudioSocket + Pipeline Validation**: Comprehensive 4-call test suite demonstrating AudioSocket works with both full agents AND pipelines.
-  - **Tool Execution for Pipelines** (AAVA-85): Extended tool calling system to modular pipelines via OpenAI Chat Completions API.
-    - LLMResponse dataclass with tool_calls support
-    - Pipeline orchestrator executes tools via tool_registry
-    - Terminal tool handling (hangup, transfer) with proper flow control
-    - Conversation history persistence for email summaries
-  - **Configuration Validation Improvements**: Tightened warnings to only flag when neither pipelines nor providers are configured.
-  - **Documentation Updates**: Updated `Transport-Mode-Compatibility.md` to mark AudioSocket + Pipeline as validated with historical context.
-- **Test Suite Results (Nov 19, 2025)**:
-  - **Call 1** (1763610697.6282): Google Live monolithic, 36.34s, 186 frames 
-  - **Call 2** (1763610742.6286): Deepgram monolithic, 34.36s, 176 frames 
-  - **Call 3** (1763610785.6290): OpenAI Realtime monolithic, 71.29s, 360 frames, tool execution 
-  - **Call 4** (1763610866.6294): local_hybrid pipeline, 54.57s, 277 frames, tool execution 
-  - **Call 3** (1763610785.6290): OpenAI Realtime monolithic, 71.29s, 360 frames, tool execution ✅
-  - **Call 4** (1763610866.6294): local_hybrid pipeline, 54.57s, 277 frames, tool execution ✅
-  - All calls: Continuous audio frame flow, clean two-way conversation, proper hangup
-- **Key Fixes Referenced**:
-  - `fbbe5b9` (Oct 27): Pipeline audio routing fix - added pipeline mode check BEFORE continuous_input provider routing
-  - `181b210` (Oct 28): Pipeline gating enforcement - prevents feedback loop
-  - `fbaaf2e` (Oct 28): Fallback safety margin increase for pipelines
-- **Tool Execution Validation** (AAVA-85):
-  - **Pipeline Tools Working**: transfer, hangup_call, send_email_summary, request_transcript
-  - **Call 1763610866.6294**: local_hybrid pipeline executed hangup_call with farewell, email summary sent
-  - **Call 1763582071.6214**: transfer to ringgroup 600 (Sales team) successful
-  - **Critical Bugs Fixed** (5 iterations):
-    - Config AttributeError: Fixed Engine.config vs self.app_config (commit a007241)
-    - Hangup method error: Used correct ARI method hangup_channel() (commit cc125fd)
-    - Farewell in email: Saved farewell to history before playback (commit 8058dab)
-    - Farewell audio cutoff: Accurate duration calculation from audio bytes (commit 8058dab)
-    - Conversation history preservation: Initialize from session.conversation_history (commit dd5bc5a)
-- **Configuration Matrix Update**:
-  - AudioSocket + Full Agent: ✅ VALIDATED
-  - AudioSocket + Pipeline: ✅ VALIDATED (v4.0+)
-  - ExternalMedia RTP + Pipeline: ✅ VALIDATED
-- **Verification**:
-  - All 4 transport/mode combinations now production-validated
-  - Tool execution functional in both monolithic providers and pipelines
-  - No false configuration warnings about valid combinations
-- **Acceptance**:
-  - AudioSocket + Pipeline produces clean two-way conversations with continuous audio flow
-  - Pipelines can execute all telephony and business tools
-  - Config validation warns only when neither providers nor pipelines are configured
-- **Impact**:
-  - Simplified transport selection: Both AudioSocket and ExternalMedia RTP work for all modes
-  - Full tool parity: Pipelines have same capabilities as monolithic providers
-  - Removed major deployment constraint documented since October 2025
+- **Goal**: Add Google Live as a low-latency “full agent” provider option.
+- **Docs**: `docs/contributing/milestones/milestone-17-google-live.md`
 
 ---
 
-## Milestone 17 — Monitoring, Feedback & Guided Setup (Planned)
+## Milestone 18 — Hybrid Pipelines Tool Implementation (✅ Completed Nov 19, 2025)
 
-- **Goal**: Ship an opt-in monitoring + analytics experience that is turnkey, captures per-call transcripts/metrics, and surfaces actionable YAML tuning guidance. Implementation details live in `docs/contributing/milestones/milestone-14-monitoring-stack.md`.
-- **Dependencies**: Milestones 5–7 in place so streaming telemetry, pipeline metadata, and configuration hot-reload already work.
-- **Workstreams & Tasks**:
-  1. **Observability Foundation**
-     - Keep `/metrics` strictly low-cardinality (no per-call identifiers like `session_uuid`/`call_id`).
-     - Document a bring-your-own Prometheus/Grafana stack for operators who want time-series monitoring.
-  2. **Call Analytics & Storage**
-     - Extend `SessionStore` (or dedicated collector) to emit end-of-call summaries: duration, turn count, fallback/jitter totals, sentiment score placeholder, pipeline + model names.
-     - Archive transcripts and the associated config snapshot per call in Call History storage (avoid per-call time-series labels).
-     - Publish aggregate Prometheus metrics for recommendations (`ai_agent_setting_recommendation_total{field="streaming.low_watermark_ms"}`) and sentiment/quality trends.
-  3. **Recommendations & Feedback Loop**
-     - Implement rule-based analyzer that inspects call summaries and suggests YAML tweaks (buffer warmup, fallback timeouts, pipeline swaps) exposed via Prometheus labels and a lightweight `/feedback/latest` endpoint.
-     - Document how to interpret each recommendation and where to edit (`config/ai-agent.yaml`).
-  4. **Dashboards & UX**
-     - Curate Grafana dashboards: real-time call board, pipeline/model leaderboards, sentiment timeline, recommendation feed, transcript quick links.
-     - Keep dashboards/provisioning as a bring-your-own workflow (the project no longer ships `monitoring/` assets in the main repo path).
-  5. **Guided Setup for Non-Linux Users**
-     - Deliver a helper script (e.g., `scripts/setup_observability.py`) that checks Docker, prints scrape endpoints, and links to Call History inspection tools/docs.
-     - Update docs/Architecture, Agents.md, `.cursor/…`, `.windsurf/…`, `Gemini.md` to mention the optional workflow.
-- **Acceptance & Fast Verification**:
-  - After a call, a Call History entry is created (including transcript/metadata), and the recommendation endpoint lists at least one actionable suggestion referencing YAML keys.
-  - Metrics remain low-cardinality under load (no per-call labels).
+- **Goal**: Enable tool execution for modular pipelines and validate AudioSocket/ExternalMedia parity.
+- **Docs**: `docs/contributing/milestones/milestone-18-hybrid-pipelines-tool-implementation.md`
+
+---
+
+## Milestone 19 — Admin UI Implementation (✅ Completed Dec 2025)
+
+- **Goal**: Production-ready Admin UI for setup, configuration, logs, and container operations.
+- **Docs**: `docs/contributing/milestones/milestone-19-admin-ui-implementation.md`
+
+---
+
+## Milestone 20 — ElevenLabs Provider (✅ Completed Dec 2, 2025)
+
+- **Goal**: Add ElevenLabs Conversational AI provider (premium voice quality) with tool calling support.
+- **Docs**: `docs/contributing/milestones/milestone-20-elevenlabs.md`
+
+---
+
+## Milestone 21 — Call History & Analytics Dashboard (✅ Completed Dec 18, 2025)
+
+- **Goal**: Persist call records and transcripts with operator-friendly debugging and export.
+- **Docs**: `docs/contributing/milestones/milestone-21-call-history.md`
 
 Keep this roadmap updated after each milestone to help any collaborator—or future AI assistant—pick up where we left off.
 
@@ -394,7 +326,7 @@ Keep this roadmap updated after each milestone to help any collaborator—or fut
 
 ## Future Roadmap
 
-### Milestone 18 — Quality, Multi-Provider Demos, and Hi-Fi Audio (Planned)
+### Hi-Fi Audio & Multi-Provider Demos (Planned)
 
 - **Goal**: Improve resampling quality for hi-fi profiles and demonstrate multi-provider parity. ROADMAPv4 P3 milestone.
 - **Dependencies**: Milestones 8-13 complete; golden baselines validated.
@@ -416,11 +348,11 @@ Keep this roadmap updated after each milestone to help any collaborator—or fut
 **Release Date**: November 19, 2025  
 **Focus**: Full transport/mode parity and tool execution for modular pipelines
 
-> **Note**: This work was completed in Milestone 15 and released as v4.3.0 (not v4.2.x). The v4.2.1 patch release (Nov 18) focused on onboarding improvements (quickstart wizard, enhanced installer).
+> **Note**: This work was completed in Milestone 18 and released as v4.3.0 (not v4.2.x). The v4.2.1 patch release (Nov 18) focused on onboarding improvements (quickstart wizard, enhanced installer).
 
 **AudioSocket + Pipeline Validation**:
 
-- Validated AudioSocket transport with pipeline mode (Milestone 15)
+- Validated AudioSocket transport with pipeline mode (Milestone 18)
 - 4-call comprehensive test suite (Google Live, Deepgram, OpenAI Realtime, local_hybrid)
 - All transport/mode combinations now production-ready
 - Documentation updated with historical context and v4.0+ validation notes
@@ -448,41 +380,60 @@ Keep this roadmap updated after each milestone to help any collaborator—or fut
 
 ### v4.5.3 (December 2025) - Security Hardening Sprint
 
-**Release Date**: December 17, 2025  
-**Focus**: Security hardening, resilience, and Admin UI production readiness
+**Release Date**: December 22, 2025  
+**Focus**: Security hardening, RTP safety, and production readiness
 
-**Security Hardening** (AAVA-131):
+**Security Hardening** (AAVA-131, AAVA-136, AAVA-137):
 
-- Default network bindings changed to localhost (127.0.0.1) for all services
-- Admin UI requires `JWT_SECRET` and `UVICORN_HOST=0.0.0.0` for remote access
-- local_ai_server fail-closed auth enforcement for non-loopback binds
-- Health endpoint binds to localhost by default
+- Preflight is treated as required in docs; stronger “you are exposing a control plane” warnings for operators.
+- Remote access is explicit: Admin UI supports `UVICORN_HOST=0.0.0.0` (default in docker-compose for out-of-box UX) and requires `JWT_SECRET`; production guidance recommends reverse proxy/VPN and tight firewall rules.
+- ARI runtime reconnect supervisor with exponential backoff; `/ready` reflects true ARI connection state; removed blocking IO from async runtime paths (`time.sleep` → `asyncio.sleep`).
 
-**Resilience Improvements** (AAVA-136, AAVA-137):
+**RTP Safety & Hardening**:
 
-- ARI runtime reconnect supervisor with exponential backoff
-- Removed blocking IO from async runtime paths (`time.sleep` → `asyncio.sleep`)
-- `/ready` endpoint reflects true ARI connection state
+- ExternalMedia RTP hardening: remote endpoint pinning (`external_media.lock_remote_endpoint`) and allowlist support (`external_media.allowed_remote_hosts`).
+- Fixed SSRC routing to prevent cross-call audio mixing by using authoritative `call_id` in engine callback.
+
+**Observability & Debugging**:
+
+- Default provider is now `local_hybrid` (pipeline-first GA default); readiness probe is pipeline-aware when `default_provider` references a pipeline.
+- Low-cardinality Prometheus metrics only (no per-call labels like `call_id`); per-call debugging is via Admin UI → Call History.
+- Removed legacy bundled Prometheus/Grafana monitoring stack and `monitoring/` assets from the main repo path (bring-your-own monitoring).
+- Local AI logging: suppressed noisy websocket handshake errors; improved client connection logging.
 
 **Admin UI Adoption Readiness** (AAVA-130):
 
-- Fixed JWT_SECRET load-order vulnerability
-- Fixed config export crash (`CONFIG_PATH.exists()`)
-- Atomic writes for all config-mutating endpoints
-- CORS restricted by default with env override
+- Fixed JWT_SECRET load-order vulnerability; CORS restricted by default with env override.
+- Atomic writes for config-mutating endpoints; fixed config export crash (`CONFIG_PATH.exists()`).
+- Admin UI backend: model switching mappings for `faster_whisper` STT and `melotts` TTS.
 
-**Documentation Updates** (AAVA-132, AAVA-133, AAVA-134, AAVA-135):
+**Tests**:
 
-- Updated resilience.md from v3.0 to v4.x
-- Fixed transport default documentation (ExternalMedia is default)
-- Added Kroko binary integrity verification (SHA256)
-- Added Admin-UI control plane hardening documentation
+- Added tests for RTP routing/security and Prometheus label cardinality.
 
-**Local AI Server Logging**:
+---
 
-- Suppressed noisy websockets handshake errors via log filter
-- Added client connection logging at INFO level
-- Aligned main.py defaults with docker-compose.yml
+### v4.5.2 (December 2025) - Local AI Enhancements
+
+**Release Date**: December 16, 2025  
+**Focus**: Local AI capabilities, model management, and stability fixes
+
+- Kokoro API mode (`KOKORO_MODE=api`) for OpenAI-compatible TTS endpoints.
+- Model hot-swap via WebSocket (STT/TTS/LLM without container restart) and improved auto-reconnect behavior.
+- MCP tool integration framework and initial tool implementations.
+- Compatibility fixes (websockets 15.x, resend 2.x, sherpa-onnx 1.12.19).
+
+---
+
+### v4.5.0 (December 2025) - Admin UI Stability & Ops UX
+
+**Release Date**: December 11, 2025  
+**Focus**: Admin UI stability, safer config writes, and better operator feedback
+
+- Admin UI stability fixes across config editor state, validation, and restart-required UX.
+- Docker operations improvements (prefer Docker SDK restart; compose fallback).
+- Atomic writes + backup rotation for `config/ai-agent.yaml` and `.env`.
+- Health endpoint improvements (uptime, pending timers, live conversation metrics).
 
 ---
 
@@ -569,34 +520,24 @@ Keep this roadmap updated after each milestone to help any collaborator—or fut
 
 ---
 
-### 🚧 Next: Milestone 21 - Call History & Analytics Dashboard
-
-**Status**: In Progress  
-**Branch**: `feature/call-history`  
-**Estimated Effort**: 7 days
-
-Comprehensive call history with debugging capabilities:
-
-- SQLite persistence for call records
-- Full conversation transcripts with timestamps
-- Tool execution logging and debugging
-- Stats dashboard with charts (calls/day, outcomes, provider usage)
-- Search by caller, provider, pipeline, context, outcome
-- CSV/JSON export
-
-See: `docs/contributing/milestones/milestone-21-call-history.md`
-
----
-
 ### v4.5 Planning (Q1 2026)
+
+**Reality Check (Current State)**:
+
+- **Primary operator workflow**: Admin UI → Call History + Troubleshoot; CLI parity via `agent doctor`, `agent demo`, `agent troubleshoot`.
+- **Observability stance**: Call History–first; `/metrics` is supported but must remain low-cardinality (BYO dashboards; no repo-shipped Prometheus/Grafana stack).
+- **Core runtime**: Asterisk 18+ ARI + Stasis app (`asterisk-ai-voice-agent`), ExternalMedia RTP default; AudioSocket supported; per-call overrides via `AI_PROVIDER` / `AI_AUDIO_PROFILE` / `AI_CONTEXT`.
+- **Providers/pipelines in GA**: full-agent providers (`deepgram`, `openai_realtime`, `google_live`, `elevenlabs_agent`) + modular pipelines (including `local_hybrid`; adapters include Google STT/TTS and ElevenLabs TTS for pipelines).
+- **Change-safety today**: GitHub Actions CI is intentionally scoped to `staging`/`main`; CI validates Python tests + coverage baseline, plus regression hardening checks (CLI/Admin UI build + Docker build sanity). Live Asterisk/PSTN calls are not part of CI by default.
 
 **Testing & Quality**:
 
 - ✅ Unit tests for tool adapters and email tools (111 tests, 27-29% coverage - Milestone 16)
-- ✅ AudioSocket + Pipeline validation (4-call test suite - Milestone 15)
+- ✅ AudioSocket + Pipeline validation (4-call test suite - Milestone 18)
 - ⏳ Integration tests for transfer workflows (unit tests complete, full workflow pending)
 - 🎯 Increase CI coverage threshold to 30% then 40% (currently 27%)
-- ⏳ Automated regression test suite (foundation in place)
+- ✅ GitHub Actions CI is branch-scoped to `staging`/`main` with a baseline coverage gate (`.github/workflows/ci.yml`)
+- ⏳ Regression hardening workflow for `staging`/`main` merges (extended checks: CLI + Admin UI build + Docker builds) (`.github/workflows/regression-hardening.yml`)
 
 **Admin UI Adoption Readiness** (AAVA-130 - ✅ COMPLETED Dec 2025):
 
@@ -622,8 +563,10 @@ See: `docs/contributing/milestones/milestone-21-call-history.md`
 - ✅ ElevenLabs - elevenlabs_agent provider - IMPLEMENTED (v4.4.1)
 - ✅ Google Cloud Speech - google_stt/google_tts adapters - IMPLEMENTED (src/pipelines/google.py)
 - ✅ ElevenLabs TTS adapter - elevenlabs_tts for pipelines - IMPLEMENTED (AAVA-114)
-- ⏳ Azure Speech Services for STT/TTS
-- ⏳ Anthropic Claude integration for LLM
+- 🚧 Next (Planned): Azure + Claude, after regression hardening
+  - **Azure Speech Services (STT/TTS)**: implement as modular adapters first (pipelines) with streaming support and codec/profile alignment via `TransportOrchestrator`.
+  - **Anthropic Claude (LLM)**: add as a pipeline LLM adapter with tool calling parity and consistent error handling.
+  - **Prerequisite**: expand provider/pipeline contract tests so merges to `staging`/`main` have reliable regression signal without requiring live Asterisk calls.
 
 **Advanced Features**:
 
@@ -767,5 +710,5 @@ For detailed implementation plans and specifications:
 
 ---
 
-**Last Updated**: December 17, 2025  
-**Roadmap Version**: 2.6 (Added v4.5.3 Security Hardening Sprint, updated v4.5 Planning status)
+**Last Updated**: December 27, 2025  
+**Roadmap Version**: 2.8 (Aligned milestone numbering with `docs/contributing/milestones/`, clarified Call History–first observability, and removed duplicate Milestone 21 section)

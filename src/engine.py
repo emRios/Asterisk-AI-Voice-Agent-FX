@@ -177,6 +177,9 @@ _CALL_DURATION = Histogram(
 # Track call start times for duration calculation
 _call_start_times = {}  # call_id -> timestamp
 
+# In-memory set to prevent duplicate cleanup (race condition guard)
+_cleanup_in_progress: set = set()  # call_ids currently being cleaned up
+
 
 class Engine:
     """The main application engine."""
@@ -184,6 +187,8 @@ class Engine:
     def __init__(self, config: AppConfig):
         self.config = config
         self._start_time = time.time()  # Track engine start time for uptime
+        self._config_hash = self._compute_config_hash()
+        self._config_loaded_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         base_url = f"{config.asterisk.scheme}://{config.asterisk.host}:{config.asterisk.port}/ari"
         self.ari_client = ARIClient(
             username=config.asterisk.username,
@@ -1004,12 +1009,13 @@ class Engine:
                             type=provider.__class__.__name__
                         )
                 except Exception as exc:
-                    logger.error(
-                        "❌ Provider readiness check failed",
-                        provider=provider_name,
-                        error=str(exc),
-                        exc_info=True
-                    )
+                        logger.error(
+                            "❌ Provider readiness check failed",
+                            provider=provider_name,
+                            error=str(exc),
+                            exc_info=True
+                        )
+
         elif default_target in available_pipelines:
             logger.info(
                 "Default pipeline is configured",
@@ -1101,10 +1107,13 @@ class Engine:
             logger.info("🎯 HYBRID ARI - Processing caller channel", channel_id=channel_id)
             await self._handle_caller_stasis_start_hybrid(channel_id, channel)
         elif self._is_local_channel(channel):
-            # This is the Local channel entering Stasis - legacy path
-            logger.info("🎯 HYBRID ARI - Local channel entered Stasis",
-                       channel_id=channel_id,
-                       channel_name=channel_name)
+            # Local channels are helper legs (e.g., transfers) and should be mapped back
+            # to a real caller channel.
+            logger.info(
+                "🎯 HYBRID ARI - Local channel entered Stasis",
+                channel_id=channel_id,
+                channel_name=channel_name,
+            )
             # Now add the Local channel to the bridge
             await self._handle_local_stasis_start_hybrid(channel_id, channel)
         elif self._is_audiosocket_channel(channel):
@@ -2278,6 +2287,7 @@ class Engine:
 
     async def _cleanup_call(self, channel_or_call_id: str) -> None:
         """Shared cleanup for StasisEnd/ChannelDestroyed paths."""
+        resolved_call_id = None  # Track for finally block cleanup
         try:
             # Resolve session by call_id first, then fallback to channel lookup.
             session = await self.session_store.get_by_call_id(channel_or_call_id)
@@ -2288,6 +2298,14 @@ class Engine:
                 return
 
             call_id = session.call_id
+            resolved_call_id = call_id  # Save for finally block
+            
+            # In-memory re-entrancy guard (atomic, no race condition)
+            if call_id in _cleanup_in_progress:
+                logger.debug("Cleanup already in progress (in-memory guard)", call_id=call_id)
+                return
+            _cleanup_in_progress.add(call_id)
+            
             logger.info("Cleaning up call", call_id=call_id)
             
             # Record call duration if we have start time
@@ -2313,19 +2331,6 @@ class Engine:
                                provider=provider_name)
             except Exception as e:
                 logger.debug("Failed to record call duration", call_id=call_id, error=str(e))
-
-            # Idempotent re-entrancy guard
-            if getattr(session, "cleanup_completed", False):
-                logger.debug("Cleanup already completed", call_id=call_id)
-                return
-            if getattr(session, "cleanup_in_progress", False):
-                logger.debug("Cleanup already in progress", call_id=call_id)
-                return
-            try:
-                session.cleanup_in_progress = True
-                await self.session_store.upsert_call(session)
-            except Exception:
-                pass
 
             # Stop any active streaming playback.
             try:
@@ -2576,16 +2581,9 @@ class Engine:
         except Exception as exc:
             logger.error("Error cleaning up call", identifier=channel_or_call_id, error=str(exc), exc_info=True)
         finally:
-            # Best-effort: if session still exists and we marked in-progress, clear it to unblock future attempts
-            try:
-                sess3 = await self.session_store.get_by_call_id(channel_or_call_id)
-                if not sess3:
-                    sess3 = await self.session_store.get_by_channel_id(channel_or_call_id)
-                if sess3 and getattr(sess3, "cleanup_in_progress", False) and not getattr(sess3, "cleanup_completed", False):
-                    sess3.cleanup_in_progress = False
-                    await self.session_store.upsert_call(sess3)
-            except Exception:
-                pass
+            # Clean up in-memory guard
+            if resolved_call_id:
+                _cleanup_in_progress.discard(resolved_call_id)
 
     async def _persist_call_history(self, session: CallSession, call_id: str) -> None:
         """Persist call record to history database (Milestone 21)."""
@@ -5816,7 +5814,27 @@ class Engine:
                 
                 # Delay to ensure audio completes through RTP pipeline
                 # Accounts for: RTP transmission, jitter buffer, and playback
-                await asyncio.sleep(1.0)
+                # Check provider-specific delay first, then fall back to global config
+                hangup_delay = getattr(self.config, 'farewell_hangup_delay_sec', 2.5)
+                try:
+                    session = await self.session_store.get_by_call_id(call_id)
+                    if session:
+                        provider_name = getattr(session, 'provider', None)
+                        if provider_name and provider_name in self.config.providers:
+                            provider_cfg = self.config.providers.get(provider_name, {})
+                            provider_delay = provider_cfg.get('farewell_hangup_delay_sec') if isinstance(provider_cfg, dict) else getattr(provider_cfg, 'farewell_hangup_delay_sec', None)
+                            if provider_delay is not None:
+                                hangup_delay = provider_delay
+                                logger.debug(
+                                    "Using provider-specific farewell delay",
+                                    call_id=call_id,
+                                    provider=provider_name,
+                                    delay=hangup_delay
+                                )
+                except Exception as e:
+                    logger.debug(f"Could not get provider delay, using global: {e}")
+                
+                await asyncio.sleep(hangup_delay)
                 
                 try:
                     session = await self.session_store.get_by_call_id(call_id)
@@ -7448,6 +7466,26 @@ class Engine:
         
         session.music_snoop_channel_id = None
     
+    def _compute_config_hash(self) -> str:
+        """Compute a hash of the current config for pending-changes detection."""
+        import hashlib
+        import json
+        try:
+            # Convert config to dict and hash it
+            if hasattr(self.config, 'model_dump'):
+                config_dict = self.config.model_dump()
+            elif hasattr(self.config, 'dict'):
+                config_dict = self.config.dict()
+            else:
+                config_dict = {}
+            
+            # Create a stable JSON representation (sorted keys)
+            config_json = json.dumps(config_dict, sort_keys=True, default=str)
+            return hashlib.sha256(config_json.encode()).hexdigest()[:16]
+        except Exception as e:
+            logger.debug(f"Failed to compute config hash: {e}")
+            return "unknown"
+    
     @staticmethod
     def _canonicalize_encoding(value: Optional[str]) -> str:
         """Normalize codec tokens to canonical engine values."""
@@ -8840,6 +8878,10 @@ class Engine:
             active_sessions = await self.session_store.get_all_sessions()
             uptime_seconds = int(time.time() - self._start_time)
 
+            # Compute config hash for pending-changes detection
+            config_hash = getattr(self, '_config_hash', None)
+            config_loaded_at = getattr(self, '_config_loaded_at', None)
+            
             payload = {
                 "status": "healthy" if is_ready else "degraded",
                 "ari_connected": ari_connected,
@@ -8850,6 +8892,8 @@ class Engine:
                 "pending_timers": pending_timers,
                 "uptime_seconds": uptime_seconds,
                 "active_playbacks": 0,
+                "config_hash": config_hash,
+                "config_loaded_at": config_loaded_at,
                 "providers": providers_info,
                 "pipelines": pipelines_info,
                 "rtp_server": {},
@@ -8964,7 +9008,19 @@ class Engine:
             # Update config reference
             old_config = self.config
             self.config = new_config
+            # Recompute config hash after reload so health endpoint shows current state
+            self._config_hash = self._compute_config_hash()
+            self._config_loaded_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
             changes.append("Configuration updated")
+
+            # Step 2b: Rebuild TransportOrchestrator so contexts/profiles changes apply to new calls.
+            # The orchestrator is created once at startup and otherwise holds stale copies of profiles/contexts.
+            try:
+                cfg_dict = new_config.dict() if hasattr(new_config, "dict") else new_config.__dict__
+                self.transport_orchestrator = TransportOrchestrator(cfg_dict)
+                changes.append("TransportOrchestrator rebuilt (profiles/contexts refreshed)")
+            except Exception as e:
+                errors.append(f"Error rebuilding TransportOrchestrator: {str(e)}")
             
             # Step 3: Reinitialize providers that have changed
             try:
