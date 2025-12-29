@@ -443,6 +443,7 @@ async def load_existing_config():
     Used to pre-populate wizard fields if config already exists.
     """
     from dotenv import dotenv_values
+    import re
     
     config = {}
     
@@ -455,7 +456,12 @@ async def load_existing_config():
             "asterisk_password": env_values.get("ASTERISK_ARI_PASSWORD", ""),
             "asterisk_port": int(env_values.get("ASTERISK_ARI_PORT", "8088")),
             "asterisk_scheme": env_values.get("ASTERISK_ARI_SCHEME", "http"),
-            "asterisk_app": env_values.get("ASTERISK_ARI_APP", "asterisk-ai-voice-agent"),
+            # App name is YAML-owned (asterisk.app_name). Keep env fallbacks for legacy setups only.
+            "asterisk_app": (
+                env_values.get("ASTERISK_APP_NAME")
+                or env_values.get("ASTERISK_ARI_APP")
+                or "asterisk-ai-voice-agent"
+            ),
             "openai_key": env_values.get("OPENAI_API_KEY", ""),
             "groq_key": env_values.get("GROQ_API_KEY", ""),
             "deepgram_key": env_values.get("DEEPGRAM_API_KEY", ""),
@@ -468,12 +474,31 @@ async def load_existing_config():
         try:
             with open(CONFIG_PATH, 'r') as f:
                 yaml_config = yaml.safe_load(f)
+
+            # Canonical: app name lives in YAML (asterisk.app_name)
+            asterisk_yaml = (yaml_config.get("asterisk") or {}) if isinstance(yaml_config.get("asterisk"), dict) else {}
+            if asterisk_yaml.get("app_name"):
+                config["asterisk_app"] = asterisk_yaml.get("app_name")
             
             # Get default context settings
             default_ctx = yaml_config.get("contexts", {}).get("default", {})
-            config["ai_name"] = default_ctx.get("ai_name", "Asterisk Agent")
-            config["ai_role"] = default_ctx.get("ai_role", "")
-            config["greeting"] = default_ctx.get("greeting", "")
+            prompt = (default_ctx.get("prompt") or "").strip()
+            greeting = (default_ctx.get("greeting") or "").strip()
+
+            # Wizard stores prompt as: "You are <ai_name>, a <ai_role>. ..."
+            # Best-effort parse to prepopulate ai_name/ai_role without inventing new YAML keys.
+            ai_name = "Asterisk Agent"
+            ai_role = "Helpful Assistant"
+            if prompt:
+                match = re.match(r"^You are\s+(?P<name>[^,]+),\s*a\s+(?P<role>[^.]+)\.", prompt, flags=re.IGNORECASE)
+                if match:
+                    ai_name = (match.group("name") or "").strip() or ai_name
+                    ai_role = (match.group("role") or "").strip() or ai_role
+
+            config["ai_name"] = ai_name
+            config["ai_role"] = ai_role
+            if greeting:
+                config["greeting"] = greeting
             
             # Try to detect provider from config
             if default_ctx.get("provider"):
@@ -2016,6 +2041,7 @@ class AsteriskConnection(BaseModel):
     password: str
     port: int = 8088
     scheme: str = "http"
+    ssl_verify: bool = True  # Set to False for self-signed certs or IP/hostname mismatches
     app: str = "asterisk-ai-voice-agent"
 
 @router.post("/validate-key")
@@ -2181,7 +2207,10 @@ async def validate_asterisk_connection(conn: AsteriskConnection):
         # Try to connect to ARI interface
         base_url = f"{conn.scheme}://{conn.host}:{conn.port}/ari"
         
-        async with httpx.AsyncClient() as client:
+        # Configure SSL verification (disable for self-signed certs)
+        verify = conn.ssl_verify if conn.scheme == "https" else True
+        
+        async with httpx.AsyncClient(verify=verify) as client:
             response = await client.get(
                 f"{base_url}/asterisk/info",
                 auth=(conn.username, conn.password),
@@ -2199,12 +2228,39 @@ async def validate_asterisk_connection(conn: AsteriskConnection):
             else:
                 return {"valid": False, "error": f"Connection failed: HTTP {response.status_code}"}
                 
-    except httpx.ConnectError:
-        return {"valid": False, "error": f"Cannot connect to {conn.host}:{conn.port} - Is Asterisk running?"}
+    except httpx.ConnectError as e:
+        logger.debug("ARI validation connect error", exc_info=True)
+        error_str = str(e).lower()
+        
+        # Categorize SSL errors more precisely
+        if "ssl" in error_str or "certificate" in error_str:
+            # Certificate verification errors (only suggest unchecking if verify is ON)
+            if conn.ssl_verify and ("certificate verify" in error_str or "certificate_verify" in error_str or "self-signed" in error_str or "hostname" in error_str):
+                return {"valid": False, "error": "SSL certificate verification failed. Try unchecking 'Verify SSL Certificate' for self-signed certs or hostname mismatches."}
+            # SSL protocol/handshake errors (server may not support HTTPS)
+            elif "record layer" in error_str or "handshake" in error_str or "wrong version" in error_str:
+                return {"valid": False, "error": f"SSL handshake failed. The server may not support HTTPS on port {conn.port}. Try using 'http' scheme or a different port."}
+            # Generic SSL error - show details
+            else:
+                return {"valid": False, "error": "SSL error - check scheme, port, and certificate settings."}
+        
+        return {"valid": False, "error": f"Cannot connect to {conn.host}:{conn.port} - is Asterisk running and reachable?"}
     except httpx.TimeoutException:
-        return {"valid": False, "error": "Connection timeout"}
+        return {"valid": False, "error": f"Connection timeout to {conn.host}:{conn.port} - Check if the server is reachable and the port is correct."}
     except Exception as e:
-        return {"valid": False, "error": str(e)}
+        logger.debug("ARI validation failed", exc_info=True)
+        error_str = str(e).lower()
+        
+        # Categorize SSL errors more precisely
+        if "ssl" in error_str or "certificate" in error_str:
+            if conn.ssl_verify and ("certificate verify" in error_str or "self-signed" in error_str):
+                return {"valid": False, "error": "SSL certificate verification failed. Try unchecking 'Verify SSL Certificate'."}
+            elif "record layer" in error_str or "handshake" in error_str:
+                return {"valid": False, "error": "SSL handshake failed. The server may not support HTTPS on this port."}
+            else:
+                return {"valid": False, "error": "SSL error - check scheme, port, and certificate settings."}
+        
+        return {"valid": False, "error": "Connection failed - check host/port/scheme and credentials."}
 
 @router.get("/status")
 async def get_setup_status():
@@ -2238,6 +2294,8 @@ class SetupConfig(BaseModel):
     asterisk_port: int = 8088
     asterisk_scheme: str = "http"
     asterisk_app: str = "asterisk-ai-voice-agent"
+    asterisk_server_ip: Optional[str] = None  # Required when asterisk_host is a hostname (for RTP security)
+    asterisk_ssl_verify: bool = True  # Set to False to skip SSL certificate verification
     openai_key: Optional[str] = None
     groq_key: Optional[str] = None
     deepgram_key: Optional[str] = None
@@ -2297,7 +2355,7 @@ async def save_setup_config(config: SetupConfig):
             "ASTERISK_ARI_PASSWORD": config.asterisk_password,
             "ASTERISK_ARI_PORT": str(config.asterisk_port),
             "ASTERISK_ARI_SCHEME": config.asterisk_scheme,
-            "ASTERISK_APP_NAME": config.asterisk_app,
+            "ASTERISK_ARI_SSL_VERIFY": "true" if config.asterisk_ssl_verify else "false",
             "AI_NAME": config.ai_name,
             "AI_ROLE": config.ai_role,
             "GREETING": config.greeting,
@@ -2532,6 +2590,16 @@ async def save_setup_config(config: SetupConfig):
                 "provider": config.provider if config.provider != "local_hybrid" else "local",
                 "profile": "telephony_ulaw_8k"
             }
+
+            # Canonical: ARI application name is YAML-owned (asterisk.app_name).
+            asterisk_block = yaml_config.get("asterisk")
+            if not isinstance(asterisk_block, dict):
+                asterisk_block = {}
+                yaml_config["asterisk"] = asterisk_block
+            asterisk_block["app_name"] = config.asterisk_app
+            # Set allowed_remote_hosts when using hostname (for RTP security)
+            if config.asterisk_server_ip:
+                yaml_config.setdefault("external_media", {})["allowed_remote_hosts"] = [config.asterisk_server_ip]
 
             atomic_write_text(
                 CONFIG_PATH,

@@ -302,6 +302,20 @@ const GoogleLiveProviderForm: React.FC<GoogleLiveProviderFormProps> = ({ config,
                             />
                             <p className="text-xs text-muted-foreground">Optional max gain applied during normalization.</p>
                         </div>
+                        <div className="space-y-2">
+                            <label className="text-sm font-medium">Farewell Hangup Delay (seconds)</label>
+                            <input
+                                type="number"
+                                step="0.5"
+                                className="w-full p-2 rounded border border-input bg-background"
+                                value={config.farewell_hangup_delay_sec ?? ''}
+                                onChange={(e) => handleChange('farewell_hangup_delay_sec', e.target.value ? parseFloat(e.target.value) : null)}
+                                placeholder="Use global default (2.5s)"
+                            />
+                            <p className="text-xs text-muted-foreground">
+                                Seconds to wait after farewell audio before hanging up. Leave empty to use global default.
+                            </p>
+                        </div>
                     </div>
                 </div>
             </div>

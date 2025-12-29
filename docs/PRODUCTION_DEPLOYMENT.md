@@ -1,6 +1,6 @@
 # Production Deployment Guide
 
-Best practices and recommendations for deploying Asterisk AI Voice Agent `v4.5+` in production environments.
+Best practices and recommendations for deploying Asterisk AI Voice Agent `v4.6+` in production environments.
 
 ## Overview
 
@@ -40,7 +40,7 @@ This guide covers production deployment considerations, security hardening, scal
 
 - [ ] **`.env` file**: All required environment variables set
 - [ ] **`config/ai-agent.yaml`**: Production configuration selected
-- [ ] **Shared Storage**: `/mnt/asterisk_media/ai-generated` configured (for Local Hybrid)
+- [ ] **Shared Storage**: `./asterisk_media/ai-generated` configured (mounted into `ai-engine` as `/mnt/asterisk_media/ai-generated`) (for Local Hybrid)
 - [ ] **Call History**: `./data` volume persisted (default DB: `./data/call_history.db`)
 - [ ] **Monitoring (optional)**: Prometheus scraping `/metrics` (aggregate metrics only)
 
@@ -325,66 +325,54 @@ Docker offers two primary networking modes with different security and performan
 
 | Mode | Security | Performance | Use Case |
 |------|----------|-------------|----------|
-| **Bridge** (Recommended) | ✅ Higher | Good | Production with port isolation |
-| **Host** | ⚠️ Lower | Best | High-performance or testing |
+| **Host** (Default in `docker-compose.yml`) | ⚠️ Lower | Best | Telephony-first deployments, same-host Asterisk |
+| **Bridge** (Optional) | ✅ Higher | Good | Hardened deployments with explicit port isolation |
 
-**Default Configuration: Bridge Network** (Secure)
+**Default Configuration: Host Network** (Telephony-first)
 
-The default `docker-compose.yml` uses bridge networking with localhost binds:
+The default `docker-compose.yml` uses host networking:
 
 ```yaml
 # docker-compose.yml (default)
 services:
   ai-engine:
-    networks:
-      - ai-network
-    environment:
-      EXTERNAL_MEDIA_RTP_HOST: 127.0.0.1
-      HEALTH_BIND_HOST: 127.0.0.1
-
-networks:
-  ai-network:
-    driver: bridge
+    network_mode: host
 ```
 
 **Benefits**:
-- Services isolated from host network
-- Port mapping explicit and controlled
-- Better security posture
-- Works with firewall rules
+- No port mapping required (simpler for Asterisk integrations)
+- Lowest latency for RTP/telephony paths
+- Fewer “Docker networking surprises” on PBX distros
 
 **Trade-offs**:
-- Requires port mappings
-- Asterisk and AI engine must communicate via mapped ports
-- Slightly more network overhead
+- Reduced container isolation (shared host network namespace)
+- Requires strict firewall rules and access controls
+- Not recommended for multi-tenant environments
 
 ---
 
-**Host Network Mode** (Opt-In Only)
+**Bridge Network Mode** (Opt-In / Advanced)
 
-For high-performance scenarios or when bridge networking isn't suitable:
+For deployments that require explicit port isolation and tighter security posture, use bridge networking (custom compose required):
 
 ```yaml
-# docker-compose.host.yml (opt-in)
+# Example (bridge mode)
 services:
   ai-engine:
-    network_mode: host
-    environment:
-      EXTERNAL_MEDIA_RTP_HOST: 127.0.0.1
-      HEALTH_BIND_HOST: 127.0.0.1
+    ports:
+      - "8090:8090"        # AudioSocket
+      - "18080:18080/udp"  # ExternalMedia RTP
+      - "15000:15000"      # Health
 ```
 
 **When to Use**:
-- Very high call volume (>100 concurrent)
-- Minimizing RTP latency
-- Development/testing environments
-- Same-host Asterisk deployment
+- Environments requiring explicit port isolation
+- Multi-tenant hosts
+- Strict firewall policy requirements
 
 **Security Considerations**:
-- ⚠️ Container shares host network stack
-- ⚠️ All host ports accessible to container
-- ⚠️ Requires strict firewall rules
-- ⚠️ Not recommended for multi-tenant environments
+- Ensure only the required ports are exposed
+- Restrict exposure to the Asterisk IP(s) only
 
 **If Using Host Mode**:
 ```bash
@@ -428,48 +416,44 @@ services:
 
 **Recommended Deployment Patterns**
 
-**Pattern 1: Same Host (Simple)**
+**Pattern 1: Same Host (Default)**
 ```
 ┌─────────────────────────────┐
 │  Single Server              │
 │  ┌────────┐   ┌──────────┐ │
 │  │Asterisk├───┤ai-engine │ │
-│  │        │   │(bridge)  │ │
+│  │        │   │ (host)   │ │
 │  └────────┘   └──────────┘ │
 │  Via: 127.0.0.1             │
 └─────────────────────────────┘
 ```
-- **Network**: Bridge (default)
-- **Binds**: 127.0.0.1 (default)
-- **Security**: Excellent
+- **Network**: Host (default)
+- **Ports**: No port mapping required
+- **Security**: Requires firewall discipline (see section 3.1)
 
-**Pattern 2: Separate Hosts (Secure)**
+**Pattern 2: Separate Hosts (Remote Asterisk)**
 ```
 ┌──────────────┐    Network    ┌──────────────┐
 │ Asterisk     │◄─────────────►│  AI Engine   │
 │ Server       │   Firewall    │  Server      │
-│              │               │  (bridge)    │
+│              │               │  (host)      │
 └──────────────┘               └──────────────┘
 ```
-- **Network**: Bridge
-- **Binds**: 0.0.0.0 (explicit)
-- **Ports**: Mapped (8090, 18080)
+- **Network**: Host
+- **Ports**: Open only what you need (8090/TCP, ExternalMedia UDP ports, health/admin UI as appropriate)
 - **Firewall**: Required
 
-**Pattern 3: High Performance (Advanced)**
+**Pattern 3: Hardened Port Isolation (Advanced)**
 ```
-┌─────────────────────────────┐
-│  High-Performance Server    │
-│  ┌────────┐   ┌──────────┐ │
-│  │Asterisk├───┤ai-engine │ │
-│  │        │   │ (host)   │ │
-│  └────────┘   └──────────┘ │
-│  Network: host mode         │
-└─────────────────────────────┘
+┌──────────────┐    Network    ┌──────────────┐
+│ Asterisk     │◄─────────────►│  AI Engine   │
+│ Server       │   Firewall    │  Server      │
+│              │               │ (bridge)     │
+└──────────────┘               └──────────────┘
 ```
-- **Network**: Host (opt-in)
-- **Binds**: 127.0.0.1 (critical!)
-- **Security**: Requires strict firewall
+- **Network**: Bridge (opt-in)
+- **Ports**: Explicitly mapped (tightest port control)
+- **Security**: Strongest isolation when configured correctly
 
 ---
 
@@ -573,7 +557,7 @@ If you run Prometheus/Grafana, back up their persistent storage per your monitor
 
 **Generated Audio Files** (optional):
 ```
-/mnt/asterisk_media/ai-generated/
+./asterisk_media/ai-generated/  # default host path (mounted as /mnt/asterisk_media/ai-generated in ai-engine)
 ```
 
 **Logs** (for compliance):
@@ -812,7 +796,7 @@ echo
 
 # Disk usage
 echo "Disk Usage:"
-df -h / /mnt/asterisk_media
+df -h . ./asterisk_media
 echo
 
 echo "=== End Health Check ==="
@@ -944,10 +928,10 @@ If handling Protected Health Information (PHI):
 **Audio Retention Policy**:
 ```bash
 # Delete audio files older than 30 days
-find /mnt/asterisk_media/ai-generated -type f -mtime +30 -delete
+find ./asterisk_media/ai-generated -type f -mtime +30 -delete
 
 # Schedule with cron (daily at 3 AM)
-0 3 * * * find /mnt/asterisk_media/ai-generated -type f -mtime +30 -delete
+0 3 * * * find ./asterisk_media/ai-generated -type f -mtime +30 -delete
 ```
 
 ---

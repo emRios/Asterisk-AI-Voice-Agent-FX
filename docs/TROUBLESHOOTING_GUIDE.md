@@ -13,6 +13,7 @@ Complete guide to diagnosing and fixing issues with Asterisk AI Voice Agent.
 - [Provider-Specific Issues](#provider-specific-issues)
 - [Performance Issues](#performance-issues)
 - [Network Issues](#network-issues)
+- [IPv6 (GA policy)](#ipv6-ga-policy)
 - [Getting Help](#getting-help)
 
 ---
@@ -109,6 +110,53 @@ This performs comprehensive system checks:
 - `1` - Warnings (non-critical issues)
 - `2` - Failures (critical issues)
 
+### Call History DB (if missing or empty)
+
+Call History is stored in a SQLite DB under `./data` on the host (mounted into `ai-engine` as `/app/data`).
+
+Quick checks:
+```bash
+ls -la ./data
+docker compose logs ai-engine | grep -i \"call history\" | tail -n 20
+```
+
+Common fixes:
+- Run `sudo ./preflight.sh --apply-fixes` (creates `./data`, fixes permissions, applies SELinux contexts where applicable).
+- Avoid non-local filesystems for `./data` (some NFS setups can break SQLite locking).
+
+### Admin UI Shows “AI Engine/Local AI Server Error” But Containers Are Running (Tier 3 / Best-effort)
+
+This is most common on Tier 3 hosts (Docker Desktop, Podman, unsupported distros) where:
+- the Admin UI can’t reach the Docker API socket, and/or
+- the Admin UI health probes are using URLs that aren’t reachable from inside the `admin_ui` container.
+
+Quick checks:
+```bash
+docker compose ps
+```
+
+If container control (start/stop/restart) fails from the UI:
+- Ensure the Docker socket is mounted and set in `.env` (varies by host):
+  - Docker Desktop: `DOCKER_SOCK=/var/run/docker.sock`
+  - Rootless Docker/Podman: often `DOCKER_SOCK=/run/user/<uid>/docker.sock`
+- Then recreate the Admin UI container so the mount updates:
+```bash
+docker compose up -d --force-recreate admin-ui
+```
+
+If containers are running but the UI shows “unreachable”:
+- Set explicit health probe URLs in `.env` (values must be reachable from `admin_ui`):
+```bash
+HEALTH_CHECK_AI_ENGINE_URL=http://ai_engine:15000/health
+HEALTH_CHECK_LOCAL_AI_URL=ws://local_ai_server:8765
+```
+
+Notes:
+- The **Local AI Server is optional** unless you plan to use local STT/TTS models.
+- If you run **bridge networking** and want Local AI Server reachable across containers, set:
+  - `LOCAL_WS_HOST=0.0.0.0`
+  - `LOCAL_WS_AUTH_TOKEN=...` (required; server refuses to start if exposed without auth)
+
 ### Step 2: Analyze Recent Call
 
 ```bash
@@ -176,13 +224,15 @@ audio_transport: audiosocket
 audiosocket:
   host: "0.0.0.0"
   port: 8090
-  format: "slin"
+  format: "ulaw"  # or "slin16"
 
 # For pipelines (hybrid, local_only)
 audio_transport: externalmedia
 external_media:
-  host: "0.0.0.0"
-  base_port: 18000
+  rtp_host: "0.0.0.0"
+  rtp_port: 18080
+  # Optional: allocate per-call RTP ports
+  # port_range: "18080:18099"
 ```
 
 #### Dialplan Not Passing to Stasis
@@ -1149,8 +1199,18 @@ curl https://api.deepgram.com/v1/listen \
 
 ### Docker Networking
 
-#### Bridge Mode (Default)
-**Port mappings required:**
+#### Host Network (Default in `docker-compose.yml`)
+
+Most deployments use host networking for telephony/low-latency behavior.
+
+**Verify:**
+```bash
+docker compose ps
+```
+
+#### Bridge Network (Advanced / Optional)
+
+If you run a custom bridge-network compose (not the default), port mappings are required:
 ```yaml
 ports:
   - "8090:8090"      # AudioSocket
@@ -1164,15 +1224,32 @@ docker ps | grep ai_engine
 # Should show port mappings
 ```
 
-#### Host Mode (Opt-In)
-**For high-performance deployments:**
+**Security:** Bridge mode still requires strict firewall rules and allowlisting as appropriate for your deployment.
+
+See: [docs/PRODUCTION_DEPLOYMENT.md](PRODUCTION_DEPLOYMENT.md)
+
+### IPv6 (GA policy)
+
+For GA stability, AAVA treats IPv6 as **best-effort**.
+
+If IPv6 is enabled but not fully functional in your environment, you may see intermittent DNS/connectivity issues (especially in host-network Docker setups).
+
+**Recommendation (host-level):** disable IPv6 on the host running AAVA.
+
+Temporary (until reboot):
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.host.yml up -d
+sudo sysctl -w net.ipv6.conf.all.disable_ipv6=1
+sudo sysctl -w net.ipv6.conf.default.disable_ipv6=1
 ```
 
-**Security:** MUST bind to 127.0.0.1 in config.
-
-See: [docs/PRODUCTION_DEPLOYMENT.md](PRODUCTION_DEPLOYMENT.md) section 3.1
+Persistent:
+```bash
+cat <<'EOF' | sudo tee /etc/sysctl.d/99-disable-ipv6.conf
+net.ipv6.conf.all.disable_ipv6=1
+net.ipv6.conf.default.disable_ipv6=1
+EOF
+sudo sysctl --system
+```
 
 ---
 

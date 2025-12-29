@@ -179,7 +179,7 @@ class OllamaLLMAdapter(LLMComponent):
         transcript: str,
         context: Dict[str, Any],
         options: Dict[str, Any],
-    ) -> Union[str, LLMResponse]:
+    ) -> LLMResponse:
         """Generate a response using Ollama's /api/chat endpoint."""
         
         # Get or create session state
@@ -262,7 +262,7 @@ class OllamaLLMAdapter(LLMComponent):
                         # Remove the user message we just added and retry
                         messages.pop()
                         return await self.generate(call_id, transcript, context, options)
-                    return "I'm having trouble connecting right now. Please try again."
+                    return LLMResponse(text="I'm having trouble connecting right now. Please try again.")
                 
                 data = await response.json()
                 message = data.get("message", {})
@@ -321,10 +321,10 @@ class OllamaLLMAdapter(LLMComponent):
                 
         except asyncio.TimeoutError:
             logger.warning("Ollama request timeout", call_id=call_id, timeout=merged["timeout_sec"])
-            return "I'm taking too long to respond. Please try again."
+            return LLMResponse(text="I'm taking too long to respond. Please try again.")
         except Exception as e:
             logger.error("Ollama request failed", call_id=call_id, error=str(e))
-            return "I encountered an error. Please try again."
+            return LLMResponse(text="I encountered an error. Please try again.")
 
     async def validate_connectivity(self, options: Dict[str, Any]) -> Dict[str, Any]:
         """Test connectivity to the Ollama instance and list available models."""

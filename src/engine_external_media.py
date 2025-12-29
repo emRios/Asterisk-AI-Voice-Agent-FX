@@ -20,7 +20,6 @@ from .providers.base import AIProviderInterface
 from .rtp_server import RTPServer
 from .providers.deepgram import DeepgramProvider
 from .providers.local import LocalProvider
-from src.utils.ari import build_ari_base_url
 
 logger = get_logger(__name__)
 
@@ -134,19 +133,13 @@ class ExternalMediaEngine:
                 await self.rtp_server.start()
                 logger.info("RTP server started")
             
-            base_url = build_ari_base_url(
-                ari_base_url=getattr(self.config.asterisk, "ari_base_url", None),
-                scheme=getattr(self.config.asterisk, "scheme", "http"),
-                host=self.config.asterisk.host,
-                port=self.config.asterisk.port,
-            )
-
             # Initialize ARI client
             self.ari_client = ARIClient(
                 username=self.config.asterisk.username,
                 password=self.config.asterisk.password,
-                base_url=base_url,
-                app_name=self.config.asterisk.app_name
+                base_url=f"{self.config.asterisk.scheme}://{self.config.asterisk.host}:{self.config.asterisk.port}/ari",
+                app_name=self.config.asterisk.app_name,
+                ssl_verify=self.config.asterisk.ssl_verify
             )
             
             # Set up event handlers

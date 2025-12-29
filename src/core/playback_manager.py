@@ -441,7 +441,22 @@ class PlaybackManager:
             # Check if playback is still active
             playback_ref = await self.session_store.get_playback(playback_id)
             if playback_ref:
-                # Playback still active, clear gating token as fallback
+                # PlaybackFinished may have been missed. Clean up gating and local playback tracking
+                # so we don't leak playbacks/gating for long-running calls.
+                popped_ref = None
+                try:
+                    popped_ref = await self.session_store.pop_playback(playback_id)
+                except Exception:
+                    popped_ref = None
+
+                # Best-effort: cleanup the audio file if we have it.
+                try:
+                    if popped_ref and getattr(popped_ref, "audio_file", None):
+                        await self._cleanup_audio_file(str(popped_ref.audio_file))
+                except Exception:
+                    logger.debug("Audio file cleanup failed during gating fallback", call_id=call_id, playback_id=playback_id, exc_info=True)
+
+                # Clear gating token as fallback (idempotent).
                 if self.conversation_coordinator:
                     success = await self.conversation_coordinator.on_tts_end(
                         call_id,
@@ -458,7 +473,8 @@ class PlaybackManager:
                               call_id=call_id,
                               playback_id=playback_id,
                               result="gating_cleared",
-                              success=success)
+                              success=success,
+                              playback_ref_removed=bool(popped_ref))
             else:
                 logger.info("[TIMER] Skipped: action=gating_fallback",
                             call_id=call_id,

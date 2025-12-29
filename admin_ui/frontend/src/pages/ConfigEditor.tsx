@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import Editor from '@monaco-editor/react';
 import axios from 'axios';
-import { Save, Download, AlertCircle, Settings, Server, Trash2 } from 'lucide-react';
+import { Save, Download, AlertCircle, Settings, Server, Trash2, RefreshCw, Loader2 } from 'lucide-react';
 import yaml from 'js-yaml';
 
 // Import Config Components
@@ -29,10 +29,13 @@ const ConfigEditor = () => {
     // UI State
     const [loading, setLoading] = useState(false);
     const [saving, setSaving] = useState(false);
+    const [applying, setApplying] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [warning, setWarning] = useState<string | null>(null);
     const [success, setSuccess] = useState<string | null>(null);
-    const [restartRequired, setRestartRequired] = useState(false);
+    const [pendingApply, setPendingApply] = useState(false);
+    const [applyMethod, setApplyMethod] = useState<'hot_reload' | 'restart'>('restart');
+    const [applyPlan, setApplyPlan] = useState<Array<{ service: string; method: string; endpoint: string }>>([]);
 
     // Provider Editing State
     const [editingProvider, setEditingProvider] = useState<string | null>(null);
@@ -111,10 +114,20 @@ const ConfigEditor = () => {
                 setWarning(`Saved with warnings: ${shown}${suffix}`);
                 setTimeout(() => setWarning(null), 15000);
             }
-            
-            // Check if restart is required
-            if (response.data?.restart_required) {
-                setRestartRequired(true);
+
+            const plan = Array.isArray(response.data?.apply_plan) ? response.data.apply_plan : [];
+            const recommended = response.data?.recommended_apply_method;
+            if (plan.length > 0) {
+                setApplyPlan(plan);
+                setApplyMethod(recommended === 'hot_reload' ? 'hot_reload' : 'restart');
+                setPendingApply(true);
+            } else if (response.data?.restart_required) {
+                setApplyPlan([{ service: 'ai-engine', method: 'restart', endpoint: '/api/system/containers/ai_engine/restart' }]);
+                setApplyMethod('restart');
+                setPendingApply(true);
+            } else {
+                setApplyPlan([]);
+                setPendingApply(false);
             }
         } catch (err: any) {
             console.error(err);
@@ -123,6 +136,71 @@ const ConfigEditor = () => {
             setTimeout(() => setError(null), 10000);
         } finally {
             setSaving(false);
+        }
+    };
+
+    const restartAiEngine = async (force: boolean) => {
+        const endpoint = '/api/system/containers/ai_engine/restart';
+        const response = await axios.post(`${endpoint}?force=${force}`);
+
+        if (response.data?.status === 'warning') {
+            const confirmForce = window.confirm(
+                `${response.data.message}\n\nDo you want to force restart anyway? This may disconnect active calls.`
+            );
+            if (confirmForce) {
+                return restartAiEngine(true);
+            }
+            setWarning(response.data.message);
+            setTimeout(() => setWarning(null), 15000);
+            return;
+        }
+
+        if (response.data?.status === 'degraded') {
+            setWarning(`AI Engine restarted but may not be fully healthy: ${response.data.output || 'Health check issue'}. Verify manually.`);
+            setTimeout(() => setWarning(null), 15000);
+            return;
+        }
+
+        setPendingApply(false);
+        setApplyPlan([]);
+        setSuccess('Changes applied: AI Engine restarted.');
+        setTimeout(() => setSuccess(null), 5000);
+    };
+
+    const handleApplyChanges = async () => {
+        if (!pendingApply || applyPlan.length === 0) return;
+        setApplying(true);
+        try {
+            setError(null);
+            const item = applyPlan[0];
+            const method = (item?.method || applyMethod) as string;
+
+            if (method === 'hot_reload') {
+                const endpoint = item?.endpoint || '/api/system/containers/ai_engine/reload';
+                const resp = await axios.post(endpoint);
+                if (resp.data?.restart_required || resp.data?.status === 'partial') {
+                    setWarning('Hot reload completed but some changes still require an AI Engine restart.');
+                    setTimeout(() => setWarning(null), 15000);
+                    setApplyPlan([{ service: 'ai-engine', method: 'restart', endpoint: '/api/system/containers/ai_engine/restart' }]);
+                    setApplyMethod('restart');
+                    setPendingApply(true);
+                    return;
+                }
+
+                setPendingApply(false);
+                setApplyPlan([]);
+                setSuccess('Changes applied: AI Engine hot reloaded.');
+                setTimeout(() => setSuccess(null), 5000);
+                return;
+            }
+
+            await restartAiEngine(false);
+        } catch (err: any) {
+            const msg = err.response?.data?.detail || err.message || 'Failed to apply changes';
+            setError(msg);
+            setTimeout(() => setError(null), 10000);
+        } finally {
+            setApplying(false);
         }
     };
 
@@ -362,10 +440,30 @@ const ConfigEditor = () => {
                 </div>
             )}
             
-            {restartRequired && (
-                <div className="p-4 bg-amber-500/10 text-amber-600 dark:text-amber-400 rounded-md border border-amber-500/20 flex justify-between items-center">
-                    <span><strong>Restart Required:</strong> Configuration saved. Restart the AI Engine to apply changes.</span>
-                    <button onClick={() => setRestartRequired(false)} className="hover:opacity-70">×</button>
+            {pendingApply && (
+                <div className={`${pendingApply ? 'bg-orange-500/15 border-orange-500/30' : 'bg-yellow-500/10 border-yellow-500/20'} border text-yellow-600 dark:text-yellow-500 p-4 rounded-md flex items-center justify-between`}>
+                    <div className="flex items-center">
+                        <AlertCircle className="w-5 h-5 mr-2" />
+                        {applyMethod === 'hot_reload'
+                            ? 'Changes saved. Apply Changes to hot reload AI Engine without a restart.'
+                            : 'Changes saved. Restart AI Engine to apply changes.'}
+                    </div>
+                    <button
+                        onClick={handleApplyChanges}
+                        disabled={applying || !pendingApply}
+                        className={`flex items-center text-xs px-3 py-1.5 rounded transition-colors ${
+                            pendingApply
+                                ? 'bg-orange-500 text-white hover:bg-orange-600 font-medium'
+                                : 'bg-yellow-500/20 hover:bg-yellow-500/30'
+                        } disabled:opacity-50`}
+                    >
+                        {applying ? (
+                            <Loader2 className="w-3 h-3 mr-1.5 animate-spin" />
+                        ) : (
+                            <RefreshCw className="w-3 h-3 mr-1.5" />
+                        )}
+                        {applying ? 'Applying...' : applyMethod === 'hot_reload' ? 'Apply Changes' : 'Restart AI Engine'}
+                    </button>
                 </div>
             )}
 

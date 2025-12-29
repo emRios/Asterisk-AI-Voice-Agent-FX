@@ -1,6 +1,6 @@
 # Milestone 18: Hybrid Pipelines Tool Implementation
 
-**Version**: v4.1.0  
+**Version**: v4.3.0  
 **Date**: November 19, 2025  
 **Status**: ✅ Complete and Production Validated  
 **Linear**: AAVA-85  

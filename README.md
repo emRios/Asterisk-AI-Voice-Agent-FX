@@ -2,17 +2,17 @@
 
 # Asterisk AI Voice Agent
 
-![Version](https://img.shields.io/badge/version-4.5.3-blue.svg)
+![Version](https://img.shields.io/badge/version-4.6.0-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 ![Python](https://img.shields.io/badge/python-3.10+-blue.svg)
 ![Docker](https://img.shields.io/badge/docker-compose-blue.svg)
 ![Asterisk](https://img.shields.io/badge/asterisk-18+-orange.svg)
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/hkjarral/Asterisk-AI-Voice-Agent)
-[![Discord](https://dcbadge.limes.pink/api/server/QhPSju6aCh)](https://discord.gg/QhPSju6aCh)
+[![Discord](https://dcbadge.limes.pink/api/server/GME7sy5b2w?style=plastic)](https://discord.gg/GME7sy5b2w)
 
 The most powerful, flexible open-source AI voice agent for Asterisk/FreePBX. Featuring a **modular pipeline architecture** that lets you mix and match STT, LLM, and TTS providers, plus **5 production-ready golden baselines** validated for enterprise deployment.
 
-[Quick Start](#-quick-start) • [Features](#-features) • [Demo](#-demo) • [Documentation](#-documentation) • [Community](#-community)
+[Quick Start](#-quick-start) • [Features](#-features) • [Demo](#-demo) • [Docs](docs/README.md) • [Community](#-community)
 
 </div>
 
@@ -21,7 +21,7 @@ The most powerful, flexible open-source AI voice agent for Asterisk/FreePBX. Fea
 ## 📖 Table of Contents
 
 - [🚀 Quick Start](#-quick-start)
-- [🎉 What's New](#-whats-new-in-v453)
+- [🎉 What's New](#-whats-new-in-v460)
 - [🌟 Why Asterisk AI Voice Agent?](#-why-asterisk-ai-voice-agent)
 - [✨ Features](#-features)
 - [🎥 Demo](#-demo)
@@ -124,7 +124,7 @@ docker compose up -d
 Add this to your FreePBX (`extensions_custom.conf`):
 ```asterisk
 [from-ai-agent]
-exten => s,1,NoOp(Asterisk AI Voice Agent v4.5.3)
+exten => s,1,NoOp(Asterisk AI Voice Agent v4.6.0)
  same => n,Stasis(asterisk-ai-voice-agent)
  same => n,Hangup()
 ```
@@ -142,10 +142,15 @@ docker compose logs -f ai-engine
 
 ---
 
-## 🎉 What's New in v4.5.3
+## 🎉 What's New in v4.6.0
 
 <details open>
 <summary><b>Latest Updates</b></summary>
+
+### 🔒 Remote Asterisk + Secure ARI Support
+- **HTTPS/WSS ARI**: Configure `ASTERISK_ARI_SCHEME=https` for secure WebSocket events
+- **Custom ARI port**: `ASTERISK_ARI_PORT` (no longer hardcoded)
+- **SSL verification toggle**: `ASTERISK_ARI_SSL_VERIFY=false` for self-signed or hostname mismatch environments
 
 ### 📊 Call History & Analytics
 - **Full Call Logging**: Every call saved with conversation history, timing, and outcome
@@ -172,6 +177,16 @@ docker compose logs -f ai-engine
 - **Remote Endpoint Pinning**: Lock RTP streams to prevent audio hijacking
 - **Allowlist Support**: Restrict allowed remote hosts for ExternalMedia
 - **Cross-Talk Prevention**: SSRC-based routing ensures call isolation
+
+### ✅ Config Management Determinism (Admin UI)
+- **Clear save vs apply**: apply plans and safer `.env` parsing/writing
+- **Env-driven runtime correctness**: compose avoids `${VAR:-default}` fallbacks that prevent UI env changes from taking effect
+
+### 🧰 Troubleshooting UX Improvements
+- **Call-centric logs/events**: improved filtering and “troubleshoot” flows for faster RCAs
+
+### 📞 Call Quality (Baseline)
+- **OpenAI Realtime audio tweak**: minor baseline adjustment for improved telephony alignment
 
 ### 🚀 Pipeline-First Default
 - **`local_hybrid` Default**: Privacy-focused pipeline is now the out-of-box default
@@ -396,7 +411,7 @@ agent demo                # Demo features
 
 ---
 
-## ⚙️ Configuration
+## ⚙ Configuration
 
 ### Two-File Configuration
 - **[`config/ai-agent.yaml`](config/ai-agent.yaml)** - Golden baseline configs.
@@ -416,7 +431,7 @@ Per-call debugging is handled via **Admin UI → Call History**.
 
 ---
 
-## 🏗️ Project Architecture
+## 🏗 Project Architecture
 
 Two-container architecture for performance and scalability:
 
@@ -472,9 +487,10 @@ The `preflight.sh` script handles initial setup:
 
 ---
 
-## 🗺️ Documentation
+## 🗺 Documentation
 
 ### Getting Started
+- **[Docs Index](docs/README.md)**
 - **[FreePBX Integration Guide](docs/FreePBX-Integration-Guide.md)**
 - **[Installation Guide](docs/INSTALLATION.md)**
 
@@ -505,7 +521,7 @@ Contributions are welcome! Please see our [Contributing Guide](CONTRIBUTING.md).
 
 ## 💬 Community
 
-- **[Discord Server](https://discord.gg/CAVACtaY)** - Support and discussions
+- **[Discord Server](https://discord.gg/GME7sy5b2w)** - Support and discussions
 - [GitHub Issues](https://github.com/hkjarral/Asterisk-AI-Voice-Agent/issues) - Bug reports
 - [GitHub Discussions](https://github.com/hkjarral/Asterisk-AI-Voice-Agent/discussions) - General chat
 

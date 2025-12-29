@@ -23,12 +23,27 @@ We do **not** target macOS/Windows as production hosts for Asterisk. Those are d
 | Debian 11/12 | Tier 2 | ⏳ Pending | Community verification requested |
 | Rocky/Alma 9 | Tier 2 | ⏳ Pending | Community verification requested |
 | Fedora (latest) | Tier 3 | ⚠ Best-effort | Rootless Docker common; we warn rather than “guarantee” |
+| openSUSE (Leap/Tumbleweed) | Tier 3 | ⚠ Best-effort | Docker/Podman + socket paths vary; Admin UI Docker management may require manual `.env` tuning |
+| Podman (`docker` shim / rootless) | Tier 3 | ⚠ Best-effort | Supported for “run containers” best-effort; Docker-management features may not work reliably |
 
 ## Baseline Requirements (All Tiers)
 
 - Docker + Docker Compose v2
-- x86_64 host
+- x86_64 Linux host (Tier 1/2). Docker Desktop/macOS/Windows and ARM hosts are Tier 3 best-effort for testing only.
 - Asterisk ARI reachable and credentials configured in `.env`
+
+## Tier 3 (Best-effort) Expectations
+
+Tier 3 environments are welcome, but we optimize for failures that are **explainable** and **diagnosable** (not “it works everywhere”).
+
+- **Docker management from Admin UI requires a working Docker API socket** inside `admin-ui`.
+  - Default is `/var/run/docker.sock`.
+  - Rootless commonly uses `$XDG_RUNTIME_DIR/docker.sock` (often `/run/user/<uid>/docker.sock`).
+  - Persist this by setting `DOCKER_SOCK=...` in `.env` and recreating `admin-ui`.
+- **Health checks are performed from inside the `admin-ui` container**.
+  - On Tier 3 hosts, you may need to set `HEALTH_CHECK_AI_ENGINE_URL` and `HEALTH_CHECK_LOCAL_AI_URL` in `.env` so probes use reachable addresses.
+- **Podman is best-effort**. If Admin UI Docker operations fail under Podman, use Docker Engine for a supported path.
+- **Unsupported distros**: `./preflight.sh` will warn and provide manual installation guidance. Provide artifacts (below) so we can improve detection and docs.
 
 ## Evidence Required for Tier 2 (Community-verified)
 

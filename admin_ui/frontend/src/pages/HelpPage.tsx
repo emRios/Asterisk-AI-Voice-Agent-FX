@@ -1,5 +1,4 @@
-import React from 'react';
-import { Book, ExternalLink, Keyboard, HelpCircle } from 'lucide-react';
+import { Book, ExternalLink, HelpCircle } from 'lucide-react';
 import { ConfigSection } from '../components/ui/ConfigSection';
 import { ConfigCard } from '../components/ui/ConfigCard';
 
@@ -161,31 +160,6 @@ const HelpPage = () => {
                 </ConfigCard>
             </ConfigSection>
 
-            <ConfigSection title="Keyboard Shortcuts" description="Speed up your workflow">
-                <ConfigCard>
-                    <div className="space-y-2">
-                        <div className="flex items-center justify-between">
-                            <span className="text-sm">Navigate to Dashboard</span>
-                            <kbd className="px-2 py-1 text-xs bg-muted border border-border rounded">Ctrl/Cmd + D</kbd>
-                        </div>
-                        <div className="flex items-center justify-between">
-                            <span className="text-sm">Navigate to Providers</span>
-                            <kbd className="px-2 py-1 text-xs bg-muted border border-border rounded">Ctrl/Cmd + P</kbd>
-                        </div>
-                        <div className="flex items-center justify-between">
-                            <span className="text-sm">Navigate to Config Editor</span>
-                            <kbd className="px-2 py-1 text-xs bg-muted border border-border rounded">Ctrl/Cmd + E</kbd>
-                        </div>
-                        <div className="flex items-center justify-between">
-                            <span className="text-sm">Open Help</span>
-                            <kbd className="px-2 py-1 text-xs bg-muted border border-border rounded">Ctrl/Cmd + ?</kbd>
-                        </div>
-                        <p className="text-xs text-muted-foreground mt-4 italic">
-                            Note: Keyboard shortcuts are planned for a future release.
-                        </p>
-                    </div>
-                </ConfigCard>
-            </ConfigSection>
         </div>
     );
 };

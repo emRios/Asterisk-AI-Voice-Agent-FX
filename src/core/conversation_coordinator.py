@@ -110,11 +110,13 @@ class ConversationCoordinator:
         )
         success = await self._session_store.clear_gating_token(call_id, playback_id)
         if success:
-            self._set_tts_gated(call_id, False)
             session = await self._session_store.get_by_call_id(call_id)
+            tts_gated = False
             capture_enabled = True
             if session:
-                capture_enabled = session.audio_capture_enabled
+                tts_gated = bool(getattr(session, "tts_playing", False))
+                capture_enabled = bool(getattr(session, "audio_capture_enabled", True))
+            self._set_tts_gated(call_id, tts_gated)
             self._set_capture_enabled(call_id, bool(capture_enabled))
             self._barge_in_seen[call_id] = False
         return success

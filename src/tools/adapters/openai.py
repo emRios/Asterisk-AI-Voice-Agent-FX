@@ -232,12 +232,32 @@ class OpenAIToolAdapter:
             logger.info(f"✅ Sent function output to OpenAI: {safe_result.get('status')}", 
                        call_id=call_id)
             
-            # Step 2: Trigger response generation
+            # Step 2: Trigger response generation with audio modality AND instructions
+            # CRITICAL: Must include explicit instructions to speak, otherwise OpenAI may respond
+            # with text-only. This EXACTLY matches how greeting works which always produces audio.
+            # Extract any message from the tool result to use as speech instruction
+            tool_message = safe_result.get('message', '')
+            ai_should_speak = safe_result.get('ai_should_speak', True)
+            
+            # Use EXACT same format as greeting which reliably produces audio
+            response_config = {
+                "modalities": ["text", "audio"],
+                "input": [],  # Empty input to avoid context confusion (matches greeting)
+            }
+            
+            # If tool has a message and AI should speak, add direct instruction to speak it
+            if tool_message and ai_should_speak:
+                # Use direct instruction format like greeting: "Please say: {text}"
+                response_config["instructions"] = f"Please say the following to the user: {tool_message}"
+                logger.info(f"✅ Added speech instructions for tool response", 
+                           message_preview=tool_message[:50] if tool_message else "")
+            
             response_event = {
-                "type": "response.create"
+                "type": "response.create",
+                "response": response_config
             }
             await websocket.send(json.dumps(response_event))
-            logger.info(f"✅ Triggered OpenAI response generation", call_id=call_id)
+            logger.info(f"✅ Triggered OpenAI response generation (audio+text)")
             
         except Exception as e:
             logger.error(f"Failed to send tool result to OpenAI: {e}", exc_info=True)

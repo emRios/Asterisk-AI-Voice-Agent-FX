@@ -1,6 +1,6 @@
 # Admin UI Setup Guide
 
-**Version**: 1.0.0 (Introduced in Release 4.4.1; applies to v4.5.3+)  
+**Version**: 1.0.0 (Introduced in Release 4.4.1; applies to v4.6.0+)  
 **Release Date**: November 30, 2025  
 **Quick Start**: 5 minutes to get running
 
@@ -774,7 +774,7 @@ Coming in future releases:
 ## 📝 Version Information
 
 - **Admin UI Version**: 1.0.0
-- **Project Version**: 4.5.3+
+- **Project Version**: 4.6.0+
 - **Release Date**: November 30, 2025
 - **Release Branch**: `develop`
 - **Guide Version**: 1.0

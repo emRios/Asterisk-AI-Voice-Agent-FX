@@ -99,6 +99,12 @@ class TestSessionStore:
         assert session.tts_active_count == 1
         assert session.audio_capture_enabled == False
         assert "playback_1" in session.tts_tokens
+
+        # Duplicate add should be idempotent
+        success = await session_store.set_gating_token("test_call_123", "playback_1")
+        assert success
+        session = await session_store.get_by_call_id("test_call_123")
+        assert session.tts_active_count == 1
         
         # Add second token
         success = await session_store.set_gating_token("test_call_123", "playback_2")
@@ -129,6 +135,13 @@ class TestSessionStore:
         assert "playback_2" not in session.tts_tokens
         assert not session.tts_playing  # No longer playing (active_count == 0)
         assert session.audio_capture_enabled  # Re-enabled (active_count == 0)
+
+        # Duplicate clear should be idempotent
+        success = await session_store.clear_gating_token("test_call_123", "playback_2")
+        assert success
+        session = await session_store.get_by_call_id("test_call_123")
+        assert session.tts_active_count == 0
+        assert session.audio_capture_enabled
     
     @pytest.mark.asyncio
     async def test_playback_references(self, session_store):

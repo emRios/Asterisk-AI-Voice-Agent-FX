@@ -5,6 +5,7 @@ on:
   push:
     tags:
       - "v*.*.*"
+      - "[0-9]*.[0-9]*.[0-9]*"
 
 permissions:
   contents: read
@@ -31,8 +32,45 @@ jobs:
         id: meta
         run: |
           TAG="${GITHUB_REF_NAME}"
+          OWNER="${GITHUB_REPOSITORY_OWNER,,}"
+          VERSION="${TAG#v}"
+
+          # Only publish :latest for clean GA semver tags (no "-rc", "-beta", etc.).
+          PUBLISH_LATEST=false
+          if [[ "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            PUBLISH_LATEST=true
+          fi
+
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
-          echo "owner=${GITHUB_REPOSITORY_OWNER}" >> "$GITHUB_OUTPUT"
+          echo "owner=${OWNER}" >> "$GITHUB_OUTPUT"
+          echo "publish_latest=${PUBLISH_LATEST}" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "ai_engine_tags<<EOF"
+            echo "ghcr.io/${OWNER}/asterisk-ai-voice-agent-ai-engine:${TAG}"
+            if [ "$PUBLISH_LATEST" = "true" ]; then
+              echo "ghcr.io/${OWNER}/asterisk-ai-voice-agent-ai-engine:latest"
+            fi
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "local_ai_server_tags<<EOF"
+            echo "ghcr.io/${OWNER}/asterisk-ai-voice-agent-local-ai-server:${TAG}"
+            if [ "$PUBLISH_LATEST" = "true" ]; then
+              echo "ghcr.io/${OWNER}/asterisk-ai-voice-agent-local-ai-server:latest"
+            fi
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "admin_ui_tags<<EOF"
+            echo "ghcr.io/${OWNER}/asterisk-ai-voice-agent-admin-ui:${TAG}"
+            if [ "$PUBLISH_LATEST" = "true" ]; then
+              echo "ghcr.io/${OWNER}/asterisk-ai-voice-agent-admin-ui:latest"
+            fi
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Build and push ai-engine
         uses: docker/build-push-action@v6
@@ -40,9 +78,7 @@ jobs:
           context: .
           file: Dockerfile
           push: true
-          tags: |
-            ghcr.io/${{ steps.meta.outputs.owner }}/asterisk-ai-voice-agent-ai-engine:${{ steps.meta.outputs.tag }}
-            ghcr.io/${{ steps.meta.outputs.owner }}/asterisk-ai-voice-agent-ai-engine:latest
+          tags: ${{ steps.meta.outputs.ai_engine_tags }}
 
       # Publish a “core” local-ai-server profile (no optional heavy backends).
       # Models are NOT bundled; users mount/download models separately.
@@ -59,9 +95,7 @@ jobs:
             INCLUDE_KOKORO=false
             INCLUDE_LLAMA=true
             INCLUDE_KROKO_EMBEDDED=false
-          tags: |
-            ghcr.io/${{ steps.meta.outputs.owner }}/asterisk-ai-voice-agent-local-ai-server:${{ steps.meta.outputs.tag }}
-            ghcr.io/${{ steps.meta.outputs.owner }}/asterisk-ai-voice-agent-local-ai-server:latest
+          tags: ${{ steps.meta.outputs.local_ai_server_tags }}
 
       - name: Build and push admin-ui
         uses: docker/build-push-action@v6
@@ -69,6 +103,4 @@ jobs:
           context: ./admin_ui
           file: ./admin_ui/Dockerfile
           push: true
-          tags: |
-            ghcr.io/${{ steps.meta.outputs.owner }}/asterisk-ai-voice-agent-admin-ui:${{ steps.meta.outputs.tag }}
-            ghcr.io/${{ steps.meta.outputs.owner }}/asterisk-ai-voice-agent-admin-ui:latest
+          tags: ${{ steps.meta.outputs.admin_ui_tags }}

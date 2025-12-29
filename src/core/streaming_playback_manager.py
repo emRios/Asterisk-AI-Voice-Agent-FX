@@ -3142,10 +3142,11 @@ class StreamingPlaybackManager:
                     await self.conversation_coordinator.on_tts_end(call_id, stream_id, reason="segment-end")
                 except Exception:
                     pass
-            try:
-                await self.session_store.clear_gating_token(call_id, stream_id)
-            except Exception:
-                pass
+            else:
+                try:
+                    await self.session_store.clear_gating_token(call_id, stream_id)
+                except Exception:
+                    pass
             logger.debug("Ended segment gating", call_id=call_id, stream_id=stream_id)
         except Exception:
             logger.debug("end_segment_gating failed", call_id=call_id, exc_info=True)

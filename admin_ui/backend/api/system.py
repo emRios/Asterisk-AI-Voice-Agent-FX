@@ -12,6 +12,52 @@ from services.fs import upsert_env_vars
 logger = logging.getLogger(__name__)
 
 
+def _dotenv_value(key: str) -> Optional[str]:
+    """
+    Read a key from the project's `.env` file (not the current process environment).
+
+    This is used for diagnostics and Tier-3 friendliness where users edit `.env` directly.
+    Note: Many settings are loaded into the container environment at *container creation time*,
+    so relying on os.environ alone can appear "stale" after editing `.env` without recreating.
+    """
+    try:
+        from settings import ENV_PATH
+        if not os.path.exists(ENV_PATH):
+            return None
+        from dotenv import dotenv_values
+        raw = dotenv_values(ENV_PATH)
+        val = raw.get(key)
+        if val is None:
+            return None
+        return str(val).strip()
+    except Exception:
+        return None
+
+
+def _sanitize_for_log(value: str) -> str:
+    """Best-effort: prevent log injection via control characters."""
+    try:
+        return (value or "").replace("\r", "\\r").replace("\n", "\\n").replace("\t", "\\t")
+    except Exception:
+        return "<unprintable>"
+
+
+def _is_safe_container_identifier(value: str) -> bool:
+    """
+    Accept only Docker-like container identifiers (defense-in-depth).
+    This avoids passing arbitrary user input into logs or subprocess calls.
+    """
+    import re
+
+    if not value:
+        return False
+    # Disallow leading '-' to avoid option-like values when used as CLI args.
+    if value.startswith("-"):
+        return False
+    # Docker container names are typically [a-zA-Z0-9][a-zA-Z0-9_.-]*
+    return re.match(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$", value) is not None
+
+
 def get_docker_compose_cmd() -> List[str]:
     """
     Find docker-compose binary dynamically.
@@ -147,6 +193,11 @@ async def start_container(container_id: str):
         "admin_ui": "admin-ui",
         "local_ai_server": "local-ai-server"
     }
+    container_name_map = {
+        "ai-engine": "ai_engine",
+        "admin-ui": "admin_ui",
+        "local-ai-server": "local_ai_server",
+    }
     
     service_name = service_map.get(container_id)
     
@@ -156,13 +207,21 @@ async def start_container(container_id: str):
             client = docker.from_env()
             container = client.containers.get(container_id)
             name = container.name.lstrip('/')
-            service_name = service_map.get(name, name)
+            service_name = service_map.get(name)
         except:
-            service_name = container_id
+            service_name = None
+
+    # If the caller used compose service names (ai-engine/admin-ui/local-ai-server)
+    if not service_name and container_id in container_name_map:
+        service_name = container_id
+
+    # Only allow starting AAVA services from Admin UI.
+    if service_name not in container_name_map:
+        raise HTTPException(status_code=400, detail="Only AAVA services can be started from Admin UI")
     
     project_root = os.getenv("PROJECT_ROOT", "/app/project")
     
-    logger.info(f"Starting {service_name} from {project_root}")
+    logger.info("Starting %s from %s", _sanitize_for_log(service_name), _sanitize_for_log(project_root))
     
     try:
         # Use docker compose with --build to ensure image exists
@@ -177,7 +236,12 @@ async def start_container(container_id: str):
             timeout=300  # 5 min timeout for potential build
         )
         
-        logger.debug(f"start returncode={result.returncode}, stdout={result.stdout}, stderr={result.stderr}")
+        logger.debug(
+            "start returncode=%s stdout=%s stderr=%s",
+            result.returncode,
+            (result.stdout or "")[:2000],
+            (result.stderr or "")[:2000],
+        )
         
         if result.returncode == 0:
             return {"status": "success", "output": result.stdout or "Container started"}
@@ -189,23 +253,53 @@ async def start_container(container_id: str):
     except subprocess.TimeoutExpired:
         raise HTTPException(status_code=500, detail="Timeout waiting for container start")
     except FileNotFoundError:
-        # Fallback to Docker API if docker-compose not available
-        try:
-            client = docker.from_env()
-            container = client.containers.get(container_id)
-            container.start()
-            return {"status": "success", "method": "docker-api"}
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="docker-compose not found")
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("Error starting service %s", _sanitize_for_log(str(service_name)), exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to start service")
+
+
+async def _check_active_calls() -> dict:
+    """
+    Check if AI Engine has active calls in progress.
+    
+    Returns:
+        Dict with active_calls count and warning message if any.
+    """
+    import httpx
+    
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            # Try multiple possible endpoints
+            for url in [
+                "http://127.0.0.1:15000/sessions/stats",
+                "http://ai-engine:15000/sessions/stats",
+            ]:
+                try:
+                    resp = await client.get(url)
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        active = data.get("active_calls", data.get("active_sessions", 0))
+                        return {"active_calls": active, "reachable": True}
+                except httpx.ConnectError:
+                    continue
+    except Exception as e:
+        logger.debug("Could not check active calls", exc_info=True)
+    
+    return {"active_calls": 0, "reachable": False}
 
 
 @router.post("/containers/{container_id}/restart")
-async def restart_container(container_id: str):
+async def restart_container(container_id: str, force: bool = False):
     """
     Restart a container using Docker SDK (preferred) or docker-compose.
-    A5: Uses container.restart() for cleaner, faster restarts.
+    
+    Args:
+        container_id: Container name or service name
+        force: If False and active calls exist, returns warning instead of restarting
+    
+    Returns:
+        Success response with health_status, or warning if active calls and not forced.
     """
     # Map container names to docker-compose service names
     service_map = {
@@ -222,21 +316,64 @@ async def restart_container(container_id: str):
     }
     
     # Resolve container name
+    is_known = False
     container_name = container_id
     if container_id in service_map:
         # Input is already a container name like "ai_engine"
         container_name = container_id
+        is_known = True
     elif container_id in container_name_map:
         # Input is a service name like "ai-engine"
         container_name = container_name_map[container_id]
+        is_known = True
+
+    if not _is_safe_container_identifier(container_name):
+        raise HTTPException(status_code=400, detail=f"Invalid container id: {container_id!r}")
     
-    logger.info(f"Restarting container: {container_name}")
+    safe_container_name = _sanitize_for_log(container_name)
+    logger.info("Restarting container: %s", safe_container_name)
+
+    # Check for active calls before restarting AI Engine (unless forced)
+    if container_name == "ai_engine" and not force:
+        call_status = await _check_active_calls()
+        if call_status["active_calls"] > 0:
+            return {
+                "status": "warning",
+                "message": f"Cannot restart: {call_status['active_calls']} active call(s) in progress",
+                "active_calls": call_status["active_calls"],
+                "action_required": "Set force=true to restart anyway, or wait for calls to complete",
+            }
 
     # NOTE: docker restart does NOT reload env_file changes.
     # For ai_engine/local_ai_server, prefer force-recreate so updated .env keys apply.
     if container_name in ("ai_engine", "local_ai_server"):
         service_name = service_map.get(container_name, container_name)
         return await _recreate_via_compose(service_name)
+
+    # Special-case: Restarting admin-ui from inside admin-ui is inherently racy if we try to
+    # force-recreate it (the API process is the one being replaced). Use a scheduled Docker-SDK
+    # restart which is significantly more reliable from within the container itself.
+    if container_name == "admin_ui":
+        import asyncio
+
+        async def _restart_admin_ui_later():
+            try:
+                await asyncio.sleep(0.75)
+                client = docker.from_env()
+                client.containers.get("admin_ui").restart(timeout=10)
+            except Exception as e:
+                logger.error("Failed to restart admin_ui via Docker SDK: %s", e)
+
+        asyncio.create_task(_restart_admin_ui_later())
+        return {
+            "status": "success",
+            "method": "docker-sdk",
+            "output": "Admin UI restart scheduled (page will reload shortly)",
+            "note": (
+                "If you need admin-ui env_file changes to apply, run on the host: "
+                "`docker compose up -d --force-recreate admin-ui`."
+            ),
+        }
     
     try:
         # A5: Use Docker SDK for cleaner restart (no stop/rm/up)
@@ -246,33 +383,40 @@ async def restart_container(container_id: str):
         # Restart with 10 second timeout for graceful stop
         container.restart(timeout=10)
         
-        logger.info(f"Container {container_name} restarted successfully via Docker SDK")
+        logger.info("Container %s restarted successfully via Docker SDK", safe_container_name)
         return {
             "status": "success", 
             "method": "docker-sdk",
-            "output": f"Container {container_name} restarted"
+            "output": f"Container {safe_container_name} restarted"
         }
         
     except docker.errors.NotFound:
-        # Container doesn't exist, try to start it via docker-compose
-        logger.warning(f"Container {container_name} not found, attempting docker-compose up")
-        return await _start_via_compose(container_id, service_map)
+        # Container doesn't exist. Only allow compose-based start for known AAVA services.
+        logger.warning("Container %s not found", safe_container_name)
+        if is_known:
+            logger.warning("Attempting docker-compose up for %s", safe_container_name)
+            return await _start_via_compose(container_id, service_map)
+        raise HTTPException(status_code=404, detail=f"Container not found: {container_id}")
         
     except docker.errors.APIError as e:
-        logger.error(f"Docker API error restarting {container_name}: {e}")
-        # Fallback to docker-compose for recreation
-        return await _start_via_compose(container_id, service_map)
+        logger.error("Docker API error restarting %s: %s", safe_container_name, _sanitize_for_log(str(e)))
+        # Fallback to docker-compose only for known AAVA services.
+        if is_known:
+            return await _start_via_compose(container_id, service_map)
+        raise HTTPException(status_code=500, detail="Docker API error restarting container")
         
     except Exception as e:
-        logger.error(f"Error restarting container {container_name}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("Error restarting container %s", safe_container_name, exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to restart container")
 
 
 async def _start_via_compose(container_id: str, service_map: dict):
     """Helper to start a container via docker-compose."""
     import subprocess
     
-    service_name = service_map.get(container_id, container_id)
+    service_name = service_map.get(container_id)
+    if not service_name:
+        raise HTTPException(status_code=400, detail="Unsupported service for compose start")
     project_root = os.getenv("PROJECT_ROOT", "/app/project")
     
     try:
@@ -300,19 +444,44 @@ async def _start_via_compose(container_id: str, service_map: dict):
         raise HTTPException(status_code=500, detail="Timeout waiting for container start")
 
 
-async def _recreate_via_compose(service_name: str):
-    """Force-recreate a compose service so env_file changes (.env) are applied."""
+async def _recreate_via_compose(service_name: str, health_check: bool = True):
+    """
+    Force-recreate a compose service so env_file changes (.env) are applied.
+    
+    Args:
+        service_name: Docker Compose service name (e.g., "ai-engine")
+        health_check: If True, poll health endpoint after recreate (default: True)
+    
+    Returns:
+        Dict with status, method, and health_status fields
+    """
     import subprocess
+    import httpx
 
     project_root = os.getenv("PROJECT_ROOT", "/app/project")
     
-    # Map service names to container names for stopping
-    container_map = {
-        "ai-engine": "ai_engine",
-        "admin-ui": "admin_ui",
-        "local-ai-server": "local_ai_server"
+    # Map service names to container names and health URLs
+    # NOTE: Use /ready endpoint for ai-engine (returns 503 when degraded, 200 when ready)
+    # local-ai-server is WebSocket-only, no HTTP health endpoint
+    service_config = {
+        "ai-engine": {
+            "container": "ai_engine",
+            "health_url": "http://127.0.0.1:15000/ready",  # /ready returns proper status codes
+            "health_timeout": 30,
+        },
+        "admin-ui": {
+            "container": "admin_ui",
+            "health_url": None,  # No health check for admin-ui
+            "health_timeout": 10,
+        },
+        "local-ai-server": {
+            "container": "local_ai_server",
+            "health_url": None,  # WebSocket server - no HTTP health endpoint
+            "health_timeout": 60,
+        }
     }
-    container_name = container_map.get(service_name, service_name)
+    config = service_config.get(service_name, {"container": service_name, "health_url": None, "health_timeout": 30})
+    container_name = config["container"]
 
     try:
         # First stop and remove the existing container to avoid name conflicts
@@ -347,25 +516,108 @@ async def _recreate_via_compose(service_name: str):
             timeout=300,
         )
 
-        if result.returncode == 0:
-            return {"status": "success", "method": "docker-compose", "output": result.stdout or "Service recreated"}
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to recreate via compose: {result.stderr or result.stdout}",
-        )
+        if result.returncode != 0:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to recreate via compose: {result.stderr or result.stdout}",
+            )
+        
+        # Health check polling after successful recreate
+        health_status = "skipped"
+        if health_check and config["health_url"]:
+            health_status = await _poll_health(
+                config["health_url"], 
+                timeout_seconds=config["health_timeout"],
+                service_name=service_name
+            )
+        
+        # Return appropriate status based on health check result
+        # Don't claim success if health check timed out or failed
+        if health_status == "timeout":
+            return {
+                "status": "degraded",
+                "method": "docker-compose",
+                "output": result.stdout or "Service recreated but health check timed out",
+                "health_status": health_status,
+            }
+        elif health_status == "unhealthy":
+            return {
+                "status": "degraded",
+                "method": "docker-compose",
+                "output": result.stdout or "Service recreated but not healthy",
+                "health_status": health_status,
+            }
+        
+        return {
+            "status": "success", 
+            "method": "docker-compose", 
+            "output": result.stdout or "Service recreated",
+            "health_status": health_status,
+        }
     except FileNotFoundError:
         raise HTTPException(status_code=500, detail="docker-compose not found")
     except subprocess.TimeoutExpired:
         raise HTTPException(status_code=500, detail="Timeout waiting for container recreate")
 
 
+async def _poll_health(url: str, timeout_seconds: int = 30, service_name: str = "service") -> str:
+    """
+    Poll a health endpoint until it returns success or timeout.
+    
+    Returns: "healthy", "unhealthy", or "timeout"
+    """
+    import httpx
+    import asyncio
+    
+    start_time = asyncio.get_event_loop().time()
+    poll_interval = 2  # seconds between polls
+    last_status_code = None
+    
+    logger.info(f"Polling health for {service_name} at {url} (timeout: {timeout_seconds}s)")
+    
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        while True:
+            elapsed = asyncio.get_event_loop().time() - start_time
+            if elapsed >= timeout_seconds:
+                # If we got responses but they were non-200, return unhealthy
+                # If we never connected, return timeout
+                if last_status_code is not None and last_status_code != 200:
+                    logger.warning(f"Health check unhealthy for {service_name}: last status {last_status_code}")
+                    return "unhealthy"
+                logger.warning(f"Health check timeout for {service_name} after {timeout_seconds}s")
+                return "timeout"
+            
+            try:
+                resp = await client.get(url)
+                last_status_code = resp.status_code
+                if resp.status_code == 200:
+                    logger.info(f"Health check passed for {service_name} after {elapsed:.1f}s")
+                    return "healthy"
+                else:
+                    logger.debug(f"Health check returned {resp.status_code}, retrying...")
+            except httpx.ConnectError:
+                logger.debug(f"Health check connection failed, retrying...")
+            except Exception as e:
+                logger.debug(f"Health check error: {e}, retrying...")
+            
+            await asyncio.sleep(poll_interval)
+
+
 @router.post("/containers/ai_engine/reload")
 async def reload_ai_engine():
     """
     Hot-reload AI Engine configuration without restarting the container.
-    This reloads ai-agent.yaml and .env changes.
+    This reloads ai-agent.yaml changes ONLY. 
     
-    Returns restart_required=True if new providers need to be added (hot-reload can't add new providers).
+    NOTE: .env changes are NOT applied by hot-reload because the AI Engine reads
+    credentials from os.environ at startup (via security.py inject_* functions).
+    For .env changes, use /containers/ai_engine/restart which force-recreates the container.
+    
+    Returns restart_required=True if:
+    - New providers need to be added (hot-reload can't add new providers)
+    - AI Engine's /reload endpoint signals "reload deferred" or "restart needed"
+    
+    This endpoint does NOT detect .env changes - callers must track that separately.
     """
     try:
         import httpx
@@ -755,6 +1007,16 @@ async def get_system_health():
     """
     Aggregate health status from Local AI Server and AI Engine.
     """
+    def _dedupe_preserve_order(items: List[str]) -> List[str]:
+        seen = set()
+        out: List[str] = []
+        for item in items:
+            if not item or item in seen:
+                continue
+            seen.add(item)
+            out.append(item)
+        return out
+
     async def check_local_ai():
         try:
             import websockets
@@ -762,85 +1024,154 @@ async def get_system_health():
             import asyncio
             from settings import get_setting
             
-            # With host networking, use localhost instead of container name
-            uri = os.getenv("HEALTH_CHECK_LOCAL_AI_URL", "ws://127.0.0.1:8765")
-            logger.debug("Checking Local AI at %s", uri)
-            async with websockets.connect(uri, open_timeout=5) as websocket:
-                logger.debug("Local AI connected, sending status...")
-                auth_token = (get_setting("LOCAL_WS_AUTH_TOKEN", os.getenv("LOCAL_WS_AUTH_TOKEN", "")) or "").strip()
-                if auth_token:
-                    await websocket.send(json.dumps({"type": "auth", "auth_token": auth_token}))
-                    raw = await asyncio.wait_for(websocket.recv(), timeout=5)
-                    auth_data = json.loads(raw)
-                    if auth_data.get("type") != "auth_response" or auth_data.get("status") != "ok":
-                        raise RuntimeError(f"Local AI auth failed: {auth_data}")
-                await websocket.send(json.dumps({"type": "status"}))
-                logger.debug("Local AI sent, waiting for response...")
-                response = await asyncio.wait_for(websocket.recv(), timeout=5)
-                logger.debug("Local AI response: %s...", response[:100])
-                data = json.loads(response)
-                if data.get("type") == "status_response":
-                    # Prefer explicit fields from local-ai-server (v2 protocol), fallback to heuristics.
-                    kroko = data.get("kroko") or {}
-                    kokoro = data.get("kokoro") or {}
+            env_uri = (_dotenv_value("HEALTH_CHECK_LOCAL_AI_URL") or "").strip()
+            if not env_uri:
+                env_uri = (os.getenv("HEALTH_CHECK_LOCAL_AI_URL") or "").strip()
+            candidates = _dedupe_preserve_order([
+                env_uri,
+                "ws://127.0.0.1:8765",
+                "ws://local_ai_server:8765",
+                "ws://local-ai-server:8765",
+                "ws://host.docker.internal:8765",
+            ])
 
-                    kroko_embedded = bool(kroko.get("embedded", False))
-                    kroko_port = kroko.get("port")
+            last_error: Optional[str] = None
+            for uri in candidates:
+                logger.debug("Checking Local AI at %s", uri)
+                try:
+                    async with websockets.connect(uri, open_timeout=2.5) as websocket:
+                        logger.debug("Local AI connected, sending status...")
+                        auth_token = (get_setting("LOCAL_WS_AUTH_TOKEN", os.getenv("LOCAL_WS_AUTH_TOKEN", "")) or "").strip()
+                        if auth_token:
+                            await websocket.send(json.dumps({"type": "auth", "auth_token": auth_token}))
+                            raw = await asyncio.wait_for(websocket.recv(), timeout=5)
+                            auth_data = json.loads(raw)
+                            if auth_data.get("type") != "auth_response" or auth_data.get("status") != "ok":
+                                raise RuntimeError(f"Local AI auth failed: {auth_data}")
+                        await websocket.send(json.dumps({"type": "status"}))
+                        logger.debug("Local AI sent, waiting for response...")
+                        response = await asyncio.wait_for(websocket.recv(), timeout=5)
+                        logger.debug("Local AI response: %s...", response[:100])
+                        data = json.loads(response)
+                        if data.get("type") == "status_response":
+                            # Prefer explicit fields from local-ai-server (v2 protocol), fallback to heuristics.
+                            kroko = data.get("kroko") or {}
+                            kokoro = data.get("kokoro") or {}
 
-                    kokoro_mode = (kokoro.get("mode") or "local").lower()
-                    kokoro_voice = kokoro.get("voice")
+                            kroko_embedded = bool(kroko.get("embedded", False))
+                            kroko_port = kroko.get("port")
 
-                    # Back-compat for older payloads that didn't include structured metadata
-                    if not kokoro_voice:
-                        tts_display = data.get("models", {}).get("tts", {}).get("display") or ""
-                        if "(" in tts_display and ")" in tts_display:
-                            kokoro_voice = tts_display.split("(")[1].rstrip(")")
+                            kokoro_mode = (kokoro.get("mode") or "local").lower()
+                            kokoro_voice = kokoro.get("voice")
 
-                    data["kroko_embedded"] = kroko_embedded
-                    data["kroko_port"] = kroko_port
-                    data["kokoro_mode"] = kokoro_mode
-                    data["kokoro_voice"] = kokoro_voice
-                    
-                    return {
-                        "status": "connected",
-                        "details": data
-                    }
-                else:
-                    return {
-                        "status": "error",
-                        "details": {"error": "Invalid response type"}
-                    }
+                            # Back-compat for older payloads that didn't include structured metadata
+                            if not kokoro_voice:
+                                tts_display = data.get("models", {}).get("tts", {}).get("display") or ""
+                                if "(" in tts_display and ")" in tts_display:
+                                    kokoro_voice = tts_display.split("(")[1].rstrip(")")
+
+                            data["kroko_embedded"] = kroko_embedded
+                            data["kroko_port"] = kroko_port
+                            data["kokoro_mode"] = kokoro_mode
+                            data["kokoro_voice"] = kokoro_voice
+                            
+                            warning = None
+                            if env_uri and uri != env_uri:
+                                warning = (
+                                    f"HEALTH_CHECK_LOCAL_AI_URL is set but unreachable ({env_uri}); "
+                                    f"connected via fallback ({uri})."
+                                )
+                            return {
+                                "status": "connected",
+                                "details": data,
+                                "probe": {
+                                    "selected": uri,
+                                    "attempted": candidates,
+                                }
+                                ,
+                                "warning": warning,
+                            }
+                        else:
+                            last_error = "Invalid response type"
+                except Exception as e:
+                    last_error = f"{type(e).__name__}: {str(e)}"
+                    continue
+
+            return {
+                "status": "error",
+                "details": {"error": last_error or "Unreachable"},
+                "probe": {
+                    "selected": None,
+                    "attempted": candidates,
+                    "error": last_error or "Unreachable",
+                }
+            }
         except Exception as e:
             logger.debug("Local AI Check Error: %s: %s", type(e).__name__, str(e))
             return {
                 "status": "error",
-                "details": {"error": f"{type(e).__name__}: {str(e)}"}
+                "details": {"error": f"{type(e).__name__}: {str(e)}"},
             }
 
     async def check_ai_engine():
         try:
             import httpx
-            # With host networking, use localhost instead of container name
-            url = os.getenv("HEALTH_CHECK_AI_ENGINE_URL", "http://127.0.0.1:15000/health")
-            logger.debug("Checking AI Engine at %s", url)
-            async with httpx.AsyncClient(timeout=5.0) as client:
-                resp = await client.get(url)
-                logger.debug("AI Engine response: %s", resp.status_code)
-                if resp.status_code == 200:
-                    return {
-                        "status": "connected",
-                        "details": resp.json()
-                    }
-                else:
-                    return {
-                        "status": "error",
-                        "details": {"status_code": resp.status_code}
-                    }
+            env_url = (_dotenv_value("HEALTH_CHECK_AI_ENGINE_URL") or "").strip()
+            if not env_url:
+                env_url = (os.getenv("HEALTH_CHECK_AI_ENGINE_URL") or "").strip()
+            candidates = _dedupe_preserve_order([
+                env_url,
+                "http://127.0.0.1:15000/health",
+                "http://ai_engine:15000/health",
+                "http://ai-engine:15000/health",
+                "http://host.docker.internal:15000/health",
+            ])
+
+            timeout = httpx.Timeout(5.0, connect=1.5)
+            last_error: Optional[str] = None
+
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                for url in candidates:
+                    logger.debug("Checking AI Engine at %s", url)
+                    try:
+                        resp = await client.get(url)
+                        logger.debug("AI Engine response: %s", resp.status_code)
+                        if resp.status_code == 200:
+                            warning = None
+                            if env_url and url != env_url:
+                                warning = (
+                                    f"HEALTH_CHECK_AI_ENGINE_URL is set but unreachable ({env_url}); "
+                                    f"connected via fallback ({url})."
+                                )
+                            return {
+                                "status": "connected",
+                                "details": resp.json(),
+                                "probe": {
+                                    "selected": url,
+                                    "attempted": candidates,
+                                }
+                                ,
+                                "warning": warning,
+                            }
+                        last_error = f"HTTP {resp.status_code}"
+                    except Exception as e:
+                        last_error = f"{type(e).__name__}: {str(e)}"
+                        continue
+
+            return {
+                "status": "error",
+                "details": {"error": last_error or "Unreachable"},
+                "probe": {
+                    "selected": None,
+                    "attempted": candidates,
+                    "error": last_error or "Unreachable",
+                }
+            }
         except Exception as e:
             logger.debug("AI Engine Check Error: %s: %s", type(e).__name__, str(e))
             return {
                 "status": "error",
-                "details": {"error": f"{type(e).__name__}: {str(e)}"}
+                "details": {"error": f"{type(e).__name__}: {str(e)}"},
             }
 
     import asyncio
@@ -1247,6 +1578,7 @@ def _detect_docker():
         "message": "Docker not detected",
         "socket_present": os.path.exists("/var/run/docker.sock"),
         "cli_present": shutil.which("docker") is not None,
+        "is_docker_desktop": False,
     }
     
     try:
@@ -1257,6 +1589,17 @@ def _detect_docker():
         docker_info["api_version"] = version_info.get("ApiVersion", "unknown")
         docker_info["status"] = "ok"
         docker_info["message"] = None
+
+        # Docker Desktop / Engine metadata (helps Tier-3 messaging)
+        try:
+            info = client.info()
+            operating_system = info.get("OperatingSystem") or ""
+            docker_info["operating_system"] = operating_system or None
+            docker_info["engine_arch"] = info.get("Architecture") or None
+            docker_info["os_type"] = info.get("OSType") or None
+            docker_info["is_docker_desktop"] = "Docker Desktop" in operating_system
+        except Exception:
+            pass
         
         # Check version
         try:
@@ -1558,13 +1901,22 @@ def _build_checks(os_info, docker_info, compose_info, selinux_info, dir_info, as
     
     # Architecture check
     if os_info["arch"] != "x86_64":
-        checks.append({
-            "id": "architecture",
-            "status": "error",
-            "message": f"Unsupported architecture: {os_info['arch']} (x86_64 required)",
-            "blocking": True,
-            "action": None
-        })
+        if docker_info.get("is_docker_desktop"):
+            checks.append({
+                "id": "architecture",
+                "status": "warning",
+                "message": f"Architecture: {os_info['arch']} (Tier 3 best-effort on Docker Desktop; production requires x86_64 Linux)",
+                "blocking": False,
+                "action": None
+            })
+        else:
+            checks.append({
+                "id": "architecture",
+                "status": "error",
+                "message": f"Unsupported architecture: {os_info['arch']} (x86_64 required)",
+                "blocking": True,
+                "action": None
+            })
     else:
         checks.append({
             "id": "architecture",
@@ -1572,6 +1924,20 @@ def _build_checks(os_info, docker_info, compose_info, selinux_info, dir_info, as
             "message": f"Architecture: {os_info['arch']}",
             "blocking": False,
             "action": None
+        })
+
+    # Tier 3 note (Docker Desktop): common source of confusion is "running but not reachable" due to networking differences.
+    if docker_info.get("is_docker_desktop"):
+        checks.append({
+            "id": "tier3_docker_desktop",
+            "status": "warning",
+            "message": "Docker Desktop detected (Tier 3 best-effort). If services are running but show as unreachable, set HEALTH_CHECK_* URLs and ensure DOCKER_SOCK is correct.",
+            "blocking": False,
+            "action": {
+                "type": "link",
+                "label": "Troubleshooting (Tier 3 / Docker Desktop)",
+                "value": _github_docs_url("docs/TROUBLESHOOTING_GUIDE.md"),
+            }
         })
     
     # OS EOL check
@@ -1955,6 +2321,7 @@ class AriTestRequest(BaseModel):
     username: str
     password: str
     scheme: str = "http"
+    ssl_verify: bool = True  # Set to False for self-signed certs
 
 
 @router.post("/test-ari")
@@ -1966,7 +2333,10 @@ async def test_ari_connection(request: AriTestRequest):
         # Build ARI URL
         ari_url = f"{request.scheme}://{request.host}:{request.port}/ari/asterisk/info"
         
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        # Configure SSL verification (disable for self-signed certs)
+        verify = request.ssl_verify if request.scheme == "https" else True
+        
+        async with httpx.AsyncClient(timeout=10.0, verify=verify) as client:
             response = await client.get(
                 ari_url,
                 auth=(request.username, request.password)
@@ -1996,7 +2366,15 @@ async def test_ari_connection(request: AriTestRequest):
                     "error": f"Unexpected response: HTTP {response.status_code}"
                 }
                 
-    except httpx.ConnectError:
+    except httpx.ConnectError as e:
+        logger.debug("ARI connection error", exc_info=True)
+        error_str = str(e).lower()
+        # Check for SSL-specific errors
+        if "ssl" in error_str or "certificate" in error_str:
+            return {
+                "success": False,
+                "error": "SSL certificate error - try disabling 'Verify SSL Certificate' for self-signed certs."
+            }
         return {
             "success": False,
             "error": f"Connection refused - is Asterisk running at {request.host}:{request.port}?"
@@ -2007,7 +2385,15 @@ async def test_ari_connection(request: AriTestRequest):
             "error": f"Connection timeout - check if {request.host}:{request.port} is reachable"
         }
     except Exception as e:
+        logger.debug("ARI connection failed", exc_info=True)
+        error_str = str(e).lower()
+        # Check for SSL-specific errors in generic exceptions
+        if "ssl" in error_str or "certificate" in error_str or "verify" in error_str:
+            return {
+                "success": False,
+                "error": "SSL certificate verification failed - uncheck 'Verify SSL Certificate' for self-signed certs or hostname mismatches."
+            }
         return {
             "success": False,
-            "error": f"Connection failed: {str(e)}"
+            "error": "Connection failed - check host/port/scheme and credentials."
         }

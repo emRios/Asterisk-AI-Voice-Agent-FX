@@ -56,38 +56,37 @@ def expand_string_tokens(value: str) -> str:
 def inject_asterisk_credentials(config_data: Dict[str, Any]) -> None:
     """
     Inject Asterisk credentials from environment variables ONLY.
-
+    
     SECURITY: Credentials must NEVER be in YAML files.
-    This function overwrites credential fields but preserves
-    non-sensitive transport configuration (port, scheme, ari_base_url).
-
+    This function overwrites any YAML values with environment variables.
+    
     Environment variables:
     - ASTERISK_HOST (default: 127.0.0.1)
-    - ASTERISK_PORT (optional)
-    - ASTERISK_SCHEME (optional: http | https)
-    - ARI_BASE_URL (optional)
+    - ASTERISK_ARI_PORT (default: 8088)
+    - ASTERISK_ARI_SCHEME (default: http, use https for WSS)
+    - ASTERISK_ARI_SSL_VERIFY (default: true, set to false to skip SSL cert verification)
     - ASTERISK_ARI_USERNAME or ARI_USERNAME (required)
     - ASTERISK_ARI_PASSWORD or ARI_PASSWORD (required)
+    
+    Args:
+        config_data: Configuration dictionary to modify in-place
+        
+    Complexity: 2
     """
-    asterisk_yaml = (
-        config_data.get("asterisk")
-        if isinstance(config_data.get("asterisk"), dict)
-        else {}
-    )
-
-    config_data["asterisk"] = {
-        # --- transport / location (non-secret) ---
-        "host": os.getenv("ASTERISK_HOST", asterisk_yaml.get("host", "127.0.0.1")),
-        "port": int(os.getenv("ASTERISK_PORT", asterisk_yaml.get("port", 8088))),
-        "scheme": os.getenv("ASTERISK_SCHEME", asterisk_yaml.get("scheme", "http")),
-        "ari_base_url": os.getenv("ARI_BASE_URL", asterisk_yaml.get("ari_base_url")),
-
-        # --- credentials (ENV ONLY) ---
+    asterisk_yaml = (config_data.get('asterisk') or {}) if isinstance(config_data.get('asterisk'), dict) else {}
+    
+    # Parse ssl_verify from env (accepts true/false/1/0)
+    ssl_verify_str = os.getenv("ASTERISK_ARI_SSL_VERIFY", "true").lower()
+    ssl_verify = ssl_verify_str not in ("false", "0", "no")
+    
+    config_data['asterisk'] = {
+        "host": os.getenv("ASTERISK_HOST", "127.0.0.1"),
+        "port": int(os.getenv("ASTERISK_ARI_PORT", "8088")),
+        "scheme": os.getenv("ASTERISK_ARI_SCHEME", "http"),
+        "ssl_verify": ssl_verify,
         "username": os.getenv("ASTERISK_ARI_USERNAME") or os.getenv("ARI_USERNAME"),
         "password": os.getenv("ASTERISK_ARI_PASSWORD") or os.getenv("ARI_PASSWORD"),
-
-        # --- app metadata ---
-        "app_name": asterisk_yaml.get("app_name", "asterisk-ai-voice-agent"),
+        "app_name": asterisk_yaml.get("app_name", "asterisk-ai-voice-agent")
     }
 
 

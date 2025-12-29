@@ -6,7 +6,6 @@ Focuses on robust connection and logging to debug startup issues.
 import asyncio
 import json
 import os
-import ssl
 import time
 import uuid
 import audioop
@@ -16,8 +15,9 @@ import aiohttp
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 import websockets
 import structlog
-from urllib.parse import quote, urlparse, urlunparse
+from urllib.parse import quote
 
+import ssl
 from websockets.exceptions import ConnectionClosed
 from websockets.asyncio.client import ClientConnection
 
@@ -29,37 +29,22 @@ logger = get_logger(__name__)
 class ARIClient:
     """A client for interacting with the Asterisk REST Interface (ARI)."""
 
-    def __init__(self, username: str, password: str, base_url: str, app_name: str):
+    def __init__(self, username: str, password: str, base_url: str, app_name: str, ssl_verify: bool = True):
         self.username = username
         self.password = password
         self.app_name = app_name
-
-        parsed = urlparse(base_url)
-        scheme = (parsed.scheme or "").lower()
-        if not scheme or not parsed.netloc:
-            raise ValueError(f"Invalid base_url (scheme/netloc required): {base_url!r}")
-        if scheme not in ("http", "https"):
-            raise ValueError(f"Invalid base_url scheme (http/https only): {base_url!r}")
-
-        ws_scheme = "wss" if scheme == "https" else "ws"
-
-        base_path = (parsed.path or "").rstrip("/")
-        if base_path.endswith("/ari"):
-            ari_path = base_path
+        self.http_url = base_url
+        self.ssl_verify = ssl_verify
+        # Determine WebSocket scheme based on HTTP scheme
+        if base_url.startswith("https://"):
+            ws_scheme = "wss"
+            ws_host = base_url.replace("https://", "").split('/')[0]
         else:
-            ari_path = f"{base_path}/ari" if base_path else "/ari"
-
-        self.http_url = urlunparse((scheme, parsed.netloc, ari_path, "", "", ""))
-
-        safe_username = quote(username, safe="")
-        safe_password = quote(password, safe="")
-        safe_app_name = quote(app_name, safe="")
-        self.ws_url = (
-            f"{ws_scheme}://{parsed.netloc}{ari_path}/events"
-            f"?api_key={safe_username}:{safe_password}"
-            f"&app={safe_app_name}&subscribeAll=true&subscribe=ChannelAudioFrame"
-        )
-
+            ws_scheme = "ws"
+            ws_host = base_url.replace("http://", "").split('/')[0]
+        safe_username = quote(username)
+        safe_password = quote(password)
+        self.ws_url = f"{ws_scheme}://{ws_host}/ari/events?api_key={safe_username}:{safe_password}&app={app_name}&subscribeAll=true&subscribe=ChannelAudioFrame"
         self.websocket: Optional[ClientConnection] = None
         self.http_session: Optional[aiohttp.ClientSession] = None
         self.running = False
@@ -80,48 +65,50 @@ class ARIClient:
         """Return true ARI connection state for readiness checks."""
         return self._connected and self.running and self.websocket is not None
 
-    async def _connect_websocket(self) -> ClientConnection:
-        """Connect to ARI WebSocket (ws/wss) with optional TLS and ping configuration."""
-        ping_interval = float(os.getenv("ARI_WS_PING_INTERVAL", "20"))
-        ping_timeout = float(os.getenv("ARI_WS_PING_TIMEOUT", "20"))
-
-        ssl_ctx = None
-        if self.ws_url.startswith("wss://"):
-            ca_file = os.getenv("ARI_TLS_CA_FILE")
-            ssl_ctx = ssl.create_default_context(cafile=ca_file if ca_file else None)
-
-            insecure = os.getenv("ARI_TLS_INSECURE", "").strip().lower() in ("1", "true", "yes", "on")
-            if insecure:
-                ssl_ctx.check_hostname = False
-                ssl_ctx.verify_mode = ssl.CERT_NONE
-
-        return await websockets.connect(
-            self.ws_url,
-            ping_interval=ping_interval,
-            ping_timeout=ping_timeout,
-            ssl=ssl_ctx,
-        )
-
     async def connect(self):
         """Connect to the ARI WebSocket and establish an HTTP session."""
-        logger.info("Connecting to ARI...", attempt=self._reconnect_attempt + 1)
+        # Log connection details for troubleshooting
+        ws_scheme = "wss" if self.ws_url.startswith("wss://") else "ws"
+        http_scheme = "https" if self.http_url.startswith("https://") else "http"
+        logger.info(
+            "Connecting to ARI...",
+            attempt=self._reconnect_attempt + 1,
+            http_scheme=http_scheme,
+            ws_scheme=ws_scheme,
+            http_url=self.http_url,
+        )
         self._connected = False
         try:
+            # Configure SSL context for HTTPS/WSS
+            ssl_context = None
+            if http_scheme == "https":
+                if self.ssl_verify:
+                    ssl_context = ssl.create_default_context()
+                else:
+                    ssl_context = ssl.create_default_context()
+                    ssl_context.check_hostname = False
+                    ssl_context.verify_mode = ssl.CERT_NONE
+                    logger.warning("SSL certificate verification disabled for ARI connection")
+
             # First, test HTTP connection to ensure ARI is available
             if self.http_session is None or self.http_session.closed:
-                self.http_session = aiohttp.ClientSession(auth=aiohttp.BasicAuth(self.username, self.password))
+                connector = aiohttp.TCPConnector(ssl=ssl_context) if ssl_context else None
+                self.http_session = aiohttp.ClientSession(
+                    auth=aiohttp.BasicAuth(self.username, self.password),
+                    connector=connector
+                )
             
             async with self.http_session.get(f"{self.http_url}/asterisk/info") as response:
                 if response.status != 200:
                     raise ConnectionError(f"Failed to connect to ARI HTTP endpoint. Status: {response.status}")
-                logger.info("Successfully connected to ARI HTTP endpoint.")
+                logger.info("Successfully connected to ARI HTTP endpoint.", scheme=http_scheme, ssl_verify=self.ssl_verify)
 
             # Then, connect to the WebSocket
-            self.websocket = await self._connect_websocket()
+            self.websocket = await websockets.connect(self.ws_url, ssl=ssl_context)
             self.running = True
             self._connected = True
             self._reconnect_attempt = 0  # Reset on successful connect
-            logger.info("Successfully connected to ARI WebSocket.")
+            logger.info("Successfully connected to ARI WebSocket.", scheme=ws_scheme)
         except Exception as e:
             self._connected = False
             logger.error("Failed to connect to ARI", error=str(e), attempt=self._reconnect_attempt + 1)

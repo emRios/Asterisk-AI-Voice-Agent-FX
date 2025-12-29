@@ -35,6 +35,10 @@ jobs:
         run: |
           bash -n preflight.sh
 
+      - name: Install script smoke (syntax)
+        run: |
+          bash -n install.sh
+
       - name: Run tests with coverage
         env:
           PYTHONPATH: ${{ github.workspace }}
@@ -63,17 +67,31 @@ jobs:
       - name: Coverage summary
         if: always()
         run: |
-          if [ -f coverage.json ]; then
-            COVERAGE=$(python3 -c "import json; print(f\"{json.load(open('coverage.json'))['totals']['percent_covered']:.2f}\")")
-            echo "📊 **Test Coverage: ${COVERAGE}%**" >> $GITHUB_STEP_SUMMARY
-            echo "✅ Threshold: 26.0% (current baseline)" >> $GITHUB_STEP_SUMMARY
-            echo "🎯 Next Target: 30%, Ultimate: 40%" >> $GITHUB_STEP_SUMMARY
-            if (( $(echo "$COVERAGE >= 26.0" | bc -l) )); then
-              echo "✓ Coverage meets threshold" >> $GITHUB_STEP_SUMMARY
-            else
-              echo "✗ Coverage below threshold" >> $GITHUB_STEP_SUMMARY
-            fi
-          fi
+          python3 - <<'PY'
+          import json
+          import os
+          import pathlib
+          import sys
+
+          p = pathlib.Path("coverage.json")
+          if not p.exists():
+              sys.exit(0)
+          cov = json.loads(p.read_text())["totals"]["percent_covered"]
+          threshold = 26.0
+
+          msg = [
+              f"📊 **Test Coverage: {cov:.2f}%**",
+              f"✅ Threshold: {threshold}% (current baseline)",
+              "🎯 Next Target: 30%, Ultimate: 40%",
+              "✓ Coverage meets threshold" if cov >= threshold else "✗ Coverage below threshold",
+          ]
+          summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+          if summary_path:
+              with open(summary_path, "a", encoding="utf-8") as f:
+                  f.write("\n".join(msg) + "\n")
+          else:
+              print("\n".join(msg))
+          PY
 
   # ─────────────────────────────────────────────────────────────────────────────
   # Docker Image Size Check (AAVA-113)
