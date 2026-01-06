@@ -166,6 +166,8 @@ If you want to use additional providers (e.g., Google Live, ElevenLabs) or switc
 
 **Kroko note:** `INCLUDE_KROKO_EMBEDDED` is off by default to keep the local-ai-server image lighter. Enable it only if you need embedded Kroko (see `docs/LOCAL_PROFILES.md`).
 
+**Container OS note:** `admin_ui` and `ai_engine` ship on Debian `bookworm` (Python `3.11`). `local_ai_server` ships on Debian `trixie` intentionally (for embedded Kroko glibc compatibility).
+
 ---
 
 ## Detailed Installation
