@@ -207,7 +207,7 @@ ls -l .env
 vi .env  # Update OPENAI_API_KEY or DEEPGRAM_API_KEY
 
 # 4. Restart ai-engine
-docker compose restart ai-engine
+docker compose restart ai_engine
 
 # 5. Verify with test call
 # 6. Revoke old key in provider dashboard after 24 hours
@@ -823,17 +823,17 @@ git diff v4.0.0..v4.0.1 config/ai-agent.example.yaml
 # Review and update config/ai-agent.yaml
 
 # 5. Rebuild and restart
-docker compose build --no-cache ai-engine
-docker compose up -d --force-recreate ai-engine
+docker compose build --no-cache ai_engine
+docker compose up -d --force-recreate ai_engine
 
 # 6. Monitor logs for 5 minutes
-docker compose logs -f ai-engine
+docker compose logs -f ai_engine
 
 # 7. Make test call
 
 # 8. Rollback if issues
 # git checkout v4.0.0
-# docker compose up -d --force-recreate ai-engine
+# docker compose up -d --force-recreate ai_engine
 ```
 
 **Major Version Upgrade** (e.g., v4.x → v5.x):
@@ -949,7 +949,7 @@ docker logs ai_engine
 sudo lsof -i :15000
 
 # 2. Invalid configuration
-docker compose run --rm ai-engine python -c "import yaml; yaml.safe_load(open('config/ai-agent.yaml'))"
+docker compose run --rm ai_engine python -c "import yaml; yaml.safe_load(open('config/ai-agent.yaml'))"
 
 # 3. Missing .env file
 ls -l .env

@@ -48,6 +48,7 @@ Tool calling enables AI agents to perform real-world actions during conversation
 |----------|--------|-------|
 | **OpenAI Realtime** | ✅ Full Support | Production validated (Nov 9, 2025) |
 | **Deepgram Voice Agent** | ✅ Full Support | Production validated (Nov 9, 2025) |
+| **Google Gemini Live** | ✅ Full Support | Production validated (Nov 2025) |
 | **Modular Pipelines (local_hybrid)** | ✅ Full Support | Production validated (Nov 19, 2025) - AAVA-85 |
 
 All tools work identically across supported providers—no code changes needed when switching providers.
@@ -74,6 +75,7 @@ Modular pipelines (e.g., `local_hybrid`) now support full tool execution through
 
 **Supported Tools**: All 6 tools validated in production
 - ✅ `transfer` - Tested with call transfers to ring groups
+- 🟡 `attended_transfer` - Deployed (warm transfer w/ announcement + DTMF acceptance; requires Local AI Server)
 - ✅ `hangup_call` - Tested with farewell messages
 - ✅ `send_email_summary` - Tested with auto-summaries
 - ✅ `request_transcript` - Tested with email delivery
@@ -149,7 +151,7 @@ AI: "Transferring you to Sales team ring group now."
 ```
 
 **Technical Implementation**:
-- Extension transfers use `redirect` (channel stays in Stasis)
+- Extension transfers use `continue` to the configured dialplan context (e.g., `from-internal`)
 - Queue/Ring Group transfers use `continue` (channel leaves Stasis, `transfer_active` flag prevents premature hangup)
 - All transfer types verified in production
 
@@ -158,7 +160,35 @@ AI: "Transferring you to Sales team ring group now."
 - Queue: Call ID `1763002719.4744` ✅
 - Ring Group: Call ID `1763005247.4767` ✅
 
-#### 2. Cancel Transfer
+#### 2. Attended Transfer (Warm Transfer)
+
+**Purpose**: Warm transfer with operator-style handoff (MOH + announcement + DTMF accept/decline)
+
+**Behavior**:
+- Caller is placed on **Music On Hold** while the destination is contacted.
+- Destination hears a **one-way announcement** (TTS) summarizing caller + context.
+- Destination must press **DTMF** to accept/decline:
+  - Default: `1 = accept`, `2 = decline`, timeout = decline.
+- On accept: AI audio is removed and the engine bridges **caller ↔ destination** directly.
+- On decline/timeout: MOH stops and the AI resumes with the caller (optionally plays a short “unable to transfer” prompt).
+- Engine remains alive as a passive bridge supervisor until hangup.
+
+**Key constraints**:
+- This tool is separate from `transfer`; it does **not** change existing transfer behavior.
+- Only supported for `type: extension` destinations.
+- Requires **Local AI Server** (announcement/prompt TTS is mandatory).
+- Config compatibility: `agent_accept_prompt_template` is the canonical key; `agent_accept_prompt` is accepted as a legacy alias.
+
+**How destination selection works**:
+- The tool parameter is `destination` and it maps to a key under `tools.transfer.destinations`.
+  - Example: `destination: "support_agent"` → dials `target: "6000"`.
+- The engine supports fuzzy matching for common user terms (e.g., `"sales"`, `"support"`, `"6000"`), but for deterministic behavior configure prompts to use destination keys.
+
+**Recommended context policy**:
+- For predictable behavior, enable either `transfer` or `attended_transfer` per context/pipeline.
+- If you enable both, add an explicit rule in the context prompt describing when to use each.
+
+#### 3. Cancel Transfer
 
 **Purpose**: Allow caller to cancel in-progress transfer
 
@@ -168,7 +198,7 @@ Caller: "Actually, never mind"
 AI: "No problem, I've cancelled that transfer. How else can I help?"
 ```
 
-#### 3. Hangup Call
+#### 4. Hangup Call
 
 **Purpose**: Gracefully end call with farewell message
 
@@ -182,7 +212,7 @@ AI: "Thank you for calling. Goodbye!"
 
 ### Business Tools
 
-#### 4. Request Transcript (Caller-Initiated)
+#### 5. Request Transcript (Caller-Initiated)
 
 **Purpose**: Caller requests email transcript during call
 
@@ -209,7 +239,7 @@ AI: "Perfect! I'll send the transcript there shortly."
 - Confirmation flow: ✅ Implemented
 - Deduplication: ✅ Prevents duplicates
 
-#### 5. Send Email Summary (Auto-Triggered)
+#### 6. Send Email Summary (Auto-Triggered)
 
 **Purpose**: Automatically send call summary to admin after every call
 
@@ -260,11 +290,13 @@ tools:
         type: extension
         target: "2765"
         description: "Sales agent"
+        attended_allowed: true         # Allows attended_transfer (warm transfer) to this destination
       
       support_agent:
         type: extension
         target: "6000"
         description: "Support agent"
+        attended_allowed: true
       
       # Queue transfers (using continue to ext-queues)
       sales_queue:
@@ -292,7 +324,23 @@ tools:
         type: ringgroup
         target: "601"
         description: "Support team ring group"
-  
+
+  # ----------------------------------------------------------------------------
+  # ATTENDED_TRANSFER - Warm transfer with announcement + DTMF acceptance
+  # ----------------------------------------------------------------------------
+  attended_transfer:
+    enabled: true
+    moh_class: "default"              # Asterisk MOH class for caller during dial/briefing
+    dial_timeout_seconds: 30
+    accept_timeout_seconds: 15
+    tts_timeout_seconds: 8
+    accept_digit: "1"
+    decline_digit: "2"
+    announcement_template: "Hi, this is Ava. I'm transferring {caller_display} regarding {context_name}."
+    agent_accept_prompt_template: "Press 1 to accept this transfer, or 2 to decline."
+    caller_connected_prompt: "Connecting you now."  # Optional
+    caller_declined_prompt: "I’m not able to complete that transfer right now. Would you like me to take a message?"  # Optional
+
   # ----------------------------------------------------------------------------
   # CANCEL_TRANSFER - Cancel in-progress transfer
   # ----------------------------------------------------------------------------
@@ -350,6 +398,24 @@ tools:
     common_domains: ["gmail.com", "yahoo.com", "outlook.com"]
 ```
 
+### Enable Tools per Context / Pipeline (Allowlisting)
+
+Tools are allowlisted per **context** (and optionally per **pipeline**). If a tool is not allowlisted, the provider will not expose it to the model.
+
+**Context example**:
+```yaml
+contexts:
+  support:
+    provider: google_live
+    tools:
+      - attended_transfer   # warm transfer
+      - cancel_transfer
+      - hangup_call
+      - request_transcript
+```
+
+**Recommendation**: for deterministic transfer behavior, enable either `transfer` or `attended_transfer` in a given context/pipeline (not both), unless your prompt explicitly distinguishes when to use each.
+
 ### Environment Variables (.env)
 
 ```bash
@@ -402,7 +468,7 @@ asterisk -rx "dialplan show 6789@from-internal"
 
 ### 2. Create Transfer Destination Extensions
 
-Tools like `transfer_call` need extensions to transfer **TO**:
+Tools like `transfer` and `attended_transfer` need extensions (and/or queues/ring groups) to transfer **TO**:
 
 **In FreePBX**:
 1. Navigate: Applications → Extensions → Add Extension
@@ -467,8 +533,8 @@ See [FreePBX Integration Guide](FreePBX-Integration-Guide.md) for complete dialp
 
 **1. Prerequisites**:
 - Extension 6000 configured in FreePBX
-- `transfer_call.enabled: true` in config
-- `departments.support: "SIP/6000"` configured
+- `tools.transfer.enabled: true` in config
+- `tools.transfer.destinations` contains a destination (example: `support_agent`)
 
 **2. Make Test Call**:
 ```
@@ -480,13 +546,33 @@ Expected: Bidirectional audio after agent answers
 
 **3. Verify in Logs**:
 ```bash
-docker logs ai_engine | grep "transfer_call"
+docker logs ai_engine | egrep "Transfer requested|Unified transfer tool"
 
 # Expected output:
-# [INFO] 🔧 Tool call: transfer_call({'target': 'support'})
-# [INFO] 🔀 Transfer requested: support (warm mode)
-# [INFO] Resolved support → 6000 (SIP/6000)
-# [INFO] ✅ Tool transfer_call executed: success
+# [INFO] Transfer requested ... destination=support_agent
+# [INFO] ✅ Extension transfer initiated ...
+```
+
+### Test Attended Transfer (Warm Transfer)
+
+**1. Prerequisites**:
+- Local AI Server running (required for announcement/prompt TTS)
+- `tools.attended_transfer.enabled: true`
+- Destination configured with `attended_allowed: true`:
+  - Example: `tools.transfer.destinations.support_agent.attended_allowed: true`
+- Context/pipeline enables `attended_transfer` tool (recommended to disable `transfer` for deterministic behavior)
+
+**2. Make Test Call**:
+```
+You: "Please transfer me to support"
+Expected: Caller hears MOH while agent is contacted
+Expected: Destination hears announcement + DTMF prompt
+Expected: Agent presses 1 → caller bridged to destination; AI audio removed
+```
+
+**3. Verify in Logs**:
+```bash
+docker logs ai_engine | egrep "Attended transfer requested|ATTENDED TRANSFER COMPLETE|Channel DTMF received"
 ```
 
 ### Test Email Tool
@@ -534,9 +620,8 @@ docker logs ai_engine | grep "request_transcript"
 00:43:12  Caller enters AI conversation
 00:43:45  Caller: "I need help from support"
 00:43:46  AI detects intent → Deepgram sends FunctionCallRequest
-00:43:46  Tool executes: transfer_call(target="support")
-00:43:46  Resolved: support → 6000 → SIP/6000
-00:43:46  Direct SIP origination (no Local channels)
+00:43:46  Tool executes: transfer(destination="support_agent")
+00:43:46  Resolved: support_agent → 6000
 00:43:49  Agent answers (extension 6000)
 00:43:49  AI cleanup sequence:
           1. Remove UnicastRTP from bridge (<50ms)
@@ -557,7 +642,7 @@ docker logs ai_engine | grep "request_transcript"
 
 **Event Sequence**:
 1. OpenAI: `response.output_item.done` (function_call detected)
-2. Adapter: Parses `item.name="transfer_call"`, `item.arguments='{"target":"support"}'`
+2. Adapter: Parses `item.name="transfer_call"` (legacy alias) and maps it to `transfer`
 3. Registry: Routes to unified tool
 4. Tool: **Exact same execution** as Deepgram (504 lines of shared code)
 5. OpenAI: Receives function output, speaks confirmation
@@ -605,7 +690,7 @@ docker logs ai_engine | grep "request_transcript"
 asterisk -rx "dialplan show 6000@from-internal"
 
 # 2. Check tool enabled in config
-grep -A 5 "transfer_call:" config/ai-agent.yaml
+grep -A 20 "transfer:" config/ai-agent.yaml
 
 # 3. Check logs for errors
 docker logs ai_engine | grep -i "transfer"
@@ -620,7 +705,7 @@ asterisk -rx "pjsip show endpoint 6000"
 | Extension doesn't exist | Create virtual extension in FreePBX |
 | Wrong SIP format | Use `SIP/6000` not `6000` or `SIP:6000` |
 | `tool.enabled: false` | Set to `true` in config |
-| Department not mapped | Add to `departments:` in config |
+| Destination not mapped | Add to `tools.transfer.destinations` in config |
 
 ### Email Not Sending
 
@@ -698,7 +783,8 @@ request_transcript:
 ```
 ┌──────────────────────────────────────────────┐
 │      Tool Registry (Write Once)              │
-│  • transfer_call  • request_transcript       │
+│  • transfer       • attended_transfer        │
+│  • request_transcript                        │
 │  • hangup_call    • send_email_summary       │
 └──────────────┬───────────────────────────────┘
                │
@@ -731,7 +817,8 @@ request_transcript:
 - `src/tools/adapters/openai.py` (215 lines) - OpenAI Realtime integration
 
 **Tools**:
-- `src/tools/telephony/transfer.py` (504 lines) - Transfer call tool
+- `src/tools/telephony/unified_transfer.py` - Unified transfer tool (`transfer`)
+- `src/tools/telephony/attended_transfer.py` - Warm transfer (`attended_transfer`)
 - `src/tools/telephony/cancel_transfer.py` - Cancel transfer tool
 - `src/tools/telephony/hangup.py` - Hangup call tool
 - `src/tools/business/request_transcript.py` (475 lines) - Transcript request tool

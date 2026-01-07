@@ -60,14 +60,15 @@ class CancelTransferTool(Tool):
                 }
             
             # Check if there's an active transfer
-            if not session.current_action or session.current_action.get('type') != 'transfer':
+            if not session.current_action or session.current_action.get('type') not in {'transfer', 'attended_transfer'}:
                 return {
                     "status": "no_transfer",
                     "message": "There's no transfer in progress to cancel."
                 }
             
             action = session.current_action
-            channel_id = action.get('channel_id')
+            channel_id = action.get('channel_id') or action.get('agent_channel_id')
+            engine = getattr(context.ari_client, "engine", None)
             
             # Check if transfer was answered
             # (If we're here and it was answered, the engine would have already
@@ -80,6 +81,13 @@ class CancelTransferTool(Tool):
             
             # Hangup the transfer channel if it exists
             if channel_id:
+                try:
+                    # If this is an attended transfer agent leg, unregister the in-memory mapping
+                    # BEFORE hanging up so the agent leg teardown doesn't trigger full call cleanup.
+                    if action.get("type") == "attended_transfer" and engine and hasattr(engine, "_unregister_attended_transfer_agent_channel"):
+                        engine._unregister_attended_transfer_agent_channel(channel_id)
+                except Exception:
+                    pass
                 try:
                     await context.ari_client.hangup_channel(channel_id)
                     logger.info(f"Hung up transfer channel: {channel_id}")
@@ -99,6 +107,10 @@ class CancelTransferTool(Tool):
             # Clear the action from session
             session.current_action = None
             session.transfer_context = None
+            try:
+                session.audio_capture_enabled = True
+            except Exception:
+                pass
             await context.session_store.upsert_call(session)
             
             logger.info("✅ Transfer cancelled", call_id=context.call_id)

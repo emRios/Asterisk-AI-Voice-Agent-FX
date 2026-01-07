@@ -13,6 +13,7 @@ const ContextsConfig: React.FC<ContextsConfigProps> = ({ config, onChange }) => 
 
     const availableTools = [
         'transfer',
+        'attended_transfer',
         'cancel_transfer',
         'hangup_call',
         'leave_voicemail',

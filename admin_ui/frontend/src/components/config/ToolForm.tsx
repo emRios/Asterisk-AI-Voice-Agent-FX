@@ -8,6 +8,14 @@ interface ToolFormProps {
     onChange: (newConfig: any) => void;
 }
 
+const DEFAULT_ATTENDED_ANNOUNCEMENT_TEMPLATE =
+    "Hi, this is Ava. I'm transferring {caller_display} regarding {context_name}.";
+const DEFAULT_ATTENDED_AGENT_DTMF_PROMPT_TEMPLATE =
+    "Press 1 to accept this transfer, or 2 to decline.";
+const DEFAULT_ATTENDED_CALLER_CONNECTED_PROMPT = "Connecting you now.";
+const DEFAULT_ATTENDED_CALLER_DECLINED_PROMPT =
+    "I’m not able to complete that transfer right now. Would you like me to take a message, or is there anything else I can help with?";
+
 const ToolForm = ({ config, onChange }: ToolFormProps) => {
     const [editingDestination, setEditingDestination] = useState<string | null>(null);
     const [destinationForm, setDestinationForm] = useState<any>({});
@@ -26,6 +34,25 @@ const ToolForm = ({ config, onChange }: ToolFormProps) => {
         });
     };
 
+    const handleAttendedTransferToggle = (enabled: boolean) => {
+        const existing = config.attended_transfer || {};
+        const next: any = { ...existing, enabled };
+        if (enabled) {
+            // Populate sensible defaults out of the box (user can override).
+            if (next.moh_class == null) next.moh_class = 'default';
+            if (next.dial_timeout_seconds == null) next.dial_timeout_seconds = 30;
+            if (next.accept_timeout_seconds == null) next.accept_timeout_seconds = 15;
+            if (next.tts_timeout_seconds == null) next.tts_timeout_seconds = 8;
+            if (next.accept_digit == null) next.accept_digit = '1';
+            if (next.decline_digit == null) next.decline_digit = '2';
+            if (next.announcement_template == null) next.announcement_template = DEFAULT_ATTENDED_ANNOUNCEMENT_TEMPLATE;
+            if (next.agent_accept_prompt_template == null) next.agent_accept_prompt_template = DEFAULT_ATTENDED_AGENT_DTMF_PROMPT_TEMPLATE;
+            if (next.caller_connected_prompt == null) next.caller_connected_prompt = DEFAULT_ATTENDED_CALLER_CONNECTED_PROMPT;
+            if (next.caller_declined_prompt == null) next.caller_declined_prompt = DEFAULT_ATTENDED_CALLER_DECLINED_PROMPT;
+        }
+        onChange({ ...config, attended_transfer: next });
+    };
+
     // Transfer Destinations Management
     const handleEditDestination = (key: string, data: any) => {
         setEditingDestination(key);
@@ -34,7 +61,7 @@ const ToolForm = ({ config, onChange }: ToolFormProps) => {
 
     const handleAddDestination = () => {
         setEditingDestination('new_destination');
-        setDestinationForm({ key: '', type: 'extension', target: '', description: '' });
+        setDestinationForm({ key: '', type: 'extension', target: '', description: '', attended_allowed: false });
     };
 
     const handleSaveDestination = () => {
@@ -130,6 +157,7 @@ const ToolForm = ({ config, onChange }: ToolFormProps) => {
                                             <div className="font-medium text-sm">{key}</div>
                                             <div className="text-xs text-muted-foreground">
                                                 {dest.type} • {dest.target} • {dest.description}
+                                                {dest.type === 'extension' && dest.attended_allowed ? ' • attended' : ''}
                                             </div>
                                         </div>
                                         <div className="flex items-center gap-1">
@@ -143,6 +171,100 @@ const ToolForm = ({ config, onChange }: ToolFormProps) => {
                                     </div>
                                 ))}
                             </div>
+                        </div>
+                    )}
+                </div>
+
+                {/* Attended (Warm) Transfer */}
+                <div className="border border-border rounded-lg p-4 bg-card/50">
+                    <FormSwitch
+                        label="Attended Transfer (Warm)"
+                        description="Warm transfer with MOH, one-way announcement to the agent, and DTMF accept/decline. Requires Local AI Server for TTS."
+                        checked={config.attended_transfer?.enabled ?? false}
+                        onChange={(e) => handleAttendedTransferToggle(e.target.checked)}
+                        className="mb-0 border-0 p-0 bg-transparent"
+                    />
+                    {config.attended_transfer?.enabled && (
+                        <div className="mt-4 pl-4 border-l-2 border-border ml-2 space-y-4">
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                <FormInput
+                                    label="MOH Class"
+                                    value={config.attended_transfer?.moh_class || 'default'}
+                                    onChange={(e) => updateNestedConfig('attended_transfer', 'moh_class', e.target.value)}
+                                    tooltip="Asterisk Music On Hold class used while the destination is being dialed."
+                                />
+                                <FormInput
+                                    label="Dial Timeout (seconds)"
+                                    type="number"
+                                    value={config.attended_transfer?.dial_timeout_seconds ?? 30}
+                                    onChange={(e) => updateNestedConfig('attended_transfer', 'dial_timeout_seconds', parseInt(e.target.value) || 30)}
+                                    tooltip="How long to ring the destination before aborting the transfer."
+                                />
+                                <FormInput
+                                    label="Accept Timeout (seconds)"
+                                    type="number"
+                                    value={config.attended_transfer?.accept_timeout_seconds ?? 15}
+                                    onChange={(e) => updateNestedConfig('attended_transfer', 'accept_timeout_seconds', parseInt(e.target.value) || 15)}
+                                    tooltip="How long to wait for the destination to press a DTMF digit."
+                                />
+                                <FormInput
+                                    label="TTS Timeout (seconds)"
+                                    type="number"
+                                    value={config.attended_transfer?.tts_timeout_seconds ?? 8}
+                                    onChange={(e) => updateNestedConfig('attended_transfer', 'tts_timeout_seconds', parseInt(e.target.value) || 8)}
+                                    tooltip="Max time to wait for Local AI Server TTS per prompt."
+                                />
+                                <FormInput
+                                    label="Accept Digit"
+                                    value={config.attended_transfer?.accept_digit || '1'}
+                                    onChange={(e) => updateNestedConfig('attended_transfer', 'accept_digit', e.target.value)}
+                                />
+                                <FormInput
+                                    label="Decline Digit"
+                                    value={config.attended_transfer?.decline_digit || '2'}
+                                    onChange={(e) => updateNestedConfig('attended_transfer', 'decline_digit', e.target.value)}
+                                />
+                            </div>
+
+                            <div className="space-y-2">
+                                <FormLabel tooltip="Spoken to the destination agent (one-way) before requesting DTMF acceptance. Placeholders: {caller_display}, {caller_name}, {caller_number}, {context_name}, {destination_description}.">
+                                    Agent Announcement Template
+                                </FormLabel>
+                                <textarea
+                                    className="w-full p-3 rounded-md border border-input bg-transparent text-sm min-h-[100px] focus:outline-none focus:ring-1 focus:ring-ring"
+                                    value={config.attended_transfer?.announcement_template ?? DEFAULT_ATTENDED_ANNOUNCEMENT_TEMPLATE}
+                                    onChange={(e) => updateNestedConfig('attended_transfer', 'announcement_template', e.target.value)}
+                                    placeholder="Hi, this is Ava. I'm transferring {caller_display} regarding {context_name}."
+                                />
+                            </div>
+
+                            <div className="space-y-2">
+                                <FormLabel tooltip="Spoken to the destination agent to request acceptance/decline (DTMF).">
+                                    Agent DTMF Prompt Template
+                                </FormLabel>
+                                <textarea
+                                    className="w-full p-3 rounded-md border border-input bg-transparent text-sm min-h-[80px] focus:outline-none focus:ring-1 focus:ring-ring"
+                                    value={config.attended_transfer?.agent_accept_prompt_template ?? DEFAULT_ATTENDED_AGENT_DTMF_PROMPT_TEMPLATE}
+                                    onChange={(e) => updateNestedConfig('attended_transfer', 'agent_accept_prompt_template', e.target.value)}
+                                    placeholder="Press 1 to accept this transfer, or 2 to decline."
+                                />
+                            </div>
+
+                            <FormInput
+                                label="Caller Connected Prompt (Optional)"
+                                value={config.attended_transfer?.caller_connected_prompt ?? DEFAULT_ATTENDED_CALLER_CONNECTED_PROMPT}
+                                onChange={(e) => updateNestedConfig('attended_transfer', 'caller_connected_prompt', e.target.value)}
+                                tooltip="Optional phrase spoken to the caller right before bridging to the destination (e.g., 'Connecting you now.')."
+                                placeholder="Connecting you now."
+                            />
+
+                            <FormInput
+                                label="Caller Declined Prompt (Optional)"
+                                value={config.attended_transfer?.caller_declined_prompt ?? DEFAULT_ATTENDED_CALLER_DECLINED_PROMPT}
+                                onChange={(e) => updateNestedConfig('attended_transfer', 'caller_declined_prompt', e.target.value)}
+                                tooltip="Spoken to the caller when the destination declines or the attended transfer times out (keeps the conversation moving)."
+                                placeholder="I’m not able to complete that transfer right now. Would you like me to take a message?"
+                            />
                         </div>
                     )}
                 </div>
@@ -411,6 +533,14 @@ const ToolForm = ({ config, onChange }: ToolFormProps) => {
                         value={destinationForm.type || 'extension'}
                         onChange={(e) => setDestinationForm({ ...destinationForm, type: e.target.value })}
                     />
+                    {destinationForm.type === 'extension' && (
+                        <FormSwitch
+                            label="Allow Attended Transfer"
+                            description="Enable warm transfer for this destination (agent announcement + DTMF accept/decline)."
+                            checked={destinationForm.attended_allowed ?? false}
+                            onChange={(e) => setDestinationForm({ ...destinationForm, attended_allowed: e.target.checked })}
+                        />
+                    )}
                     <FormInput
                         label="Target Number"
                         value={destinationForm.target || ''}
