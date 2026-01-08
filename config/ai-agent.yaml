@@ -4,7 +4,7 @@ asterisk:
 audio_transport: audiosocket
 audiosocket:
   format: slin
-  host: "10.132.112.148"
+  host: "172.31.7.92"
   port: 9092
 barge_in:
   enabled: true
