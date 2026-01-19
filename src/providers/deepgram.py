@@ -407,6 +407,26 @@ class DeepgramProvider(AIProviderInterface):
                 greeting_val = ""
         if not greeting_val:
             greeting_val = "Hello, how can I help you today?"
+ 
+        # KILO_PATCH: allow external TTS to own the greeting.
+        # New config options supported (read-only here; no global config file changes required):
+        #  - greeting_mode: "provider" (default) | "external"
+        #  - disable_deepgram_greeting: True (alias boolean)
+        # If greeting is disabled, we OMIT the agent.greeting key from Settings (do NOT send an empty string).
+        try:
+            gm = (self._get_config_value('greeting_mode', None) or "").strip().lower()
+            disable_flag = bool(self._get_config_value('disable_deepgram_greeting', False))
+            self._deepgram_greeting_disabled = disable_flag or (gm == 'external')
+        except Exception:
+            self._deepgram_greeting_disabled = False
+        if self._deepgram_greeting_disabled:
+            # Preserve engine greeting for upstream TTS (VoxBridge) but DO NOT send it to Deepgram provider.
+            logger.info(
+                "agent.greeting omitted by configuration (greeting_mode=external or disable_deepgram_greeting=True)",
+                call_id=self.call_id
+            )
+            # Use empty greeting_val locally so subsequent injection code won't fire.
+            greeting_val = ""
 
         listen_model = self._get_config_value('model', None) or getattr(self.llm_config, 'listen_model', None) or "nova-2-general"
         speak_model = self._get_config_value('tts_model', None) or getattr(self.llm_config, 'tts_model', None) or "aura-asteria-en"
@@ -456,26 +476,28 @@ class DeepgramProvider(AIProviderInterface):
             },
             "agent": {
                 "language": "en",  # Twilio uses "en" not "en-US"
-                "listen": { 
-                    "provider": { 
-                        "type": "deepgram", 
+                "listen": {
+                    "provider": {
+                        "type": "deepgram",
                         "model": "nova-3"  # Twilio uses nova-3
-                    } 
+                    }
                 },
-                "think": { 
-                    "provider": { 
-                        "type": "open_ai", 
+                "think": {
+                    "provider": {
+                        "type": "open_ai",
                         "model": "gpt-4o-mini",  # Twilio uses gpt-4o-mini
                         "temperature": 0.7
-                    }, 
-                    "prompt": think_prompt 
+                    },
+                    "prompt": think_prompt
                 },
                 "speak": {
                     "provider": {"type": "deepgram", "model": speak_model}  # Revert: keep provider format
-                },
-                "greeting": greeting_val
+                }
             }
         }
+        # KILO_PATCH: only include greeting key when Deepgram greeting is enabled.
+        if greeting_val:
+            settings["agent"]["greeting"] = greeting_val
         
         # Add tools from context allowlist only.
         # Per Deepgram docs: functions go in agent.think.functions.
@@ -493,18 +515,21 @@ class DeepgramProvider(AIProviderInterface):
             logger.warning(f"Failed to configure tools: {e}", call_id=self.call_id, exc_info=True)
         # Build and store a minimal Settings payload for fallback retry on UNPARSABLE error
         try:
+            minimal_agent = {
+                "language": "en-US",
+                "listen": { "provider": { "type": "deepgram", "model": listen_model } },
+                "think": { "provider": { "type": "open_ai", "model": think_model }, "prompt": think_prompt },
+                "speak": { "provider": { "type": "deepgram", "model": speak_model } }
+            }
+            # KILO_PATCH: conditionally include greeting in minimal fallback
+            if greeting_val:
+                minimal_agent["greeting"] = greeting_val
             self._last_settings_minimal = {
                 "type": "Settings",
                 "audio": {
                     "input": { "encoding": input_format, "sample_rate": int(input_sample_rate) }
                 },
-                "agent": {
-                    "greeting": greeting_val,
-                    "language": "en-US",
-                    "listen": { "provider": { "type": "deepgram", "model": listen_model } },
-                    "think": { "provider": { "type": "open_ai", "model": think_model }, "prompt": think_prompt },
-                    "speak": { "provider": { "type": "deepgram", "model": speak_model } }
-                }
+                "agent": minimal_agent
             }
         except Exception:
             self._last_settings_minimal = None
@@ -530,17 +555,21 @@ class DeepgramProvider(AIProviderInterface):
         # async fallback task intentionally removed.
 
         # Immediately inject greeting once to try to kick off TTS
-        async def _inject_greeting_immediate():
-            try:
-                if self.websocket and self.websocket.state.name == "OPEN" and greeting_val and self._greeting_injections < 1:
-                    logger.info("Injecting greeting immediately after Settings", call_id=self.call_id)
-                    self._greeting_injections += 1
-                    try:
-                        await self._inject_message_dual(greeting_val)
-                    except Exception:
-                        logger.debug("Immediate greeting injection failed", exc_info=True)
-            except Exception:
-                pass
+        # KILO_PATCH: define injection only when Deepgram greeting is enabled.
+        if not getattr(self, "_deepgram_greeting_disabled", False):
+            async def _inject_greeting_immediate():
+                try:
+                    if self.websocket and self.websocket.state.name == "OPEN" and greeting_val and self._greeting_injections < 1:
+                        logger.info("Injecting greeting immediately after Settings", call_id=self.call_id)
+                        self._greeting_injections += 1
+                        try:
+                            await self._inject_message_dual(greeting_val)
+                        except Exception:
+                            logger.debug("Immediate greeting injection failed", exc_info=True)
+                except Exception:
+                    pass
+        else:
+            logger.info("Greeting injection disabled by configuration; not defining _inject_greeting_immediate()", call_id=self.call_id)
         # Wait up to 1.0s for a server response to mark readiness
         try:
             if self._ack_event is not None:
@@ -550,20 +579,23 @@ class DeepgramProvider(AIProviderInterface):
         except asyncio.TimeoutError:
             logger.warning("Deepgram settings ACK not received within timeout; fallback readiness may be active")
         # If ready and we haven't seen any audio burst within ~1s, inject greeting once to kick off TTS
-        async def _inject_greeting_if_quiet():
-            try:
-                await asyncio.sleep(1.5)
-                if self.websocket and self.websocket.state.name == "OPEN" and not self._in_audio_burst and greeting_val and self._greeting_injections < 2:
-                    logger.info("Injecting greeting via fallback as no AgentAudio detected", call_id=self.call_id)
-                    try:
-                        self._greeting_injections += 1
-                        await self._inject_message_dual(greeting_val)
-                    except Exception:
-                        logger.debug("Greeting injection failed", exc_info=True)
-            except Exception:
-                pass
-        # Disable fallback greeting injection; avoid extra messages pre-ack
-        # asyncio.create_task(_inject_greeting_if_quiet())
+        if not getattr(self, "_deepgram_greeting_disabled", False):
+            async def _inject_greeting_if_quiet():
+                try:
+                    await asyncio.sleep(1.5)
+                    if self.websocket and self.websocket.state.name == "OPEN" and not self._in_audio_burst and greeting_val and self._greeting_injections < 2:
+                        logger.info("Injecting greeting via fallback as no AgentAudio detected", call_id=self.call_id)
+                        try:
+                            self._greeting_injections += 1
+                            await self._inject_message_dual(greeting_val)
+                        except Exception:
+                            logger.debug("Greeting injection failed", exc_info=True)
+                except Exception:
+                    pass
+            # Fallback scheduling intentionally disabled by default (preserve original behavior)
+            # asyncio.create_task(_inject_greeting_if_quiet())
+        else:
+            logger.info("Greeting fallback injection disabled by configuration", call_id=self.call_id)
         summary = {
             "input_encoding": str(input_encoding).lower(),
             "input_sample_rate_hz": int(input_sample_rate),
