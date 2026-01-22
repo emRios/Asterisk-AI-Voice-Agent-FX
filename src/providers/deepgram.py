@@ -8,6 +8,7 @@ import audioop
 from typing import Callable, Optional, List, Dict, Any
 import websockets.exceptions
 from websockets.asyncio.client import ClientConnection
+from .prompt_metadata_injector import PromptMetadataInjector
 
 from structlog import get_logger
 from prometheus_client import Gauge, Info
@@ -202,6 +203,9 @@ class DeepgramProvider(AIProviderInterface):
         self._settings_retry_attempted: bool = False
         self._last_settings_payload: Optional[dict] = None
         self._last_settings_minimal: Optional[dict] = None
+
+        self._prompt_injector = PromptMetadataInjector(default_title="Sr", default_name="Cliente")
+
 
     def set_session_store(self, session_store):
         """Set the session store for turn latency tracking (Milestone 21)."""
@@ -408,7 +412,7 @@ class DeepgramProvider(AIProviderInterface):
         if not greeting_val:
             greeting_val = "Hello, how can I help you today?"
  
-        # KILO_PATCH: allow external TTS to own the greeting.
+        # ERIOS: allow external TTS to own the greeting.
         # New config options supported (read-only here; no global config file changes required):
         #  - greeting_mode: "provider" (default) | "external"
         #  - disable_deepgram_greeting: True (alias boolean)
@@ -442,23 +446,62 @@ class DeepgramProvider(AIProviderInterface):
             output_sample_rate=self._dg_output_rate,
         )
         think_model = getattr(self.llm_config, 'model', None) or "gpt-4o"
-        # Try context-injected prompt first (can be 'instructions' or 'prompt' key), then provider config, then llm_config, then default
-        think_prompt = (
-            self._get_config_value('instructions', None) or  # Context injection uses 'instructions' for Deepgram
-            self._get_config_value('prompt', None) or
-            getattr(self.llm_config, 'prompt', None) or
-            "You are a helpful assistant."
-        )
-        
-        # Log prompt source for debugging
+
+        # ------------------------------------------------------------
+        # 1) Resolver prompt_source + think_prompt BASE (antes de inyectar)
+        # ------------------------------------------------------------
         prompt_source = "hardcoded_default"
-        if self._get_config_value('instructions', None):
-            prompt_source = "context_injection"
-        elif self._get_config_value('prompt', None):
-            prompt_source = "provider_config"
-        elif getattr(self.llm_config, 'prompt', None):
-            prompt_source = "global_llm_config"
-        
+        think_prompt = "You are a helpful voice assistant."
+
+        try:
+            # Prioridad: instructions (context) > prompt (provider config) > global llm_config.prompt > default
+            instr = self._get_config_value('instructions', None)
+            prov_prompt = self._get_config_value('prompt', None)
+            global_prompt = getattr(self.llm_config, 'prompt', None)
+
+            if instr:
+                think_prompt = instr
+                prompt_source = "context_injection"
+            elif prov_prompt:
+                think_prompt = prov_prompt
+                prompt_source = "provider_config"
+            elif global_prompt:
+                think_prompt = global_prompt
+                prompt_source = "global_llm_config"
+        except Exception:
+            pass
+
+        think_prompt = (think_prompt or "").strip()
+
+        # ------------------------------------------------------------
+        # 2) Inyectar placeholders {title}/{name} desde session_store
+        #    (sin tocar VoxBridge)
+        # ------------------------------------------------------------
+        try:
+            think_prompt, greeting_val, contact = await self._prompt_injector.resolve_and_apply(
+                getattr(self, "_session_store", None),
+                getattr(self, "call_id", None),
+                think_prompt=think_prompt,
+                greeting=greeting_val,
+                use_defaults=True,
+            )
+            logger.info(
+                "Contact placeholders applied to prompts",
+                call_id=self.call_id,
+                title=contact.title or "Sr",
+                name=contact.name or "Cliente",
+                prompt_preview=(think_prompt[:140] + "...") if len(think_prompt) > 140 else think_prompt,
+            )
+        except Exception:
+            logger.debug(
+                "Failed applying contact placeholders",
+                call_id=getattr(self, "call_id", None),
+                exc_info=True
+            )
+
+        # ------------------------------------------------------------
+        # 3) Log del prompt FINAL (una sola vez)
+        # ------------------------------------------------------------
         logger.info(
             "Deepgram Think prompt resolved",
             call_id=self.call_id,
@@ -495,7 +538,7 @@ class DeepgramProvider(AIProviderInterface):
                 }
             }
         }
-        # KILO_PATCH: only include greeting key when Deepgram greeting is enabled.
+        # ERIOS: only include greeting key when Deepgram greeting is enabled.
         if greeting_val:
             settings["agent"]["greeting"] = greeting_val
         
@@ -521,7 +564,7 @@ class DeepgramProvider(AIProviderInterface):
                 "think": { "provider": { "type": "open_ai", "model": think_model }, "prompt": think_prompt },
                 "speak": { "provider": { "type": "deepgram", "model": speak_model } }
             }
-            # KILO_PATCH: conditionally include greeting in minimal fallback
+            # ERIOS: conditionally include greeting in minimal fallback
             if greeting_val:
                 minimal_agent["greeting"] = greeting_val
             self._last_settings_minimal = {
@@ -555,7 +598,7 @@ class DeepgramProvider(AIProviderInterface):
         # async fallback task intentionally removed.
 
         # Immediately inject greeting once to try to kick off TTS
-        # KILO_PATCH: define injection only when Deepgram greeting is enabled.
+        # ERIOS: define injection only when Deepgram greeting is enabled.
         if not getattr(self, "_deepgram_greeting_disabled", False):
             async def _inject_greeting_immediate():
                 try:
