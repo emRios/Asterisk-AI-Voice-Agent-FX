@@ -2405,6 +2405,36 @@ class Engine:
             )
             session.is_outbound = bool(is_outbound)
             session.enhanced_vad_enabled = bool(self.vad_manager)
+
+            # EARLY hydration of contact vars ({title}/{name}) from ChannelVarset buffer
+            # Esto se ejecuta para inbound y outbound, antes del primer save de la sesión.
+            try:
+                pending_early = self._pending_channel_vars.pop(caller_channel_id, None)
+                if isinstance(pending_early, dict) and pending_early:
+                    channel_vars = getattr(session, "channel_vars", None)
+                    if not isinstance(channel_vars, dict):
+                        channel_vars = {}
+                        session.channel_vars = channel_vars
+
+                    # No sobreescribir claves existentes si ya hay algo en channel_vars
+                    for k, v in pending_early.items():
+                        if k not in channel_vars and v is not None:
+                            channel_vars[k] = v
+
+                    logger.debug(
+                        "Hydrated session contact vars from pending buffer (early)",
+                        call_id=caller_channel_id,
+                        channel_id=caller_channel_id,
+                        saved_title=channel_vars.get("__title") or channel_vars.get("title") or channel_vars.get("CONTACT_TITLE"),
+                        saved_name=channel_vars.get("__name") or channel_vars.get("name") or channel_vars.get("CONTACT_NAME"),
+                    )
+            except Exception:
+                logger.debug(
+                    "Failed to hydrate contact vars from pending buffer (early)",
+                    call_id=caller_channel_id,
+                    exc_info=True,
+                )
+
             await self._save_session(session, new=True)
 
             # If outbound, pull outbound metadata from channel vars (set during origination).
