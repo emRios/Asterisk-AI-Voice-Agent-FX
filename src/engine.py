@@ -3776,17 +3776,90 @@ class Engine:
             logger.error("Error handling ChannelDtmfReceived", error=str(exc), exc_info=True)
 
     async def _handle_channel_varset(self, event: dict):
-        """Monitor ChannelVarset events for debugging configuration state."""
+        """
+        Monitor ChannelVarset events and persist contact-related vars into the CallSession.
+
+        Actualmente solo nos interesan las variables de canal:
+          - __title
+          - __name
+
+        Estas se copian a session.channel_vars para que PromptMetadataInjector
+        pueda resolver {title}/{name} desde:
+          - __title / __name
+          - CONTACT_TITLE / CONTACT_NAME
+          - title / name
+        """
         try:
             channel = event.get("channel", {}) or {}
-            variable = event.get("variable")
+            variable = event.get("variable") or ""
             value = event.get("value")
             channel_id = channel.get("id")
+
+            # Log original ARI event para trazabilidad
             logger.debug(
                 "Channel variable set",
                 channel_id=channel_id,
                 variable=variable,
                 value=value,
+            )
+
+            # Requisitos mínimos
+            if not channel_id or not variable:
+                return
+
+            # Solo procesar las variables de contacto relevantes
+            if variable not in ("__title", "__name"):
+                return
+
+            # Resolver la sesión asociada a este channel_id
+            session = await self.session_store.get_by_channel_id(channel_id)
+            if not session:
+                return
+
+            # Asegurar diccionario channel_vars en la sesión
+            channel_vars = getattr(session, "channel_vars", None)
+            if not isinstance(channel_vars, dict):
+                channel_vars = {}
+                session.channel_vars = channel_vars  # atributo dinámico en CallSession
+
+            # Guardar siempre la variable original (__title / __name)
+            channel_vars[variable] = value
+
+            # Duplicar en claves alternativas que el PromptMetadataInjector ya sabe leer
+            if variable == "__title":
+                # No sobreescribir si ya existen valores previos
+                channel_vars.setdefault("title", value)
+                channel_vars.setdefault("CONTACT_TITLE", value)
+            elif variable == "__name":
+                channel_vars.setdefault("name", value)
+                channel_vars.setdefault("CONTACT_NAME", value)
+
+            # Persistir cambios en SessionStore
+            await self.session_store.upsert_call(session)
+
+            # Log de persistencia para depuración end‑to‑end
+            call_id = getattr(session, "call_id", None) or channel_id
+            saved_title = (
+                channel_vars.get("__title")
+                or channel_vars.get("title")
+                or channel_vars.get("CONTACT_TITLE")
+                or ""
+            )
+            saved_name = (
+                channel_vars.get("__name")
+                or channel_vars.get("name")
+                or channel_vars.get("CONTACT_NAME")
+                or ""
+            )
+
+            logger.debug(
+                "Persisted contact variables to session",
+                call_id=call_id,
+                channel_id=channel_id,
+                variable=variable,
+                value=value,
+                saved_title=saved_title,
+                saved_name=saved_name,
             )
         except Exception as exc:
             logger.error("Error handling ChannelVarset", error=str(exc), exc_info=True)

@@ -102,6 +102,8 @@ providers:
     enabled: true
     voice_agent_base_url: ws://127.0.0.1:8765/v1/agent/converse
     type: full
+  local:
+    enabled: false
 streaming:
   chunk_size_ms: 20
   connection_timeout_ms: 120000
