@@ -444,6 +444,7 @@ class Engine:
             logger.error("Failed to initialize audio gating manager", exc_info=True)
             self.audio_gating_manager = None
         
+        
         # Map our synthesized UUID extension to the real ARI caller channel id
         self.uuidext_to_channel: Dict[str, str] = {}
         # Buffer para ChannelVarset que llega antes de que exista CallSession
