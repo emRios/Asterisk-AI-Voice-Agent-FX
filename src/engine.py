@@ -446,7 +446,9 @@ class Engine:
         
         # Map our synthesized UUID extension to the real ARI caller channel id
         self.uuidext_to_channel: Dict[str, str] = {}
-        # NEW: Caller channel tracking for dual StasisStart handling
+        # Buffer para ChannelVarset que llega antes de que exista CallSession
+        self._pending_channel_vars: Dict[str, Dict[str, Any]] = {}
+        # Caller channel tracking for dual StasisStart handling
         self.pending_local_channels: Dict[str, str] = {}  # local_channel_id -> caller_channel_id
         self.pending_audiosocket_channels: Dict[str, str] = {}  # audiosocket_channel_id -> caller_channel_id
         self._audio_rx_debug: Dict[str, int] = {}
@@ -2465,6 +2467,36 @@ class Engine:
                     # Improve call history readability: store outbound phone as caller_name too.
                     if session.caller_number and (session.caller_name or "").strip() in ("", self._outbound_extension_identity):
                         session.caller_name = f"Outbound {session.caller_number}"
+
+                    # NEW: hidratar contact vars ({title}/{name}) desde el buffer de ChannelVarset
+                    try:
+                        pending = self._pending_channel_vars.pop(caller_channel_id, None)
+                        if isinstance(pending, dict) and pending:
+                            channel_vars = getattr(session, "channel_vars", None)
+                            if not isinstance(channel_vars, dict):
+                                channel_vars = {}
+                                session.channel_vars = channel_vars
+
+                            # No machacar claves existentes si ya las hubiera
+                            for k, v in pending.items():
+                                if k not in channel_vars and v is not None:
+                                    channel_vars[k] = v
+
+                            logger.debug(
+                                "Hydrated session contact vars from pending buffer",
+                                call_id=caller_channel_id,
+                                channel_id=caller_channel_id,
+                                saved_title=channel_vars.get("__title") or channel_vars.get("title") or channel_vars.get("CONTACT_TITLE"),
+                                saved_name=channel_vars.get("__name") or channel_vars.get("name") or channel_vars.get("CONTACT_NAME"),
+                            )
+                    except Exception:
+                        logger.debug(
+                            "Failed to hydrate contact vars from pending buffer",
+                            call_id=caller_channel_id,
+                            exc_info=True,
+                        )
+                    # NEW END
+
                     await self._save_session(session)
                 except Exception:
                     logger.debug("Failed to read outbound channel vars", call_id=caller_channel_id, exc_info=True)
@@ -3788,6 +3820,8 @@ class Engine:
           - __title / __name
           - CONTACT_TITLE / CONTACT_NAME
           - title / name
+
+        Si la CallSession aún no existe, se bufferizan en self._pending_channel_vars.
         """
         try:
             channel = event.get("channel", {}) or {}
@@ -3811,10 +3845,36 @@ class Engine:
             if variable not in ("__title", "__name"):
                 return
 
-            # Resolver la sesión asociada a este channel_id
+            # Intentar resolver la sesión asociada a este channel_id
             session = await self.session_store.get_by_channel_id(channel_id)
+
             if not session:
+                # No hay sesión aún: bufferizar en memoria para hidratarla al crearse
+                buf = self._pending_channel_vars.get(channel_id)
+                if not isinstance(buf, dict):
+                    buf = {}
+                    self._pending_channel_vars[channel_id] = buf
+
+                # Guardar siempre la variable original (__title / __name)
+                buf[variable] = value
+
+                # Duplicar alias que el PromptMetadataInjector sabe leer
+                if variable == "__title":
+                    buf.setdefault("title", value)
+                    buf.setdefault("CONTACT_TITLE", value)
+                elif variable == "__name":
+                    buf.setdefault("name", value)
+                    buf.setdefault("CONTACT_NAME", value)
+
+                logger.debug(
+                    "Buffered contact variable for channel without session",
+                    channel_id=channel_id,
+                    variable=variable,
+                    value=value,
+                )
                 return
+
+            # --- Caso con sesión existente: escribir directamente en session.channel_vars ---
 
             # Asegurar diccionario channel_vars en la sesión
             channel_vars = getattr(session, "channel_vars", None)
