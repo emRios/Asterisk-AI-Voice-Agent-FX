@@ -2406,6 +2406,38 @@ class Engine:
             session.is_outbound = bool(is_outbound)
             session.enhanced_vad_enabled = bool(self.vad_manager)
 
+            # --- NEW: hydrate ARI channel metadata (id/name) into session.channel_vars --
+            try:
+                channel_vars = getattr(session, "channel_vars", None)
+                if not isinstance(channel_vars, dict):
+                    channel_vars = {}
+                    session.channel_vars = channel_vars  # atributo dinámico
+
+                # ARI channel identity (siempre disponible en StasisStart)
+                channel_vars.setdefault("ARI_CHANNEL_ID", caller_channel_id)
+
+                ch_name = (channel or {}).get("name")  # StasisStart event_data.channel.name
+                if ch_name:
+                    channel_vars.setdefault("ARI_CHANNEL_NAME", ch_name)
+                    # opcional si tienes código legacy que espera este nombre:
+                    channel_vars.setdefault("AMI_CHANNEL_NAME", ch_name)
+
+                logger.debug(
+                    "Hydrated ARI channel metadata to session",
+                    call_id=caller_channel_id,
+                    channel_id=caller_channel_id,
+                    channel_name=ch_name,
+                )
+            except Exception:
+                logger.debug(
+                    "Failed to hydrate ARI channel metadata to session",
+                    call_id=caller_channel_id,
+                    exc_info=True,
+                )
+            # --- NEW END ---
+
+            
+
             # EARLY hydration of contact vars ({title}/{name}) from ChannelVarset buffer
             # Esto se ejecuta para inbound y outbound, antes del primer save de la sesión.
             try:
