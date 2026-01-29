@@ -8,9 +8,9 @@ audiosocket:
   port: 9092
 barge_in:
   enabled: true
-  energy_threshold: 30
-  initial_protection_ms: 60
-  min_ms: 80
+  energy_threshold: 1500
+  initial_protection_ms: 300
+  min_ms: 300
   post_tts_end_protection_ms: 200
 config_version: 4
 contexts:
@@ -241,7 +241,7 @@ tools:
       - NEGATIVE_FEEDBACK
     enabled: true
 vad:
-  enhanced_enabled: true
+  enhanced_enabled: false
   fallback_buffer_size: 128000
   fallback_enabled: true
   fallback_interval_ms: 4000
