@@ -2,7 +2,7 @@ name: prospectador_clientes_tc
 provider: deepgram
 
 # Umbral configurable de intención de compra (0–100).
-# Se lee desde .env: PROSPECTADOR_INTENT_THRESHOLD, por defecto 70.
+#  Se lee desde .env: PROSPECTADOR_INTENT_THRESHOLD, por defecto 70.
 intent_threshold: ${PROSPECTADOR_INTENT_THRESHOLD:-70}
 
 greeting_mode: provider           # NO usar "external"
