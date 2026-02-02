@@ -1,39 +1,54 @@
+# src/tools/business/event_notify.py
+
 from __future__ import annotations
 
+import asyncio
+import hashlib
+import json
+from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
-import hashlib
-from uuid import uuid4
 from typing import Any, Dict, Optional
+from urllib import request as urlrequest
+from urllib.error import HTTPError, URLError
+from uuid import uuid4
 
-import redis.asyncio as redis
-from redis.exceptions import ResponseError
 from pydantic import BaseModel, Field, validator
 
 from src.tools.base import Tool, ToolCategory, ToolDefinition, ToolParameter
 from src.tools.context import ToolExecutionContext
 
 
+@dataclass
+class _HttpResponse:
+    status: int
+    text: str
+
+
 class QueueBackend(str, Enum):
     """Enumeration of queue backends."""
+
     REDIS = "redis"
     RABBITMQ = "rabbitmq"
+    HTTP = "http"
+    HTTPS = "https"  # <-- agregar
 
 
 class EventType(str, Enum):
     """Enumeration of event types."""
+
     PURCHASE_INTENT_HIGH = "PURCHASE_INTENT_HIGH"
-    TRANFER_REQUESTED = "TRANSFER_REQUESTED"
+    TRANSFER_REQUESTED = "TRANSFER_REQUESTED"
     HARD_REJECTION = "HARD_REJECTION"
     SOFT_REJECTION = "SOFT_REJECTION"
-    ESCALATION_REQURIDED = "ESCALATION_REQUIRED"
-    SATISFACTION_HIGH = "SATISFACTION_HIGH"
+    ESCALATION_REQUIRED = "ESCALATION_REQUIRED"
     POSITIVE_FEEDBACK = "POSITIVE_FEEDBACK"
     NEGATIVE_FEEDBACK = "NEGATIVE_FEEDBACK"
 
 
 class Priority(str, Enum):
     """Enumeration of event priorities."""
+    CRITICAL = "CRITICAL",
     LOW = "LOW"
     MEDIUM = "MEDIUM"
     HIGH = "HIGH"
@@ -45,13 +60,14 @@ class CallEventPayload(BaseModel):
     Nota: intent_score aquí está 0..1, pero el tool valida 0..100.
     Si planeas usar este modelo en el futuro, alinéalo.
     """
+
     event_id: str = Field(default_factory=lambda: str(uuid4()))
     call_id: str
     timestamp: str = Field(default_factory=lambda: datetime.now().isoformat())
     event_type: EventType
-    intent_score: Optional[float] = Field(None, ge=0.0, le=1.0)
-    product_name: Optional[str]
-    customer_id: Optional[str]
+    intent_score: Optional[float] = Field(None, ge=0.0, le=100.0)
+    product_name: Optional[str] = None
+    customer_id: Optional[str] = None
     notes: Optional[str] = Field(None, max_length=500)
     agent_id: Optional[str] = None
     priority: Priority = Priority.MEDIUM
@@ -76,7 +92,7 @@ class CallEventNotification(Tool):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         # Cache por URL => cliente Redis (pool interno de redis-py).
-        self._redis_clients: Dict[str, redis.Redis] = {}
+        self._redis_clients: Dict[str, Any] = {}
 
     @property
     def definition(self) -> ToolDefinition:
@@ -94,46 +110,50 @@ class CallEventNotification(Tool):
                     type="string",
                     required=True,
                     enum=[
-                        "PURCHASE_INTENT_HIGH", "TRANSFER_REQUESTED",
-                        "HARD_REJECTION", "SOFT_REJECTION",
-                        "ESCALATION_REQUIRED", "POSITIVE_FEEDBACK"
+                        "PURCHASE_INTENT_HIGH",
+                        "TRANSFER_REQUESTED",
+                        "HARD_REJECTION",
+                        "SOFT_REJECTION",
+                        "ESCALATION_REQUIRED",
+                        "POSITIVE_FEEDBACK",
+                        "NEGATIVE_FEEDBACK",
                     ],
-                    description="Tipo de evento detectado."
+                    description="Tipo de evento detectado.",
                 ),
                 ToolParameter(
                     name="intent_score",
                     type="number",
                     required=False,
-                    description="Score de intención (0-100). Requerido para PURCHASE_INTENT_HIGH."
+                    description="Score de intención (0-100). Requerido para PURCHASE_INTENT_HIGH.",
                 ),
                 ToolParameter(
                     name="product_name",
                     type="string",
                     required=False,
-                    description="Nombre del producto/servicio involucrado."
+                    description="Nombre del producto/servicio involucrado.",
                 ),
                 ToolParameter(
                     name="product_id",
                     type="string",
                     required=False,
-                    description="ID del producto/servicio."
+                    description="ID del producto/servicio.",
                 ),
                 ToolParameter(
                     name="notes",
                     type="string",
                     required=False,
-                    description="Justificación breve (1-2 frases)."
+                    description="Justificación breve (1-2 frases).",
                 ),
                 ToolParameter(
                     name="priority",
                     type="string",
                     required=False,
                     enum=["low", "medium", "high", "critical"],
-                    description="Prioridad del evento. Default: medium"
-                )
+                    description="Prioridad del evento. Default: medium",
+                ),
             ],
             requires_channel=False,
-            max_execution_time=10.0
+            max_execution_time=10.0,
         )
 
     def validate_parameters(self, parameters: Dict[str, Any]) -> bool:
@@ -147,7 +167,9 @@ class CallEventNotification(Tool):
         intent_score = parameters.get("intent_score")
 
         if event_type == "PURCHASE_INTENT_HIGH" and intent_score is None:
-            raise ValueError("intent_score es obligatorio cuando event_type=PURCHASE_INTENT_HIGH")
+            raise ValueError(
+                "intent_score es obligatorio cuando event_type=PURCHASE_INTENT_HIGH"
+            )
 
         if intent_score is not None and not (0 <= intent_score <= 100):
             raise ValueError("intent_score debe estar entre 0 y 100")
@@ -165,9 +187,7 @@ class CallEventNotification(Tool):
         return f"evt_{hashlib.md5(content.encode()).hexdigest()[:12]}"
 
     def _build_payload(
-        self,
-        parameters: Dict[str, Any],
-        context: ToolExecutionContext
+        self, parameters: Dict[str, Any], context: ToolExecutionContext
     ) -> Dict[str, Any]:
         """Construye payload canónico."""
         session = None
@@ -176,10 +196,14 @@ class CallEventNotification(Tool):
                 session = context.session_store.get_session(context.call_id)
             except Exception:
                 if getattr(context, "logger", None):
-                    context.logger.warning("No se pudo cargar sesión para enriquecer payload")
+                    context.logger.warning(
+                        "No se pudo cargar sesión para enriquecer payload"
+                    )
 
         payload = {
-            "event_id": self._generate_event_id(context.call_id, parameters["event_type"]),
+            "event_id": self._generate_event_id(
+                context.call_id, parameters["event_type"]
+            ),
             "call_id": context.call_id,
             "caller_id": getattr(session, "caller_id", None),
             "timestamp": datetime.utcnow().isoformat(),
@@ -192,14 +216,77 @@ class CallEventNotification(Tool):
             "agent_id": getattr(context, "agent_id", None),
             "metadata": {
                 "provider": getattr(context, "provider_name", None),
-                "conversation_step": getattr(session, "turn_index", None) if session else None
-            }
+                "conversation_step": (
+                    getattr(session, "turn_index", None) if session else None
+                ),
+            },
         }
 
-        # Limpiar None values
-        return {k: v for k, v in payload.items() if v is not None}
+        # --- Enrich metadata for AMI handoff / conference ---
+        try:
+            # Prefer explicit attributes if you added them to session, else fallback to channel_vars
+            ami_channel_name = None
+            ari_channel_id = context.call_id
+            conf_id = context.call_id
 
-    def _get_redis_client(self, redis_url: str, context: ToolExecutionContext) -> redis.Redis:
+            if session:
+                # 1) Direct attribute hydration (based on your log keys)
+                ami_channel_name = getattr(session, "channel_name", None) or getattr(
+                    session, "ami_channel_name", None
+                )
+
+                # 2) Fallback to channel_vars if you stored it there
+                chvars = getattr(session, "channel_vars", None)
+                if isinstance(chvars, dict):
+                    ami_channel_name = ami_channel_name or chvars.get(
+                        "AMI_CHANNEL_NAME"
+                    )
+                    conf_id = chvars.get("CONF_ID") or conf_id
+                    ari_channel_id = chvars.get("ARI_CHANNEL_ID") or ari_channel_id
+
+            payload["metadata"]["ami_channel_name"] = ami_channel_name
+            payload["metadata"]["conf_id"] = conf_id
+            payload["metadata"]["ari_channel_id"] = ari_channel_id
+
+            # Optional: include bridge_id if you want better observability in the dialer
+            if session and getattr(session, "bridge_id", None):
+                payload["metadata"]["bridge_id"] = getattr(session, "bridge_id")
+
+            # Optional: allow caller to specify which dialplan contexts / agent endpoint to use
+            if parameters.get("agent_endpoint"):
+                payload["metadata"]["agent_endpoint"] = parameters["agent_endpoint"]
+            if parameters.get("customer_conf_context"):
+                payload["metadata"]["customer_conf_context"] = parameters[
+                    "customer_conf_context"
+                ]
+            if parameters.get("agent_conf_context"):
+                payload["metadata"]["agent_conf_context"] = parameters[
+                    "agent_conf_context"
+                ]
+
+        except Exception:
+            if getattr(context, "logger", None):
+                context.logger.warning(
+                    "No se pudo enriquecer metadata AMI/CONF", exc_info=True
+                )
+        # --- END ---
+
+        # Limpiar None values (top-level + metadata)
+        payload = {k: v for k, v in payload.items() if v is not None}
+        if isinstance(payload.get("metadata"), dict):
+            payload["metadata"] = {
+                k: v for k, v in payload["metadata"].items() if v is not None
+            }
+        return payload
+
+    def _get_tool_config(self, context: ToolExecutionContext) -> Dict[str, Any]:
+        gcv = getattr(context, "get_config_value", None)
+        if not callable(gcv):
+            raise RuntimeError("ToolExecutionContext no expone get_config_value() callable")
+        return gcv(f"tools.{self.definition.name}", {}) or {}
+
+
+    def _get_redis_client(self, redis_url: str, context: ToolExecutionContext):
         """
         Manager local del tool: recibe URL y devuelve cliente cacheado.
         No lee config, no decide defaults (eso ocurre antes).
@@ -208,7 +295,10 @@ class CallEventNotification(Tool):
         if client is not None:
             return client
 
-        client = redis.from_url(redis_url, decode_responses=True)
+        # Lazy import: solo si realmente usas backend=redis.
+        import redis.asyncio as redis_asyncio  # type: ignore
+
+        client = redis_asyncio.from_url(redis_url, decode_responses=True)
         self._redis_clients[redis_url] = client
 
         if getattr(context, "logger", None):
@@ -219,23 +309,18 @@ class CallEventNotification(Tool):
     async def _publish_to_redis(
         self,
         payload: Dict[str, Any],
-        context: ToolExecutionContext
+        context: ToolExecutionContext,
+        tool_config: Dict[str, Any],
     ) -> str:
-        """Publica a Redis Streams con idempotencia."""
-        tool_config = context.get_config_value(f"tools.{self.definition.name}", {}) or {}
+        """
+        Publica a Redis Streams con idempotencia.
+        NOTA: requiere redis-py instalado, pero solo se importa si backend=redis.
+        """
+        redis_cfg = tool_config.get("redis", {}) or {}
 
-        redis_url = (
-            tool_config.get("redis", {}).get("url")
-            or "redis://localhost:6379/0"
-        )
-        stream_name = (
-            tool_config.get("redis", {}).get("stream_name")
-            or "call_events"
-        )
-        max_len = (
-            tool_config.get("redis", {}).get("max_stream_length")
-            or 10000
-        )
+        stream_name = redis_cfg.get("stream_name", "call_events")
+        max_len = int(redis_cfg.get("max_stream_length", 10000))
+        redis_url = redis_cfg.get("url") or "redis://127.0.0.1:6379/0"
 
         client = self._get_redis_client(redis_url, context)
 
@@ -245,42 +330,102 @@ class CallEventNotification(Tool):
                 payload,
                 maxlen=max_len,
                 approximate=True,
-                id=payload["event_id"]
+                id=payload["event_id"],
             )
             return str(msg_id)
 
-        except ResponseError as e:
-            # Redis suele devolver: "The ID specified in XADD is equal or smaller..."
-            # No siempre contiene "duplicate", así que tratamos cualquier error de ID como idempotencia.
-            if "ID" in str(e).upper():
+        except Exception as e:
+            # Manejo específico de duplicado (cuando usas id fijo)
+            # redis-py levanta ResponseError; comparamos por texto para evitar hard import del tipo.
+            msg = str(e)
+            if "ID" in msg.upper() and "duplicate" in msg.lower():
                 if getattr(context, "logger", None):
-                    context.logger.info("Evento duplicado ignorado", event_id=payload["event_id"])
+                    context.logger.info(
+                        "Evento duplicado ignorado", event_id=payload["event_id"]
+                    )
                 return "DUPLICATE"
             raise
 
-    async def _publish_to_rabbitmq(self, payload: Dict[str, Any], context: ToolExecutionContext) -> str:
+    # -----------------------------
+    # HTTP backend (tu app.py /ingest)
+    # -----------------------------
+
+    def _sync_http_post_json(
+        self,
+        url: str,
+        body_obj: Dict[str, Any],
+        headers: Dict[str, str],
+        timeout: float,
+    ) -> _HttpResponse:
+        body = json.dumps(body_obj, ensure_ascii=False).encode("utf-8")
+        req_headers = {"Content-Type": "application/json", **(headers or {})}
+
+        req = urlrequest.Request(url=url, data=body, method="POST", headers=req_headers)
+
+        with urlrequest.urlopen(req, timeout=timeout) as resp:
+            text = resp.read().decode("utf-8", errors="replace")
+            return _HttpResponse(status=resp.status, text=text)
+
+    async def _publish_to_http(
+        self,
+        payload: Dict[str, Any],
+        context: ToolExecutionContext,
+        tool_config: Dict[str, Any],
+    ) -> str:
+        http_cfg = tool_config.get("http", {}) or {}
+
+        url = http_cfg.get("url") or "http://127.0.0.1:8000/ingest"
+        timeout = float(http_cfg.get("timeout_secs", 3.0))
+        headers = http_cfg.get("headers", {}) or {}
+        headers = {str(k): str(v) for k, v in headers.items() if v}
+
+        if getattr(context, "logger", None):
+            context.logger.debug("Publicando evento por HTTP", url=url, timeout_secs=timeout)
+
+        try:
+            resp = await asyncio.to_thread(self._sync_http_post_json, url, payload, headers, timeout)
+        except HTTPError as e:
+            detail = ""
+            try:
+                detail = e.read().decode("utf-8", errors="replace")
+            except Exception:
+                detail = str(e)
+            raise RuntimeError(f"HTTPError publicando evento: {e.code} {detail}") from e
+        except URLError as e:
+            raise RuntimeError(f"URLError conectando a {url}: {e}") from e
+
+        try:
+            data = json.loads(resp.text) if resp.text else {}
+        except Exception:
+            data = {}
+
+        return str(data.get("id") or data.get("len") or payload["event_id"])
+
+
+
+    async def _publish_to_rabbitmq(
+        self, payload: Dict[str, Any], context: ToolExecutionContext
+    ) -> str:
         """Placeholder para RabbitMQ (implementar si se necesita)."""
         raise NotImplementedError("RabbitMQ backend not yet implemented")
 
+    # -----------------------------
+    # Execute
+    # -----------------------------
+
     async def execute(
-        self,
-        parameters: Dict[str, Any],
-        context: ToolExecutionContext
+        self, parameters: Dict[str, Any], context: ToolExecutionContext
     ) -> Dict[str, Any]:
-        """
-        Ejecución stateless desde perspectiva de negocio.
-        (El único estado local es cache de clientes Redis por URL.)
-        """
         try:
-            # 1) Validar parámetros
+            # 1) Validación
             self.validate_parameters(parameters)
 
-            # 2) Cargar config del tool (desde context.get_config_value)
-            config = context.get_config_value(f"tools.{self.definition.name}", {}) or {}
-            backend = config.get("queue_backend", "none")
+            # 2) Config de tool
+            tool_config = context.get_config_value(f"tools.{self.definition.name}", {}) or {}
+            backend = str(tool_config.get("queue_backend", "none")).lower()
 
-            # 3) Filtrar eventos no habilitados (si aplica)
-            enabled_types = config.get("enabled_event_types")
+            # 3) Filtrado por allow-list
+            enabled_types = tool_config.get("enabled_event_types")
             if enabled_types and parameters["event_type"] not in enabled_types:
                 msg = f"Evento {parameters['event_type']} no habilitado"
                 if getattr(context, "logger", None):
@@ -293,45 +438,55 @@ class CallEventNotification(Tool):
                     context.logger.warning("Queue backend deshabilitado")
                 return {"status": "ignored", "message": "Backend deshabilitado"}
 
-            # 5) Construir payload
+            # 5) Payload
             payload = self._build_payload(parameters, context)
 
-            # 6) Publicar según backend
-            message_id: Optional[str] = None
-            if backend == "redis":
-                message_id = await self._publish_to_redis(payload, context)
-            elif backend == "rabbitmq":
-                message_id = await self._publish_to_rabbitmq(payload, context)
+            # 6) Publish por backend
+            if backend == QueueBackend.REDIS.value:
+                queue_message_id = await self._publish_to_redis(
+                    payload, context, tool_config
+                )
+            elif backend in (QueueBackend.HTTP.value, QueueBackend.HTTPS.value):
+                queue_message_id = await self._publish_to_http(payload, context, tool_config)
+            elif backend == QueueBackend.RABBITMQ.value:
+                queue_message_id = await self._publish_to_rabbitmq(payload, context)
             else:
                 raise ValueError(f"Backend desconocido: {backend}")
 
-            # 7) Éxito
+            # 7) OK
             if getattr(context, "logger", None):
                 context.logger.info(
                     "Evento publicado",
-                    event_type=payload.get("event_type"),
-                    event_id=payload.get("event_id"),
-                    backend=backend
+                    event_type=payload["event_type"],
+                    event_id=payload["event_id"],
+                    backend=backend,
                 )
 
             return {
                 "status": "success",
                 "message": f"Evento {payload['event_type']} publicado",
                 "event_id": payload["event_id"],
-                "queue_message_id": message_id,
-                "backend": backend
+                "queue_message_id": queue_message_id,
+                "backend": backend,
             }
 
         except ValueError as e:
             if getattr(context, "logger", None):
-                context.logger.warning("Validación fallida", error=str(e), parameters=parameters)
+                context.logger.warning(
+                    "Validación fallida", error=str(e), parameters=parameters
+                )
             return {"status": "error", "message": f"Validación: {str(e)}"}
 
         except Exception as e:
             if getattr(context, "logger", None):
-                context.logger.error("Error ejecutando tool", error=str(e), exc_info=True, parameters=parameters)
+                context.logger.error(
+                    "Error ejecutando tool",
+                    error=str(e),
+                    exc_info=True,
+                    parameters=parameters,
+                )
             return {
                 "status": "error",
                 "message": f"Falló ejecución: {str(e)}",
-                "error_type": type(e).__name__
+                "error_type": type(e).__name__,
             }
