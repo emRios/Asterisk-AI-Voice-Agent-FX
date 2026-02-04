@@ -187,25 +187,19 @@ class CallEventNotification(Tool):
         return f"evt_{hashlib.md5(content.encode()).hexdigest()[:12]}"
 
     def _build_payload(
-        self, parameters: Dict[str, Any], context: ToolExecutionContext
+        self,
+        parameters: Dict[str, Any],
+        context: ToolExecutionContext,
+        session: Optional[Any],
     ) -> Dict[str, Any]:
-        """Construye payload canónico."""
-        session = None
-        if getattr(context, "session_store", None):
-            try:
-                session = context.session_store.get_session(context.call_id)
-            except Exception:
-                if getattr(context, "logger", None):
-                    context.logger.warning(
-                        "No se pudo cargar sesión para enriquecer payload"
-                    )
+        """Construye payload canónico a partir de parámetros + contexto + sesión."""
 
         payload = {
             "event_id": self._generate_event_id(
                 context.call_id, parameters["event_type"]
             ),
             "call_id": context.call_id,
-            "caller_id": getattr(session, "caller_id", None),
+            "caller_id": getattr(session, "caller_id", None) if session else None,
             "timestamp": datetime.utcnow().isoformat(),
             "event_type": parameters["event_type"],
             "intent_score": parameters.get("intent_score"),
@@ -224,25 +218,17 @@ class CallEventNotification(Tool):
 
         # --- Enrich metadata for AMI handoff / conference ---
         try:
-            # Prefer explicit attributes if you added them to session, else fallback to channel_vars
             ami_channel_name = None
             channel_name = None
             ari_channel_id = context.call_id
             conf_id = context.call_id
 
             if session:
-                # 1) Direct attribute hydration (based on your log keys)
-                ami_channel_name = getattr(session, "channel_name", None) or getattr(
-                    session, "ami_channel_name", None
-                )
-
-                # 2) Fallback to channel_vars if you stored it there
                 chvars = getattr(session, "channel_vars", None)
                 if isinstance(chvars, dict):
-                    ami_channel_name = ami_channel_name or chvars.get(
-                        "AMI_CHANNEL_NAME"
-                    )
-                    # Prefer ARI_CHANNEL_NAME and fall back to AMI_CHANNEL_NAME
+                    # Valor registrado previamente en Engine._handle_caller_stasis_start_hybrid
+                    ami_channel_name = chvars.get("AMI_CHANNEL_NAME")
+                    # Prefer ARI_CHANNEL_NAME y caer a AMI_CHANNEL_NAME si no existe
                     channel_name = chvars.get("ARI_CHANNEL_NAME") or chvars.get(
                         "AMI_CHANNEL_NAME"
                     ) or channel_name
@@ -252,7 +238,7 @@ class CallEventNotification(Tool):
             payload["metadata"]["ami_channel_name"] = ami_channel_name
             payload["metadata"]["conf_id"] = conf_id
             payload["metadata"]["ari_channel_id"] = ari_channel_id
-            # Expose the resolved channel_name (e.g., PJSIP/...) at the top level
+            # Exponer el channel_name (PJSIP/...) a nivel raíz
             payload["channel_name"] = channel_name
 
             # Optional: include bridge_id if you want better observability in the dialer
@@ -285,8 +271,7 @@ class CallEventNotification(Tool):
                 k: v for k, v in payload["metadata"].items() if v is not None
             }
         return payload
-
-    def _get_tool_config(self, context: ToolExecutionContext) -> Dict[str, Any]:
+def _get_tool_config(self, context: ToolExecutionContext) -> Dict[str, Any]:
         gcv = getattr(context, "get_config_value", None)
         if not callable(gcv):
             raise RuntimeError("ToolExecutionContext no expone get_config_value() callable")
@@ -445,8 +430,16 @@ class CallEventNotification(Tool):
                     context.logger.warning("Queue backend deshabilitado")
                 return {"status": "ignored", "message": "Backend deshabilitado"}
 
-            # 5) Payload
-            payload = self._build_payload(parameters, context)
+            # 5) Payload: resolver sesión con SessionStore y pasarla al builder
+            session = None
+            try:
+                # Usa la API del contexto, que ya sabe cómo llegar a SessionStore
+                session = await context.get_session()
+            except RuntimeError:
+                # Si no hay sesión disponible, continuamos sin enriquecer con channel_vars
+                session = None
+
+            payload = self._build_payload(parameters, context, session)
 
             # 6) Publish por backend
             if backend == QueueBackend.REDIS.value:
