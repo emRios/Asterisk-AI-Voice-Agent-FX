@@ -226,6 +226,7 @@ class CallEventNotification(Tool):
         try:
             # Prefer explicit attributes if you added them to session, else fallback to channel_vars
             ami_channel_name = None
+            channel_name = None
             ari_channel_id = context.call_id
             conf_id = context.call_id
 
@@ -241,12 +242,18 @@ class CallEventNotification(Tool):
                     ami_channel_name = ami_channel_name or chvars.get(
                         "AMI_CHANNEL_NAME"
                     )
+                    # Prefer ARI_CHANNEL_NAME and fall back to AMI_CHANNEL_NAME
+                    channel_name = chvars.get("ARI_CHANNEL_NAME") or chvars.get(
+                        "AMI_CHANNEL_NAME"
+                    ) or channel_name
                     conf_id = chvars.get("CONF_ID") or conf_id
                     ari_channel_id = chvars.get("ARI_CHANNEL_ID") or ari_channel_id
 
             payload["metadata"]["ami_channel_name"] = ami_channel_name
             payload["metadata"]["conf_id"] = conf_id
             payload["metadata"]["ari_channel_id"] = ari_channel_id
+            # Expose the resolved channel_name (e.g., PJSIP/...) at the top level
+            payload["channel_name"] = channel_name
 
             # Optional: include bridge_id if you want better observability in the dialer
             if session and getattr(session, "bridge_id", None):
