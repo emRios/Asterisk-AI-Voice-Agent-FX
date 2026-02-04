@@ -219,16 +219,14 @@ tools:
     # Call event notification tool - business events to Redis Streams
   CallEventNotification:
     # Backend de cola a utilizar por la tool
-    queue_backend: redis
+    queue_backend: http
 
     # Configuración específica de Redis para esta tool
-    redis:
+    http:
       # URL de conexión a Redis; se puede sobreescribir con la variable de entorno REDIS_URL
-      url: ${REDIS_URL:-redis://127.0.0.1:6379/0}
-      # Nombre del stream donde se publicarán los eventos de llamada
-      stream_name: call_events
-      # Longitud máxima del stream antes de recortar (estrategia aproximada)
-      max_stream_length: 10000
+      url: ${CALL_EVENT_HTTP_URL:-http://172.31.7.92:8080/ingest}
+      timeout_secs: 5
+    enabled: true
 
     # Tipos de eventos que esta tool está autorizada a publicar
     enabled_event_types:
