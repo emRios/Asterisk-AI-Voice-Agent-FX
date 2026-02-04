@@ -271,7 +271,8 @@ class CallEventNotification(Tool):
                 k: v for k, v in payload["metadata"].items() if v is not None
             }
         return payload
-def _get_tool_config(self, context: ToolExecutionContext) -> Dict[str, Any]:
+
+    def _get_tool_config(self, context: ToolExecutionContext) -> Dict[str, Any]:
         gcv = getattr(context, "get_config_value", None)
         if not callable(gcv):
             raise RuntimeError("ToolExecutionContext no expone get_config_value() callable")
