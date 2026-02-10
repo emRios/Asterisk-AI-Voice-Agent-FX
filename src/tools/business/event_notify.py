@@ -235,6 +235,16 @@ class CallEventNotification(Tool):
                     conf_id = chvars.get("CONF_ID") or conf_id
                     ari_channel_id = chvars.get("ARI_CHANNEL_ID") or ari_channel_id
 
+                    # REDIS_CALL_ID (correlation id desde AMI/dialplan)
+                    redis_call_id = (
+                        chvars.get("__REDIS_CALL_ID") 
+                        or chvars.get("REDIS_CALL_ID")
+                        or chvars.get("redis_call_id")
+                    )
+                    if redis_call_id:
+                        # opción A: en metadata (trazabilidad)
+                        payload["metadata"]["redis_call_id"] = redis_call_id
+
             payload["metadata"]["ami_channel_name"] = ami_channel_name
             payload["metadata"]["conf_id"] = conf_id
             payload["metadata"]["ari_channel_id"] = ari_channel_id

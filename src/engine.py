@@ -3905,7 +3905,7 @@ class Engine:
                 return
 
             # Solo procesar las variables de contacto relevantes
-            if variable not in ("__title", "__name"):
+            if variable not in ("__title", "__name", "__REDIS_CALL_ID"):
                 return
 
             # Intentar resolver la sesión asociada a este channel_id
@@ -3928,6 +3928,9 @@ class Engine:
                 elif variable == "__name":
                     buf.setdefault("name", value)
                     buf.setdefault("CONTACT_NAME", value)
+                elif variable == "__REDIS_CALL_ID":
+                    buf.setdefault("REDIS_CALL_ID", value)
+                    buf.setdefault("redis_call_id", value)
 
                 logger.debug(
                     "Buffered contact variable for channel without session",
@@ -3956,6 +3959,10 @@ class Engine:
             elif variable == "__name":
                 channel_vars.setdefault("name", value)
                 channel_vars.setdefault("CONTACT_NAME", value)
+            elif variable == "__REDIS_CALL_ID":
+                channel_vars.setdefault("REDIS_CALL_ID", value)
+                channel_vars.setdefault("redis_call_id", value)
+                    
 
             # Persistir cambios en SessionStore
             await self.session_store.upsert_call(session)
