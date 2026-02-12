@@ -37,6 +37,7 @@ class QueueBackend(str, Enum):
 class EventType(str, Enum):
     """Enumeration of event types."""
 
+    CALL_STARTED = "CALL_STARTED"
     PURCHASE_INTENT_HIGH = "PURCHASE_INTENT_HIGH"
     TRANSFER_REQUESTED = "TRANSFER_REQUESTED"
     HARD_REJECTION = "HARD_REJECTION"
@@ -369,6 +370,40 @@ class CallEventNotification(Tool):
             text = resp.read().decode("utf-8", errors="replace")
             return _HttpResponse(status=resp.status, text=text)
 
+    # async def _publish_to_http(
+    #     self,
+    #     payload: Dict[str, Any],
+    #     context: ToolExecutionContext,
+    #     tool_config: Dict[str, Any],
+    # ) -> str:
+    #     http_cfg = tool_config.get("http", {}) or {}
+
+    #     url = http_cfg.get("url") or "http://127.0.0.1:8000/ingest"
+    #     timeout = float(http_cfg.get("timeout_secs", 3.0))
+    #     headers = http_cfg.get("headers", {}) or {}
+    #     headers = {str(k): str(v) for k, v in headers.items() if v}
+
+    #     if getattr(context, "logger", None):
+    #         context.logger.debug("Publicando evento por HTTP", url=url, timeout_secs=timeout)
+
+    #     try:
+    #         resp = await asyncio.to_thread(self._sync_http_post_json, url, payload, headers, timeout)
+    #     except HTTPError as e:
+    #         detail = ""
+    #         try:
+    #             detail = e.read().decode("utf-8", errors="replace")
+    #         except Exception:
+    #             detail = str(e)
+    #         raise RuntimeError(f"HTTPError publicando evento: {e.code} {detail}") from e
+    #     except URLError as e:
+    #         raise RuntimeError(f"URLError conectando a {url}: {e}") from e
+
+    #     try:
+    #         data = json.loads(resp.text) if resp.text else {}
+    #     except Exception:
+    #         data = {}
+
+    #     return str(data.get("id") or data.get("len") or payload["event_id"])
     async def _publish_to_http(
         self,
         payload: Dict[str, Any],
@@ -377,13 +412,34 @@ class CallEventNotification(Tool):
     ) -> str:
         http_cfg = tool_config.get("http", {}) or {}
 
-        url = http_cfg.get("url") or "http://127.0.0.1:8000/ingest"
+        # --- NUEVO: resolver endpoint por event_type ---
+        event_type = str(payload.get("event_type") or "")
+
+        url_map = http_cfg.get("urls_by_event_type") or {}
+        if isinstance(url_map, dict):
+            # normaliza keys/values a string y filtra vacíos
+            url_map = {str(k): str(v) for k, v in url_map.items() if v}
+        else:
+            url_map = {}
+
+        # Orden de resolución:
+        # 1) urls_by_event_type[event_type]
+        # 2) http.url (fallback global)
+        # 3) default hardcoded
+        url = url_map.get(event_type) or http_cfg.get("url") or "http://127.0.0.1:8000/ingest"
+        # --- FIN NUEVO ---
+
         timeout = float(http_cfg.get("timeout_secs", 3.0))
         headers = http_cfg.get("headers", {}) or {}
         headers = {str(k): str(v) for k, v in headers.items() if v}
 
         if getattr(context, "logger", None):
-            context.logger.debug("Publicando evento por HTTP", url=url, timeout_secs=timeout)
+            context.logger.debug(
+                "Publicando evento por HTTP",
+                event_type=event_type,
+                url=url,
+                timeout_secs=timeout,
+            )
 
         try:
             resp = await asyncio.to_thread(self._sync_http_post_json, url, payload, headers, timeout)
@@ -403,7 +459,6 @@ class CallEventNotification(Tool):
             data = {}
 
         return str(data.get("id") or data.get("len") or payload["event_id"])
-
 
 
     async def _publish_to_rabbitmq(
