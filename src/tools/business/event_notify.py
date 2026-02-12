@@ -37,9 +37,9 @@ class QueueBackend(str, Enum):
 class EventType(str, Enum):
     """Enumeration of event types."""
 
-    CALL_STARTED = "CALL_STARTED"
     PURCHASE_INTENT_HIGH = "PURCHASE_INTENT_HIGH"
     TRANSFER_REQUESTED = "TRANSFER_REQUESTED"
+    CALL_STARTED = "CALL_STARTED"
     HARD_REJECTION = "HARD_REJECTION"
     SOFT_REJECTION = "SOFT_REJECTION"
     ESCALATION_REQUIRED = "ESCALATION_REQUIRED"
@@ -113,6 +113,7 @@ class CallEventNotification(Tool):
                     enum=[
                         "PURCHASE_INTENT_HIGH",
                         "TRANSFER_REQUESTED",
+                        "CALL_STARTED",
                         "HARD_REJECTION",
                         "SOFT_REJECTION",
                         "ESCALATION_REQUIRED",
