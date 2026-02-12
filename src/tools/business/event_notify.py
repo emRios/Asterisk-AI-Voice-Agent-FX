@@ -450,6 +450,18 @@ class CallEventNotification(Tool):
                 detail = e.read().decode("utf-8", errors="replace")
             except Exception:
                 detail = str(e)
+
+            if getattr(context, "logger", None):
+                context.logger.error(
+                    "HTTPError publicando evento",
+                    event_type=event_type,
+                    url=url,
+                    status_code=getattr(e, "code", None),
+                    detail=detail,
+                    call_id=payload.get("call_id"),
+                    event_id=payload.get("event_id"),
+                )
+
             raise RuntimeError(f"HTTPError publicando evento: {e.code} {detail}") from e
         except URLError as e:
             raise RuntimeError(f"URLError conectando a {url}: {e}") from e
