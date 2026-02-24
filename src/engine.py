@@ -2998,6 +2998,7 @@ class Engine:
         handlers = {
             'transfer': self._handle_transfer_answered,
             'warm-transfer': self._handle_transfer_answered,  # Warm transfer uses same handler
+            'add-participant': self._handle_add_participant_answered,
             'attended-transfer': self._handle_attended_transfer_answered,
             'transfer-failed': self._handle_transfer_failed,
             'voicemail-complete': self._handle_voicemail_complete,
@@ -3118,6 +3119,50 @@ class Engine:
             logger.error(f"🔀 TRANSFER - Failed to bridge: {e}",
                         channel_id=channel_id)
             await self.ari_client.hangup_channel(channel_id)
+
+    async def _handle_add_participant_answered(self, channel_id: str, args: list):
+        """
+        Handle participant leg answered without tearing down AI media.
+        Args: ['add-participant', caller_id, target_extension]
+        """
+        caller_id = args[1]
+        target = args[2] if len(args) > 2 else 'unknown'
+
+        logger.info(
+            "🔀 ADD PARTICIPANT ANSWERED - Joining participant while AI remains active",
+            channel_id=channel_id,
+            caller_id=caller_id,
+            target=target,
+        )
+
+        session = await self.session_store.get_by_call_id(caller_id)
+        if not session:
+            logger.error("🔀 ADD PARTICIPANT - Session not found", caller_id=caller_id)
+            await self.ari_client.hangup_channel(channel_id)
+            return
+
+        joined = await self.ari_client.add_channel_to_bridge(session.bridge_id, channel_id)
+        if not joined:
+            logger.error(
+                "🔀 ADD PARTICIPANT - Failed to bridge participant",
+                channel_id=channel_id,
+                bridge_id=session.bridge_id,
+                target=target,
+            )
+            await self.ari_client.hangup_channel(channel_id)
+            return
+
+        if session.current_action:
+            session.current_action['answered'] = True
+            session.current_action['channel_id'] = channel_id
+        await self.session_store.upsert_call(session)
+
+        logger.info(
+            "✅ ADD PARTICIPANT COMPLETE - Participant bridged and AI preserved",
+            channel_id=channel_id,
+            bridge_id=session.bridge_id,
+            target=target,
+        )
 
     def register_attended_transfer_agent_channel(self, call_id: str, agent_channel_id: str) -> None:
         """Register an attended transfer agent channel to resolve DTMF events back to a call."""

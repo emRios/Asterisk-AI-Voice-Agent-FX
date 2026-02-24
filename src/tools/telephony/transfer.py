@@ -423,7 +423,7 @@ class TransferCallTool(Tool):
         """
         # DIRECT SIP ENDPOINT ORIGINATION (no Local channels)
         # Use dial_string directly (e.g., "SIP/6000") for clean audio path
-        # When answered, SIP channel enters Stasis directly with warm-transfer args
+        # Action for Stasis args is derived from configured action_type (compat with legacy transfer)
         
         # Get AI identity from config for CallerID (prevents "anonymous" calls)
         ai_name = context.get_config_value('tools.ai_identity.name', 'AI Agent')
@@ -437,6 +437,10 @@ class TransferCallTool(Tool):
                    caller_id=caller_id)
         
         try:
+            normalized_action_type = str(action_type or "transfer").strip().lower()
+            stasis_action = (
+                "warm-transfer" if normalized_action_type in {"transfer", "warm-transfer"} else normalized_action_type
+            )
             result = await context.ari_client.send_command(
                 method="POST",
                 resource="channels",
@@ -445,7 +449,7 @@ class TransferCallTool(Tool):
                     "callerId": caller_id,  # Set CallerID to AI Agent identity
                     "timeout": timeout,
                     "variables": {
-                        "AGENT_ACTION": action_type,
+                        "AGENT_ACTION": stasis_action,
                         "AGENT_CALL_ID": session.call_id,
                         "AGENT_BRIDGE_ID": session.bridge_id,
                         "AGENT_TARGET": target,
@@ -457,7 +461,7 @@ class TransferCallTool(Tool):
                 params={
                     # SIP channel enters Stasis on answer with these args
                     "app": "asterisk-ai-voice-agent",
-                    "appArgs": f"warm-transfer,{session.call_id},{target}"
+                    "appArgs": f"{stasis_action},{session.call_id},{target}"
                 }
             )
             
