@@ -73,6 +73,20 @@ class SessionStore:
         """Get session by any channel_id (caller, local, external_media)."""
         async with self._lock:
             return self._sessions_by_channel_id.get(channel_id)
+
+    async def unindex_channel(self, channel_id: str) -> bool:
+        """
+        Remove a channel_id lookup entry without deleting the call session.
+
+        Useful when AI media channels are detached from a live call: we want
+        ChannelDestroyed/StasisEnd on those channels to be ignored by call cleanup.
+        """
+        async with self._lock:
+            existed = channel_id in self._sessions_by_channel_id
+            if existed:
+                self._sessions_by_channel_id.pop(channel_id, None)
+                logger.debug("Channel mapping removed", channel_id=channel_id)
+            return existed
     
     async def remove_call(self, call_id: str) -> Optional[CallSession]:
         """Remove a call session and all its channel mappings."""

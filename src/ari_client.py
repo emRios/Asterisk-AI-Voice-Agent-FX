@@ -461,7 +461,7 @@ class ARIClient:
             return False
 
 
-    async def create_bridge(self, bridge_type: str = "mixing") -> Optional[str]:
+    async def create_bridge(self, bridge_type: str = "mixing,proxy_media") -> Optional[str]:
         """Create a new bridge for channel mixing."""
         try:
             response = await self.send_command(
@@ -555,46 +555,245 @@ class ARIClient:
             logger.error("Error starting ARI channel recording", channel_id=channel_id, exc_info=True)
             return False
 
-    async def add_channel_to_bridge(self, bridge_id: str, channel_id: str) -> bool:
+    async def add_channel_to_bridge(
+        self,
+        bridge_id: str,
+        channel_id: str,
+        mute: bool = False,
+        role: Optional[str] = None,
+        absorb_dtmf: Optional[bool] = None,
+    ) -> bool:
         """Add a channel to a bridge."""
+        params: Dict[str, Any] = {
+            "channel": str(channel_id),
+            "mute": "true" if bool(mute) else "false",
+        }
+        if role:
+            params["role"] = str(role)
+        if absorb_dtmf is not None:
+            params["absorbDTMF"] = "true" if bool(absorb_dtmf) else "false"
+
         try:
             response = await self.send_command(
                 "POST",
                 f"bridges/{bridge_id}/addChannel",
-                data={"channel": channel_id}
+                params=params,
             )
 
             # send_command returns {"status": 204} for No Content on success
             status = response.get("status") if isinstance(response, dict) else None
             if status is not None:
-                if 200 <= int(status) < 300:
-                    logger.info("Channel added to bridge", bridge_id=bridge_id, channel_id=channel_id, status=status)
+                status_code = int(status)
+                if 200 <= status_code < 300:
+                    logger.info(
+                        "Channel added to bridge",
+                        bridge_id=bridge_id,
+                        channel_id=channel_id,
+                        mute=bool(mute),
+                        role=role,
+                        absorbDTMF=absorb_dtmf,
+                        status=status_code,
+                    )
                     return True
                 # Idempotency: Asterisk can return a conflict if the channel is already in the bridge.
                 # Treat this as success to make attach retries safe.
                 reason = str(response.get("reason", "") or "")
-                if int(status) in (409, 422) and ("already" in reason.lower()) and ("bridge" in reason.lower()):
+                if status_code in (409, 422) and ("already" in reason.lower()) and ("bridge" in reason.lower()):
                     logger.info(
                         "Channel already in bridge (treated as success)",
                         bridge_id=bridge_id,
                         channel_id=channel_id,
-                        status=status,
+                        mute=bool(mute),
+                        role=role,
+                        absorbDTMF=absorb_dtmf,
+                        status=status_code,
                     )
                     return True
                 else:
-                    logger.error("Failed to add channel to bridge", bridge_id=bridge_id, channel_id=channel_id, status=status, response=response)
+                    logger.error(
+                        "Failed to add channel to bridge",
+                        bridge_id=bridge_id,
+                        channel_id=channel_id,
+                        mute=bool(mute),
+                        role=role,
+                        absorbDTMF=absorb_dtmf,
+                        status=status_code,
+                        response=response,
+                    )
                     return False
 
             # If no explicit status was returned, assume success and log response for traceability
-            logger.info("Channel add-to-bridge response without status; assuming success", bridge_id=bridge_id, channel_id=channel_id, response=response)
+            logger.info(
+                "Channel add-to-bridge response without status; assuming success",
+                bridge_id=bridge_id,
+                channel_id=channel_id,
+                mute=bool(mute),
+                role=role,
+                absorbDTMF=absorb_dtmf,
+                status="unknown",
+                response=response,
+            )
             return True
 
         except Exception as e:
-            logger.error("Error adding channel to bridge", 
-                        bridge_id=bridge_id, 
-                        channel_id=channel_id, 
-                        error=str(e))
+            logger.error(
+                "Error adding channel to bridge",
+                bridge_id=bridge_id,
+                channel_id=channel_id,
+                mute=bool(mute),
+                role=role,
+                absorbDTMF=absorb_dtmf,
+                status="exception",
+                error=str(e),
+            )
             return False
+
+    async def mute_channel(
+        self,
+        channel_id: str,
+        direction: str = "in",
+        retries: int = 4,
+        sleep_s: float = 0.15,
+    ) -> bool:
+        """Mute a channel with short retries for transient ARI states."""
+        return await self._set_channel_mute_state(
+            channel_id=channel_id,
+            direction=direction,
+            muted=True,
+            retries=retries,
+            sleep_s=sleep_s,
+        )
+
+    async def unmute_channel(
+        self,
+        channel_id: str,
+        direction: str = "in",
+        retries: int = 4,
+        sleep_s: float = 0.15,
+    ) -> bool:
+        """Unmute a channel with short retries for transient ARI states."""
+        return await self._set_channel_mute_state(
+            channel_id=channel_id,
+            direction=direction,
+            muted=False,
+            retries=retries,
+            sleep_s=sleep_s,
+        )
+
+    async def _set_channel_mute_state(
+        self,
+        *,
+        channel_id: str,
+        direction: str,
+        muted: bool,
+        retries: int,
+        sleep_s: float,
+    ) -> bool:
+        action = "mute" if muted else "unmute"
+        method = "POST" if muted else "DELETE"
+        attempts = max(1, int(retries))
+        base_sleep = max(0.0, float(sleep_s))
+        params = {"direction": str(direction)}
+
+        for attempt in range(1, attempts + 1):
+            try:
+                response = await self.send_command(
+                    method=method,
+                    resource=f"channels/{channel_id}/mute",
+                    params=params,
+                )
+            except Exception:
+                logger.error(
+                    "ARI channel mute command raised exception",
+                    action=action,
+                    channel_id=channel_id,
+                    direction=direction,
+                    attempt=attempt,
+                    retries=attempts,
+                    exc_info=True,
+                )
+                raise
+
+            raw_status = response.get("status") if isinstance(response, dict) else None
+            status: Optional[int] = None
+            if raw_status is not None:
+                try:
+                    status = int(raw_status)
+                except (TypeError, ValueError):
+                    status = None
+
+            if status is None:
+                logger.info(
+                    "ARI channel mute command accepted without explicit status",
+                    action=action,
+                    channel_id=channel_id,
+                    direction=direction,
+                    status="unknown",
+                    attempt=attempt,
+                    retries=attempts,
+                    response=response,
+                )
+                return True
+
+            if 200 <= status < 300:
+                logger.info(
+                    "ARI channel mute command succeeded",
+                    action=action,
+                    channel_id=channel_id,
+                    direction=direction,
+                    status=status,
+                    attempt=attempt,
+                    retries=attempts,
+                )
+                return True
+
+            reason = str(response.get("reason", "") or "")
+            is_transient = status in (409, 412)
+            if is_transient and attempt < attempts:
+                delay = base_sleep * attempt
+                logger.warning(
+                    "ARI channel mute command transient failure; retrying",
+                    action=action,
+                    channel_id=channel_id,
+                    direction=direction,
+                    status=status,
+                    reason=reason,
+                    attempt=attempt,
+                    retries=attempts,
+                    sleep_s=delay,
+                )
+                if delay > 0:
+                    await asyncio.sleep(delay)
+                continue
+
+            if is_transient:
+                logger.error(
+                    "ARI channel mute command failed after retries",
+                    action=action,
+                    channel_id=channel_id,
+                    direction=direction,
+                    status=status,
+                    reason=reason,
+                    attempt=attempt,
+                    retries=attempts,
+                )
+                return False
+
+            logger.error(
+                "ARI channel mute command failed with non-transient status",
+                action=action,
+                channel_id=channel_id,
+                direction=direction,
+                status=status,
+                reason=reason,
+                attempt=attempt,
+                retries=attempts,
+            )
+            raise RuntimeError(
+                f"Failed to {action} channel {channel_id} direction={direction} with status {status}: {reason}"
+            )
+
+        return False
 
 
     async def play_audio_response(self, channel_id: str, audio_data: bytes):

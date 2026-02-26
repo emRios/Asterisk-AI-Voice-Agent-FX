@@ -16,7 +16,7 @@ import sqlite3
 from collections import deque
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
-from typing import Dict, Any, Optional, List, Set, Tuple, Callable
+from typing import Dict, Any, Optional, List, Set, Tuple, Callable, Literal
 
 # Simple audio capture system removed - not used in production
 
@@ -2245,6 +2245,18 @@ class Engine:
                 )
                 asyncio.create_task(self._retry_attach_external_media_channel(external_media_id))
                 return
+
+            if bool(getattr(session, "ai_detached", False)):
+                logger.info(
+                    "Ignoring ExternalMedia StasisStart for AI-detached call",
+                    call_id=session.call_id,
+                    external_media_id=external_media_id,
+                )
+                try:
+                    await self.ari_client.hangup_channel(external_media_id)
+                except Exception:
+                    logger.debug("Failed to hang up detached ExternalMedia channel", external_media_id=external_media_id, exc_info=True)
+                return
             
             caller_channel_id = session.caller_channel_id
             
@@ -2303,6 +2315,18 @@ class Engine:
                             break
 
                 if session and session.bridge_id:
+                    if bool(getattr(session, "ai_detached", False)):
+                        logger.info(
+                            "Stopping ExternalMedia attach retry for AI-detached call",
+                            call_id=session.call_id,
+                            external_media_id=external_media_id,
+                            attempt=attempt,
+                        )
+                        try:
+                            await self.ari_client.hangup_channel(external_media_id)
+                        except Exception:
+                            logger.debug("Failed to hang up detached ExternalMedia channel during retry", external_media_id=external_media_id, exc_info=True)
+                        return
                     success = await self.ari_client.add_channel_to_bridge(session.bridge_id, external_media_id)
                     if success:
                         session.external_media_id = external_media_id
@@ -2370,14 +2394,16 @@ class Engine:
             else:
                 logger.info("🎯 HYBRID ARI - Step 1: Skipping answer (outbound)", channel_id=caller_channel_id)
             
-            # Create bridge immediately (use default bridge_type to prevent simple_bridge optimization)
+            # Create hardened bridge type to avoid simple_bridge packet-sharing churn.
             logger.info("🎯 HYBRID ARI - Step 2: Creating bridge immediately", channel_id=caller_channel_id)
-            bridge_id = await self.ari_client.create_bridge()  # Uses default: mixing,dtmf_events,proxy_media
+            bridge_type = "mixing,proxy_media"
+            bridge_id = await self.ari_client.create_bridge(bridge_type=bridge_type)
             if not bridge_id:
                 raise RuntimeError("Failed to create mixing bridge")
             logger.info("🎯 HYBRID ARI - Step 2: ✅ Bridge created", 
                        channel_id=caller_channel_id, 
-                       bridge_id=bridge_id)
+                       bridge_id=bridge_id,
+                       bridge_type=bridge_type)
             
             # Add caller to bridge
             logger.info("🎯 HYBRID ARI - Step 3: Adding caller to bridge", 
@@ -2786,6 +2812,15 @@ class Engine:
             await self.ari_client.hangup_channel(local_channel_id)
             return
         
+        if bool(getattr(session, "ai_detached", False)):
+            logger.info(
+                "Local channel arrived for AI-detached call; hanging up helper leg",
+                call_id=caller_channel_id,
+                local_channel_id=local_channel_id,
+            )
+            await self.ari_client.hangup_channel(local_channel_id)
+            return
+
         bridge_id = session.bridge_id
         
         try:
@@ -2881,6 +2916,15 @@ class Engine:
                 "🎯 HYBRID ARI - Session missing for AudioSocket channel",
                 audiosocket_channel_id=audiosocket_channel_id,
                 caller_channel_id=caller_channel_id,
+            )
+            await self.ari_client.hangup_channel(audiosocket_channel_id)
+            return
+
+        if bool(getattr(session, "ai_detached", False)):
+            logger.info(
+                "AudioSocket channel arrived for AI-detached call; hanging up helper leg",
+                call_id=caller_channel_id,
+                audiosocket_channel_id=audiosocket_channel_id,
             )
             await self.ari_client.hangup_channel(audiosocket_channel_id)
             return
@@ -3125,6 +3169,8 @@ class Engine:
         Handle participant leg answered without tearing down AI media.
         Args: ['add-participant', caller_id, target_extension]
         """
+        return await self._handle_add_participant_answered_v2(channel_id, args)
+
         caller_id = args[1]
         target = args[2] if len(args) > 2 else 'unknown'
 
@@ -3163,6 +3209,467 @@ class Engine:
             bridge_id=session.bridge_id,
             target=target,
         )
+
+    def _normalize_human_audio_mode(self, mode: Optional[str]) -> str:
+        normalized = str(mode or "").strip().lower()
+        return normalized if normalized in {"listen", "talk"} else "talk"
+
+    def _extract_add_participant_mode(self, args: list) -> Tuple[str, Optional[str]]:
+        requested_mode: Optional[str] = None
+        for token in args[3:]:
+            token_text = str(token or "").strip()
+            if not token_text:
+                continue
+            if token_text.lower().startswith("mode="):
+                requested_mode = token_text.split("=", 1)[1].strip().lower()
+                break
+        return self._normalize_human_audio_mode(requested_mode), requested_mode
+
+    async def _join_channel_to_bridge_with_retry(
+        self,
+        *,
+        call_id: str,
+        bridge_id: str,
+        channel_id: str,
+        mute: bool = False,
+        role: Optional[str] = None,
+        absorb_dtmf: Optional[bool] = None,
+        retries: int = 3,
+        base_sleep_s: float = 0.2,
+    ) -> bool:
+        attempts = max(1, int(retries))
+        sleep_base = max(0.0, float(base_sleep_s))
+
+        for attempt in range(1, attempts + 1):
+            joined = await self.ari_client.add_channel_to_bridge(
+                bridge_id=bridge_id,
+                channel_id=channel_id,
+                mute=mute,
+                role=role,
+                absorb_dtmf=absorb_dtmf,
+            )
+            if joined:
+                logger.info(
+                    "Add participant join succeeded",
+                    call_id=call_id,
+                    bridge_id=bridge_id,
+                    channel_id=channel_id,
+                    attempt=attempt,
+                    retries=attempts,
+                )
+                return True
+
+            if attempt < attempts:
+                delay = sleep_base * attempt
+                logger.warning(
+                    "Add participant join failed; retrying",
+                    call_id=call_id,
+                    bridge_id=bridge_id,
+                    channel_id=channel_id,
+                    attempt=attempt,
+                    retries=attempts,
+                    sleep_s=delay,
+                )
+                if delay > 0:
+                    await asyncio.sleep(delay)
+
+        logger.error(
+            "Add participant join failed after retries",
+            call_id=call_id,
+            bridge_id=bridge_id,
+            channel_id=channel_id,
+            retries=attempts,
+        )
+        return False
+
+    async def _handle_add_participant_answered_v2(self, channel_id: str, args: list) -> None:
+        if len(args) < 2:
+            logger.error(
+                "ADD PARTICIPANT - Insufficient args",
+                channel_id=channel_id,
+                args=args,
+            )
+            await self.ari_client.hangup_channel(channel_id)
+            return
+
+        call_id = str(args[1])
+        target = args[2] if len(args) > 2 else "unknown"
+        mode, requested_mode = self._extract_add_participant_mode(args)
+        if requested_mode and requested_mode not in {"listen", "talk"}:
+            logger.warning(
+                "ADD PARTICIPANT - Invalid mode received; defaulting to talk",
+                call_id=call_id,
+                channel_id=channel_id,
+                requested_mode=requested_mode,
+                effective_mode=mode,
+            )
+
+        logger.info(
+            "ADD PARTICIPANT ANSWERED - Joining participant while AI remains active",
+            call_id=call_id,
+            channel_id=channel_id,
+            target=target,
+            mode=mode,
+        )
+
+        session = await self.session_store.get_by_call_id(call_id)
+        if not session:
+            logger.error("ADD PARTICIPANT - Session not found", call_id=call_id, channel_id=channel_id)
+            await self.ari_client.hangup_channel(channel_id)
+            return
+
+        bridge_id = getattr(session, "bridge_id", None)
+        if not bridge_id:
+            logger.error(
+                "ADD PARTICIPANT - Session bridge missing",
+                call_id=call_id,
+                channel_id=channel_id,
+            )
+            await self.ari_client.hangup_channel(channel_id)
+            return
+
+        joined = await self._join_channel_to_bridge_with_retry(
+            call_id=call_id,
+            bridge_id=bridge_id,
+            channel_id=channel_id,
+            mute=False,
+            role="human",
+            retries=3,
+            base_sleep_s=0.2,
+        )
+        if not joined:
+            await self.ari_client.hangup_channel(channel_id)
+            return
+
+        # Fail-safe: always unmute inbound audio after join to enforce default talk mode.
+        try:
+            unmuted = await self.ari_client.unmute_channel(
+                channel_id=channel_id,
+                direction="in",
+                retries=4,
+                sleep_s=0.15,
+            )
+            if not unmuted:
+                logger.warning(
+                    "ADD PARTICIPANT - Fail-safe unmute did not succeed after retries",
+                    call_id=call_id,
+                    bridge_id=bridge_id,
+                    channel_id=channel_id,
+                    mode=mode,
+                )
+        except Exception:
+            logger.error(
+                "ADD PARTICIPANT - Fail-safe unmute raised exception",
+                call_id=call_id,
+                bridge_id=bridge_id,
+                channel_id=channel_id,
+                mode=mode,
+                exc_info=True,
+            )
+
+        if mode == "listen":
+            try:
+                muted = await self.ari_client.mute_channel(
+                    channel_id=channel_id,
+                    direction="in",
+                    retries=4,
+                    sleep_s=0.15,
+                )
+                if not muted:
+                    logger.warning(
+                        "ADD PARTICIPANT - listen mode mute did not succeed after retries",
+                        call_id=call_id,
+                        bridge_id=bridge_id,
+                        channel_id=channel_id,
+                        mode=mode,
+                    )
+            except Exception:
+                logger.error(
+                    "ADD PARTICIPANT - listen mode mute raised exception",
+                    call_id=call_id,
+                    bridge_id=bridge_id,
+                    channel_id=channel_id,
+                    mode=mode,
+                    exc_info=True,
+                )
+
+        session.human_channel_id = channel_id
+        session.human_audio_mode = mode
+        if session.current_action:
+            session.current_action["answered"] = True
+            session.current_action["channel_id"] = channel_id
+        await self._save_session(session)
+
+        logger.info(
+            "ADD PARTICIPANT COMPLETE - Participant bridged and AI preserved",
+            call_id=call_id,
+            bridge_id=bridge_id,
+            channel_id=channel_id,
+            target=target,
+            mode=mode,
+        )
+
+    async def set_human_audio_mode(self, call_id: str, mode: Literal["listen", "talk"]) -> Dict[str, Any]:
+        requested_mode = str(mode or "").strip().lower()
+        if requested_mode not in {"listen", "talk"}:
+            logger.error(
+                "set_human_audio_mode rejected invalid mode",
+                call_id=call_id,
+                mode=requested_mode,
+            )
+            return {
+                "status": "error",
+                "message": "mode must be 'listen' or 'talk'",
+                "call_id": call_id,
+                "mode": requested_mode,
+            }
+
+        session = await self.session_store.get_by_call_id(call_id)
+        if not session:
+            return {
+                "status": "error",
+                "message": f"Session not found for call_id: {call_id}",
+                "call_id": call_id,
+                "mode": requested_mode,
+            }
+
+        human_channel_id = getattr(session, "human_channel_id", None)
+        bridge_id = getattr(session, "bridge_id", None)
+        if not human_channel_id:
+            return {
+                "status": "error",
+                "message": f"Human participant channel not found for call_id: {call_id}",
+                "call_id": call_id,
+                "mode": requested_mode,
+                "bridge_id": bridge_id,
+            }
+
+        try:
+            if requested_mode == "listen":
+                changed = await self.ari_client.mute_channel(
+                    channel_id=human_channel_id,
+                    direction="in",
+                    retries=4,
+                    sleep_s=0.15,
+                )
+            else:
+                changed = await self.ari_client.unmute_channel(
+                    channel_id=human_channel_id,
+                    direction="in",
+                    retries=4,
+                    sleep_s=0.15,
+                )
+        except Exception as exc:
+            logger.error(
+                "set_human_audio_mode failed with exception",
+                call_id=call_id,
+                bridge_id=bridge_id,
+                channel_id=human_channel_id,
+                mode=requested_mode,
+                error=str(exc),
+                exc_info=True,
+            )
+            return {
+                "status": "error",
+                "message": str(exc),
+                "call_id": call_id,
+                "bridge_id": bridge_id,
+                "channel_id": human_channel_id,
+                "mode": requested_mode,
+            }
+
+        if not changed:
+            logger.error(
+                "set_human_audio_mode failed after retries",
+                call_id=call_id,
+                bridge_id=bridge_id,
+                channel_id=human_channel_id,
+                mode=requested_mode,
+            )
+            return {
+                "status": "error",
+                "message": "Could not apply human audio mode after retries",
+                "call_id": call_id,
+                "bridge_id": bridge_id,
+                "channel_id": human_channel_id,
+                "mode": requested_mode,
+            }
+
+        session.human_audio_mode = requested_mode
+        await self._save_session(session)
+
+        logger.info(
+            "Human audio mode updated",
+            call_id=call_id,
+            bridge_id=bridge_id,
+            channel_id=human_channel_id,
+            mode=requested_mode,
+        )
+        return {
+            "status": "success",
+            "call_id": call_id,
+            "bridge_id": bridge_id,
+            "channel_id": human_channel_id,
+            "mode": requested_mode,
+        }
+
+    async def disconnect_ai_from_call(self, call_id: str, *, cleanup_media_channels: bool = True) -> Dict[str, Any]:
+        """
+        Detach AI media and provider session while keeping caller call leg active.
+
+        This is used by the disconnect_ai tool when a human participant should
+        continue the conversation without AI.
+        """
+        session = await self.session_store.get_by_call_id(call_id)
+        if not session:
+            return {
+                "status": "error",
+                "message": f"Session not found for call_id: {call_id}",
+                "ai_disconnected": False,
+            }
+
+        bridge_id = getattr(session, "bridge_id", None)
+        ai_channel_ids: List[str] = []
+        for channel_id in (
+            getattr(session, "external_media_id", None),
+            getattr(session, "pending_external_media_id", None),
+            getattr(session, "audiosocket_channel_id", None),
+            getattr(session, "local_channel_id", None),
+        ):
+            if channel_id and channel_id != session.caller_channel_id and channel_id not in ai_channel_ids:
+                ai_channel_ids.append(str(channel_id))
+
+        detached_channels: List[str] = []
+        failed_detach_channels: List[str] = []
+        for channel_id in ai_channel_ids:
+            if not bridge_id:
+                failed_detach_channels.append(channel_id)
+                continue
+            try:
+                removed = await self.ari_client.remove_channel_from_bridge(bridge_id, channel_id)
+                if removed:
+                    detached_channels.append(channel_id)
+                else:
+                    failed_detach_channels.append(channel_id)
+            except Exception:
+                failed_detach_channels.append(channel_id)
+                logger.warning(
+                    "Failed to detach AI media channel from bridge",
+                    call_id=call_id,
+                    bridge_id=bridge_id,
+                    channel_id=channel_id,
+                    exc_info=True,
+                )
+
+        try:
+            await self.streaming_playback_manager.stop_streaming_playback(call_id)
+        except Exception:
+            logger.debug("Streaming playback stop failed during AI disconnect", call_id=call_id, exc_info=True)
+
+        try:
+            start_task = self._provider_start_tasks.pop(call_id, None)
+            if start_task:
+                start_task.cancel()
+        except Exception:
+            pass
+
+        provider_stopped = False
+        provider = self._call_providers.pop(call_id, None)
+        if provider and hasattr(provider, "stop_session"):
+            try:
+                await provider.stop_session()
+                provider_stopped = True
+            except Exception:
+                logger.debug("Provider stop_session failed during AI disconnect", call_id=call_id, exc_info=True)
+
+        try:
+            pipeline_task = self._pipeline_tasks.pop(call_id, None)
+            if pipeline_task:
+                pipeline_task.cancel()
+            pipeline_queue = self._pipeline_queues.pop(call_id, None)
+            if pipeline_queue:
+                try:
+                    pipeline_queue.put_nowait(None)
+                except Exception:
+                    pass
+            try:
+                await self._disable_pipeline_talk_detect(session)
+            except Exception:
+                logger.debug("Pipeline talk detect disable failed during AI disconnect", call_id=call_id, exc_info=True)
+            self._pipeline_forced.pop(call_id, None)
+            if getattr(self, "pipeline_orchestrator", None) and self.pipeline_orchestrator.enabled:
+                try:
+                    await self.pipeline_orchestrator.release_pipeline(call_id)
+                except Exception:
+                    logger.debug("Pipeline release failed during AI disconnect", call_id=call_id, exc_info=True)
+        except Exception:
+            logger.debug("Pipeline detach cleanup failed", call_id=call_id, exc_info=True)
+
+        audiosocket_uuid = getattr(session, "audiosocket_uuid", None)
+
+        session.ai_detached = True
+        session.provider_session_active = False
+        session.audio_capture_enabled = False
+        session.tts_playing = False
+        session.tts_active_count = 0
+        session.tts_tokens.clear()
+        session.external_media_id = None
+        session.pending_external_media_id = None
+        session.external_media_port = None
+        try:
+            session.external_media_codec = None
+        except Exception:
+            pass
+        session.audiosocket_channel_id = None
+        session.audiosocket_conn_id = None
+        session.audiosocket_uuid = None
+        session.local_channel_id = None
+        session.status = "ai_detached"
+        await self._save_session(session)
+
+        for channel_id in ai_channel_ids:
+            try:
+                await self.session_store.unindex_channel(channel_id)
+            except Exception:
+                logger.debug("Failed to unindex detached AI channel", call_id=call_id, channel_id=channel_id, exc_info=True)
+
+        for channel_id in ai_channel_ids:
+            self.bridges.pop(channel_id, None)
+            self.pending_local_channels.pop(channel_id, None)
+            self.pending_audiosocket_channels.pop(channel_id, None)
+        self.local_channels.pop(call_id, None)
+        self.audiosocket_channels.pop(call_id, None)
+        if audiosocket_uuid:
+            self.uuidext_to_channel.pop(audiosocket_uuid, None)
+
+        if cleanup_media_channels:
+            for channel_id in ai_channel_ids:
+                try:
+                    await self.ari_client.hangup_channel(channel_id)
+                except Exception:
+                    logger.debug("Failed to hang up detached AI channel", call_id=call_id, channel_id=channel_id, exc_info=True)
+
+        if not ai_channel_ids and not provider:
+            message = "AI was already disconnected for this call."
+        else:
+            message = "AI disconnected from call. Caller remains connected."
+
+        logger.info(
+            "AI disconnect completed",
+            call_id=call_id,
+            detached_channels=detached_channels,
+            failed_detach_channels=failed_detach_channels,
+            provider_stopped=provider_stopped,
+            cleanup_media_channels=cleanup_media_channels,
+        )
+        return {
+            "status": "success",
+            "message": message,
+            "ai_disconnected": True,
+            "detached_channels": detached_channels,
+            "failed_detach_channels": failed_detach_channels,
+            "provider_stopped": provider_stopped,
+        }
 
     def register_attended_transfer_agent_channel(self, call_id: str, agent_channel_id: str) -> None:
         """Register an attended transfer agent channel to resolve DTMF events back to a call."""
@@ -10728,6 +11235,9 @@ class Engine:
             if not session:
                 logger.error("Start provider session called for unknown call", call_id=call_id)
                 return
+            if bool(getattr(session, "ai_detached", False)):
+                logger.info("Skipping provider start for AI-detached call", call_id=call_id)
+                return
             # Idempotent fast-path.
             if getattr(session, "provider_session_active", False) and call_id in self._call_providers:
                 return
@@ -10994,6 +11504,7 @@ class Engine:
             app.router.add_get('/mcp/status', self._mcp_status_handler)
             app.router.add_post('/mcp/test/{server_id}', self._mcp_test_handler)
             app.router.add_get('/sessions/stats', self._sessions_stats_handler)
+            app.router.add_post('/calls/{call_id}/human-audio-mode', self._set_human_audio_mode_handler)
             runner = web.AppRunner(app)
             await runner.setup()
             # Host/port configurable via YAML health block with environment overrides (AAVA-30)
@@ -11017,6 +11528,44 @@ class Engine:
             logger.info("Health endpoint started", host=health_host, port=health_port)
         except Exception as exc:
             logger.error("Failed to start health endpoint", error=str(exc), exc_info=True)
+
+    async def _set_human_audio_mode_handler(self, request):
+        """Set human participant audio mode for an active call without re-bridging."""
+        if not self._is_request_authorized(request):
+            return web.json_response(
+                {"status": "error", "message": "Forbidden: requires localhost or valid HEALTH_API_TOKEN"},
+                status=403,
+            )
+
+        call_id = str(request.match_info.get("call_id", "") or "").strip()
+        if not call_id:
+            return web.json_response({"status": "error", "message": "Missing call_id"}, status=400)
+
+        try:
+            payload = await request.json()
+        except Exception:
+            return web.json_response({"status": "error", "message": "Invalid JSON body"}, status=400)
+
+        if not isinstance(payload, dict):
+            return web.json_response({"status": "error", "message": "JSON body must be an object"}, status=400)
+
+        mode = str(payload.get("mode", "") or "").strip().lower()
+        if mode not in {"listen", "talk"}:
+            return web.json_response(
+                {"status": "error", "message": "mode must be 'listen' or 'talk'", "call_id": call_id},
+                status=400,
+            )
+
+        result = await self.set_human_audio_mode(call_id=call_id, mode=mode)
+        if result.get("status") == "success":
+            return web.json_response(result, status=200)
+
+        message = str(result.get("message", "") or "")
+        if message.startswith("Session not found") or message.startswith("Human participant channel not found"):
+            status = 404
+        else:
+            status = 409
+        return web.json_response(result, status=status)
 
     async def _sessions_stats_handler(self, request):
         """Return active session statistics for Admin UI (Milestone 21).

@@ -27,6 +27,7 @@ class ToolRegistry:
         "hangup": "hangup_call",          # Alternative naming
         "end_call": "hangup_call",        # Alternative naming
         "transfer_to_queue": "transfer",  # Legacy queue transfer
+        "disconnect": "disconnect_ai",    # Alternative naming
     }
     
     def __new__(cls):
@@ -303,6 +304,12 @@ After outputting a tool call, provide a brief spoken response.
             self.register(HangupCallTool)
         except ImportError as e:
             logger.warning(f"Could not import HangupCallTool: {e}")
+
+        try:
+            from src.tools.telephony.disconnect_ai import DisconnectAITool
+            self.register(DisconnectAITool)
+        except ImportError as e:
+            logger.warning(f"Could not import DisconnectAITool: {e}")
         
         try:
             from src.tools.telephony.voicemail import VoicemailTool
