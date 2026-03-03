@@ -3038,7 +3038,7 @@ class Engine:
                    caller_id=caller_id,
                    channel_id=channel_id)
         
-        # Route to specific handler based on action _handle_transfer_answeredtype
+        # Route to specific handler based on action type
         handlers = {
             'transfer': self._handle_transfer_answered,
             'warm-transfer': self._handle_transfer_answered,  # Warm transfer uses same handler
@@ -3166,160 +3166,48 @@ class Engine:
 
     async def _handle_add_participant_answered(self, channel_id: str, args: list):
         """
-        Handle participant leg answered using transfer-like bridging flow,
-        but without detaching/stopping the AI bot.
-        Args: ['add-participant', call_id, target_extension, optional mode=listen|talk]
+        Handle participant leg answered without tearing down AI media.
+        Args: ['add-participant', caller_id, target_extension]
         """
-        if len(args) < 2:
-            logger.error(
-                "ADD PARTICIPANT - Insufficient args",
-                channel_id=channel_id,
-                args=args,
-            )
-            await self.ari_client.hangup_channel(channel_id)
-            return
+        return await self._handle_add_participant_answered_v2(channel_id, args)
 
-        action_type = args[0]
-        call_id = str(args[1])
-        target = args[2] if len(args) > 2 else "unknown"
-        mode, requested_mode = self._extract_add_participant_mode(args)
-
-        if requested_mode and requested_mode not in {"listen", "talk"}:
-            logger.warning(
-                "ADD PARTICIPANT - Invalid mode received; defaulting to talk",
-                call_id=call_id,
-                channel_id=channel_id,
-                requested_mode=requested_mode,
-                effective_mode=mode,
-            )
+        caller_id = args[1]
+        target = args[2] if len(args) > 2 else 'unknown'
 
         logger.info(
-            "TRANSFER-LIKE ADD PARTICIPANT - Direct channel bridge while keeping AI active",
-            action_type=action_type,
-            call_id=call_id,
+            "🔀 ADD PARTICIPANT ANSWERED - Joining participant while AI remains active",
             channel_id=channel_id,
+            caller_id=caller_id,
             target=target,
-            mode=mode,
         )
 
-        session = await self.session_store.get_by_call_id(call_id)
+        session = await self.session_store.get_by_call_id(caller_id)
         if not session:
-            logger.error(
-                "ADD PARTICIPANT - Session not found",
-                call_id=call_id,
-                channel_id=channel_id,
-            )
+            logger.error("🔀 ADD PARTICIPANT - Session not found", caller_id=caller_id)
             await self.ari_client.hangup_channel(channel_id)
             return
 
-        bridge_id = getattr(session, "bridge_id", None)
-        if not bridge_id:
+        joined = await self.ari_client.add_channel_to_bridge(session.bridge_id, channel_id)
+        if not joined:
             logger.error(
-                "ADD PARTICIPANT - Session bridge missing",
-                call_id=call_id,
+                "🔀 ADD PARTICIPANT - Failed to bridge participant",
                 channel_id=channel_id,
-            )
-            await self.ari_client.hangup_channel(channel_id)
-            return
-
-        # Transfer-like behavior: join the answered human leg to the existing bridge.
-        # Do not remove AI media channels and do not stop provider session.
-        try:
-            joined = await self.ari_client.add_channel_to_bridge(
-                bridge_id,
-                channel_id,
-            )
-            if not joined:
-                logger.error(
-                    "ADD PARTICIPANT - Failed to bridge participant",
-                    call_id=call_id,
-                    channel_id=channel_id,
-                    bridge_id=bridge_id,
-                    target=target,
-                    mode=mode,
-                )
-                await self.ari_client.hangup_channel(channel_id)
-                return
-        except Exception as exc:
-            logger.error(
-                "ADD PARTICIPANT - Exception while bridging participant",
-                call_id=call_id,
-                channel_id=channel_id,
-                bridge_id=bridge_id,
+                bridge_id=session.bridge_id,
                 target=target,
-                mode=mode,
-                error=str(exc),
-                exc_info=True,
             )
             await self.ari_client.hangup_channel(channel_id)
             return
 
-        # Default talk: always try unmute inbound after join.
-        try:
-            unmuted = await self.ari_client.unmute_channel(
-                channel_id=channel_id,
-                direction="in",
-                retries=4,
-                sleep_s=0.15,
-            )
-            if not unmuted:
-                logger.warning(
-                    "ADD PARTICIPANT - Fail-safe unmute did not succeed after retries",
-                    call_id=call_id,
-                    bridge_id=bridge_id,
-                    channel_id=channel_id,
-                    mode=mode,
-                )
-        except Exception:
-            logger.error(
-                "ADD PARTICIPANT - Fail-safe unmute raised exception",
-                call_id=call_id,
-                bridge_id=bridge_id,
-                channel_id=channel_id,
-                mode=mode,
-                exc_info=True,
-            )
-
-        if mode == "listen":
-            try:
-                muted = await self.ari_client.mute_channel(
-                    channel_id=channel_id,
-                    direction="in",
-                    retries=4,
-                    sleep_s=0.15,
-                )
-                if not muted:
-                    logger.warning(
-                        "ADD PARTICIPANT - listen mode mute did not succeed after retries",
-                        call_id=call_id,
-                        bridge_id=bridge_id,
-                        channel_id=channel_id,
-                        mode=mode,
-                    )
-            except Exception:
-                logger.error(
-                    "ADD PARTICIPANT - listen mode mute raised exception",
-                    call_id=call_id,
-                    bridge_id=bridge_id,
-                    channel_id=channel_id,
-                    mode=mode,
-                    exc_info=True,
-                )
-
-        session.human_channel_id = channel_id
-        session.human_audio_mode = mode
         if session.current_action:
-            session.current_action["answered"] = True
-            session.current_action["channel_id"] = channel_id
-        await self._save_session(session)
+            session.current_action['answered'] = True
+            session.current_action['channel_id'] = channel_id
+        await self.session_store.upsert_call(session)
 
         logger.info(
-            "ADD PARTICIPANT COMPLETE - Participant bridged and AI preserved",
-            call_id=call_id,
-            bridge_id=bridge_id,
+            "✅ ADD PARTICIPANT COMPLETE - Participant bridged and AI preserved",
             channel_id=channel_id,
+            bridge_id=session.bridge_id,
             target=target,
-            mode=mode,
         )
 
     def _normalize_human_audio_mode(self, mode: Optional[str]) -> str:
@@ -3445,7 +3333,7 @@ class Engine:
             bridge_id=bridge_id,
             channel_id=channel_id,
             mute=False,
-            role="",
+            role="human",
             retries=3,
             base_sleep_s=0.2,
         )
