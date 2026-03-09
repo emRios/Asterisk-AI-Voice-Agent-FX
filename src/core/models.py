@@ -65,6 +65,7 @@ class CallSession:
     provider_session_active: bool = False
     ai_detached: bool = False
     bridge_id: Optional[str] = None
+    bridge_type: Optional[str] = None
     
     # Provider and conversation state
     provider_name: str = "local"

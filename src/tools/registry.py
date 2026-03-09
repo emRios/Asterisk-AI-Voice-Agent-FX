@@ -27,7 +27,7 @@ class ToolRegistry:
         "hangup": "hangup_call",          # Alternative naming
         "end_call": "hangup_call",        # Alternative naming
         "transfer_to_queue": "transfer",  # Legacy queue transfer
-        "disconnect": "disconnect_ai",    # Alternative naming
+        "disconnect": "cd",    # Alternative naming
     }
     
     def __new__(cls):

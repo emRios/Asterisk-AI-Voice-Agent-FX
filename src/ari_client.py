@@ -483,6 +483,48 @@ class ARIClient:
             logger.error("Error creating bridge", error=str(e))
             return None
 
+    async def get_bridge(self, bridge_id: str) -> Optional[Dict[str, Any]]:
+        """Read a bridge snapshot via ARI GET /bridges/{bridge_id}."""
+        try:
+            response = await self.send_command(
+                "GET",
+                f"bridges/{bridge_id}",
+                tolerate_statuses=[404],
+            )
+
+            status = response.get("status") if isinstance(response, dict) else None
+            if str(status) == "404":
+                logger.debug("Bridge get returned 404", bridge_id=bridge_id)
+                return None
+
+            if isinstance(response, dict) and response.get("id"):
+                channels = response.get("channels", []) or []
+                logger.debug(
+                    "Bridge snapshot retrieved",
+                    bridge_id=bridge_id,
+                    technology=response.get("technology"),
+                    bridge_type=response.get("bridge_type"),
+                    video_mode=response.get("video_mode"),
+                    channel_count=len(channels),
+                    bridge_channels=channels,
+                )
+                return response
+
+            logger.warning(
+                "Bridge snapshot missing id",
+                bridge_id=bridge_id,
+                response=response,
+            )
+            return None
+
+        except Exception as e:
+            logger.error(
+                "Error reading bridge snapshot",
+                bridge_id=bridge_id,
+                error=str(e),
+            )
+            return None
+
     async def stop_playback(self, playback_id: str) -> bool:
         """Stop an active playback by its playbackId."""
         try:

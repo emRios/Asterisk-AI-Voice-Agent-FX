@@ -238,6 +238,12 @@ class Engine:
         self._outbound_amd_context = str(os.getenv("AAVA_OUTBOUND_AMD_CONTEXT", "aava-outbound-amd")).strip() or "aava-outbound-amd"
         self._outbound_pjsip_endpoint_cache: Dict[str, Dict[str, Any]] = {}
         self._outbound_pjsip_endpoint_cache_ttl_seconds = float(os.getenv("AAVA_OUTBOUND_PJSIP_ENDPOINT_CACHE_TTL_SECONDS", "300") or "300")
+        self.experiment_force_video_sfu = str(os.getenv("AAVA_EXPERIMENT_FORCE_VIDEO_SFU", "0")).strip().lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
         
         # Initialize streaming playback manager
         streaming_config = {}
@@ -487,6 +493,9 @@ class Engine:
         self.ari_client.on_event("ChannelDestroyed", self._handle_channel_destroyed)
         self.ari_client.on_event("ChannelDtmfReceived", self._handle_dtmf_received)
         self.ari_client.on_event("ChannelVarset", self._handle_channel_varset)
+        self.ari_client.on_event("BridgeCreated", self._handle_bridge_created)
+        self.ari_client.on_event("ChannelEnteredBridge", self._handle_channel_entered_bridge)
+        self.ari_client.on_event("ChannelLeftBridge", self._handle_channel_left_bridge)
         # Pipelines (local_hybrid): use Asterisk talk detection to trigger barge-in during
         # channel playback, where ExternalMedia RTP can be paused/altered.
         self.ari_client.on_event("ChannelTalkingStarted", self._handle_channel_talking_started)
@@ -506,6 +515,141 @@ class Engine:
     async def _on_ari_event(self, event: Dict[str, Any]):
         """Default event handler for unhandled ARI events."""
         logger.debug("Received unhandled ARI event", event_type=event.get("type"), ari_event=event)
+
+    def _build_bridge_type(self) -> str:
+        base = "mixing,proxy_media"
+        if self.experiment_force_video_sfu:
+            return f"{base},video_sfu"
+        return base
+
+    async def _observe_bridge_snapshot(
+        self,
+        *,
+        bridge_id: str,
+        stage: str,
+        channel_id: Optional[str] = None,
+        requested_bridge_type: Optional[str] = None,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        snap = await self.ari_client.get_bridge(bridge_id)
+        if not snap:
+            logger.warning(
+                "BRIDGE_OBS_REST unavailable",
+                stage=stage,
+                bridge_id=bridge_id,
+                channel_id=channel_id,
+                requested_bridge_type=requested_bridge_type,
+                extra=extra or {},
+            )
+            return None
+
+        channels = snap.get("channels", []) or []
+        logger.info(
+            "BRIDGE_OBS_REST",
+            stage=stage,
+            bridge_id=bridge_id,
+            technology=snap.get("technology"),
+            bridge_type=snap.get("bridge_type"),
+            video_mode=snap.get("video_mode"),
+            channel_count=len(channels),
+            channel_id=channel_id,
+            requested_bridge_type=requested_bridge_type,
+            extra=extra or {},
+        )
+        logger.debug(
+            "BRIDGE_OBS_REST_channels",
+            stage=stage,
+            bridge_id=bridge_id,
+            bridge_channels=channels,
+        )
+        return snap
+
+    async def _observe_bridge_snapshot_after_delay(
+        self,
+        *,
+        bridge_id: str,
+        stage: str,
+        delay_s: float,
+        channel_id: Optional[str] = None,
+        requested_bridge_type: Optional[str] = None,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        if delay_s > 0:
+            await asyncio.sleep(delay_s)
+
+        return await self._observe_bridge_snapshot(
+            bridge_id=bridge_id,
+            stage=stage,
+            channel_id=channel_id,
+            requested_bridge_type=requested_bridge_type,
+            extra=extra,
+        )
+
+    async def _handle_bridge_created(self, event: Dict[str, Any]) -> None:
+        bridge = event.get("bridge") or {}
+        channels = bridge.get("channels", []) or []
+        logger.info(
+            "BRIDGE_OBS_WS",
+            event_type="BridgeCreated",
+            bridge_id=bridge.get("id"),
+            technology=bridge.get("technology"),
+            bridge_type=bridge.get("bridge_type"),
+            video_mode=bridge.get("video_mode"),
+            channel_count=len(channels),
+            note="event_snapshot",
+        )
+        logger.debug(
+            "BRIDGE_OBS_WS_channels",
+            event_type="BridgeCreated",
+            bridge_id=bridge.get("id"),
+            bridge_channels=channels,
+        )
+
+    async def _handle_channel_entered_bridge(self, event: Dict[str, Any]) -> None:
+        bridge = event.get("bridge") or {}
+        channel = event.get("channel") or {}
+        channels = bridge.get("channels", []) or []
+        logger.info(
+            "BRIDGE_OBS_WS",
+            event_type="ChannelEnteredBridge",
+            bridge_id=bridge.get("id"),
+            technology=bridge.get("technology"),
+            bridge_type=bridge.get("bridge_type"),
+            video_mode=bridge.get("video_mode"),
+            channel_count=len(channels),
+            channel_id=channel.get("id"),
+            channel_name=channel.get("name"),
+            note="snapshot_may_be_stale",
+        )
+        logger.debug(
+            "BRIDGE_OBS_WS_channels",
+            event_type="ChannelEnteredBridge",
+            bridge_id=bridge.get("id"),
+            bridge_channels=channels,
+        )
+
+    async def _handle_channel_left_bridge(self, event: Dict[str, Any]) -> None:
+        bridge = event.get("bridge") or {}
+        channel = event.get("channel") or {}
+        channels = bridge.get("channels", []) or []
+        logger.info(
+            "BRIDGE_OBS_WS",
+            event_type="ChannelLeftBridge",
+            bridge_id=bridge.get("id"),
+            technology=bridge.get("technology"),
+            bridge_type=bridge.get("bridge_type"),
+            video_mode=bridge.get("video_mode"),
+            channel_count=len(channels),
+            channel_id=channel.get("id"),
+            channel_name=channel.get("name"),
+            note="snapshot_may_be_stale",
+        )
+        logger.debug(
+            "BRIDGE_OBS_WS_channels",
+            event_type="ChannelLeftBridge",
+            bridge_id=bridge.get("id"),
+            bridge_channels=channels,
+        )
 
     async def _save_session(self, session: CallSession, *, new: bool = False) -> None:
         """Persist session updates and keep coordinator metrics in sync."""
@@ -2396,14 +2540,22 @@ class Engine:
             
             # Create hardened bridge type to avoid simple_bridge packet-sharing churn.
             logger.info("🎯 HYBRID ARI - Step 2: Creating bridge immediately", channel_id=caller_channel_id)
-            bridge_type = "mixing,proxy_media"
+            bridge_type = self._build_bridge_type()
             bridge_id = await self.ari_client.create_bridge(bridge_type=bridge_type)
             if not bridge_id:
                 raise RuntimeError("Failed to create mixing bridge")
             logger.info("🎯 HYBRID ARI - Step 2: ✅ Bridge created", 
                        channel_id=caller_channel_id, 
                        bridge_id=bridge_id,
-                       bridge_type=bridge_type)
+                       bridge_type=bridge_type,
+                       experiment_force_video_sfu=self.experiment_force_video_sfu)
+
+            await self._observe_bridge_snapshot(
+                bridge_id=bridge_id,
+                stage="post_create",
+                requested_bridge_type=bridge_type,
+                extra={"origin": "initial_call_setup"},
+            )
             
             # Add caller to bridge
             logger.info("🎯 HYBRID ARI - Step 3: Adding caller to bridge", 
@@ -2415,6 +2567,14 @@ class Engine:
             logger.info("🎯 HYBRID ARI - Step 3: ✅ Caller added to bridge", 
                        channel_id=caller_channel_id, 
                        bridge_id=bridge_id)
+
+            await self._observe_bridge_snapshot(
+                bridge_id=bridge_id,
+                stage="post_add_caller",
+                channel_id=caller_channel_id,
+                requested_bridge_type=bridge_type,
+                extra={"channel_role": "caller"},
+            )
             self.bridges[caller_channel_id] = bridge_id
             
             # Create CallSession and store in SessionStore
@@ -2429,6 +2589,7 @@ class Engine:
                 status="connected",
                 start_time=datetime.now(timezone.utc)  # Track call start time (UTC for consistent storage)
             )
+            session.bridge_type = bridge_type
             session.is_outbound = bool(is_outbound)
             session.enhanced_vad_enabled = bool(self.vad_manager)
 
@@ -2951,6 +3112,14 @@ class Engine:
                 caller_channel_id=caller_channel_id,
             )
 
+            await self._observe_bridge_snapshot(
+                bridge_id=bridge_id,
+                stage="post_add_audiosocket",
+                channel_id=audiosocket_channel_id,
+                requested_bridge_type=getattr(session, "bridge_type", None),
+                extra={"channel_role": "audiosocket"},
+            )
+
             session.audiosocket_channel_id = audiosocket_channel_id
             session.status = "audiosocket_channel_connected"
             await self._save_session(session)
@@ -3256,6 +3425,31 @@ class Engine:
                     channel_id=channel_id,
                     attempt=attempt,
                     retries=attempts,
+                )
+
+                await self._observe_bridge_snapshot(
+                    bridge_id=bridge_id,
+                    stage="post_add_human_immediate",
+                    channel_id=channel_id,
+                    extra={
+                        "channel_role": role,
+                        "mute": mute,
+                        "absorb_dtmf": absorb_dtmf,
+                        "attempt": attempt,
+                    },
+                )
+
+                await self._observe_bridge_snapshot_after_delay(
+                    bridge_id=bridge_id,
+                    stage="post_add_human_stabilized",
+                    delay_s=0.25,
+                    channel_id=channel_id,
+                    extra={
+                        "channel_role": role,
+                        "mute": mute,
+                        "absorb_dtmf": absorb_dtmf,
+                        "attempt": attempt,
+                    },
                 )
                 return True
 
@@ -4803,6 +4997,12 @@ class Engine:
             # Tear down bridge.
             bridge_id = session.bridge_id
             if bridge_id:
+                await self._observe_bridge_snapshot(
+                    bridge_id=bridge_id,
+                    stage="pre_destroy",
+                    requested_bridge_type=getattr(session, "bridge_type", None),
+                    extra={"origin": "session_cleanup"},
+                )
                 try:
                     await self.ari_client.destroy_bridge(bridge_id)
                     logger.info("Bridge destroyed", call_id=call_id, bridge_id=bridge_id)
