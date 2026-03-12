@@ -43,6 +43,8 @@ _DEEPGRAM_SETTINGS_ACK_LATENCY_MS = Gauge(
     "Latency from Settings send to SettingsApplied ACK (ms)",
 )
 
+_MAX_PAYLOAD_JSON_BYTES = 32 * 1024
+
 class DeepgramProvider(AIProviderInterface):
     @staticmethod
     def _canonicalize_encoding(value: Optional[str]) -> str:
@@ -132,6 +134,132 @@ class DeepgramProvider(AIProviderInterface):
         except Exception:
             logger.debug("Deepgram output format update failed", encoding=encoding, sample_rate=sample_rate, source=source, exc_info=True)
 
+    @staticmethod
+    def _deep_merge_dict(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+        """Recursively merge override into base (override wins)."""
+        merged = dict(base or {})
+        for key, value in (override or {}).items():
+            if isinstance(value, dict) and isinstance(merged.get(key), dict):
+                merged[key] = DeepgramProvider._deep_merge_dict(merged.get(key) or {}, value)
+            else:
+                merged[key] = value
+        return merged
+
+    def _normalize_payload_json_raw(self, raw_payload: Any) -> Optional[str]:
+        """Normalize raw PAYLOAD and reject oversized values before parsing."""
+        if raw_payload is None:
+            return None
+        if not isinstance(raw_payload, str):
+            raw_payload = str(raw_payload)
+        raw_payload = raw_payload.strip()
+        if not raw_payload:
+            return None
+
+        payload_bytes = len(raw_payload.encode("utf-8", errors="ignore"))
+        if payload_bytes > _MAX_PAYLOAD_JSON_BYTES:
+            logger.warning(
+                "PAYLOAD exceeds max size; ignoring payload for Deepgram settings",
+                call_id=self.call_id,
+                payload_bytes=payload_bytes,
+                max_bytes=_MAX_PAYLOAD_JSON_BYTES,
+            )
+            return None
+        return raw_payload
+
+    def _apply_payload_overrides(self, settings: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Merge dialplan PAYLOAD (raw JSON string) into Settings.
+        Engine passes payload_json raw; parsing happens only in provider.
+        """
+        raw_payload = self._normalize_payload_json_raw(self._payload_json_raw)
+        campaign_value = "default"
+        variables_value: Dict[str, Any] = {}
+
+        if not raw_payload:
+            settings["campaign"] = campaign_value
+            settings["variables"] = variables_value
+            return settings
+
+        try:
+            payload_obj = json.loads(raw_payload)
+        except json.JSONDecodeError as exc:
+            logger.warning(
+                "PAYLOAD JSON parse failed in Deepgram provider; using default campaign/variables",
+                call_id=self.call_id,
+                error=str(exc),
+            )
+            settings["campaign"] = campaign_value
+            settings["variables"] = variables_value
+            return settings
+        except Exception as exc:
+            logger.warning(
+                "PAYLOAD processing failed in Deepgram provider; using default campaign/variables",
+                call_id=self.call_id,
+                error=str(exc),
+            )
+            settings["campaign"] = campaign_value
+            settings["variables"] = variables_value
+            return settings
+
+        if not isinstance(payload_obj, dict):
+            logger.warning(
+                "PAYLOAD is not a JSON object; using default campaign/variables",
+                call_id=self.call_id,
+                payload_type=type(payload_obj).__name__,
+            )
+            settings["campaign"] = campaign_value
+            settings["variables"] = variables_value
+            return settings
+
+        agent_payload = payload_obj.get("agent")
+        if isinstance(agent_payload, dict):
+            agent_payload = dict(agent_payload)
+            incoming_think = agent_payload.get("think")
+            if isinstance(incoming_think, dict):
+                incoming_think = dict(incoming_think)
+                if "functions" in incoming_think:
+                    incoming_functions = incoming_think.get("functions")
+                    incoming_count = len(incoming_functions) if isinstance(incoming_functions, list) else None
+                    incoming_think.pop("functions", None)
+                    agent_payload["think"] = incoming_think
+                    logger.info(
+                        "Ignoring PAYLOAD think.functions; runtime allowlist remains the source of truth",
+                        call_id=self.call_id,
+                        incoming_function_count=incoming_count,
+                    )
+            current_agent = settings.get("agent")
+            if isinstance(current_agent, dict):
+                settings["agent"] = self._deep_merge_dict(current_agent, agent_payload)
+            else:
+                settings["agent"] = agent_payload
+            incoming_think = agent_payload.get("think")
+            # If payload defines think.instructions (without think.prompt), drop base prompt.
+            # This avoids sending legacy context prompt when campaign-driven instructions are used.
+            if isinstance(incoming_think, dict) and "instructions" in incoming_think and "prompt" not in incoming_think:
+                think_block = ((settings.get("agent") or {}).get("think") if isinstance(settings.get("agent"), dict) else None)
+                if isinstance(think_block, dict):
+                    think_block.pop("prompt", None)
+
+        campaign_payload = payload_obj.get("campaign")
+        if isinstance(campaign_payload, str) and campaign_payload.strip():
+            campaign_value = campaign_payload.strip()
+
+        variables_payload = payload_obj.get("variables")
+        if isinstance(variables_payload, dict):
+            variables_value = variables_payload
+
+        settings["campaign"] = campaign_value
+        settings["variables"] = variables_value
+
+        logger.info(
+            "Applied PAYLOAD overrides to Deepgram settings",
+            call_id=self.call_id,
+            has_agent=isinstance(agent_payload, dict),
+            campaign=settings.get("campaign"),
+            variables_count=len(settings.get("variables") or {}) if isinstance(settings.get("variables"), dict) else 0,
+        )
+        return settings
+
     def __init__(self, config: Dict[str, Any], llm_config: LLMConfig, on_event: Callable[[Dict[str, Any]], None]):
         super().__init__(on_event)
         self.config = config
@@ -147,6 +275,7 @@ class DeepgramProvider(AIProviderInterface):
         self.tool_adapter = DeepgramToolAdapter(tool_registry)
         logger.info("🛠️ Deepgram provider initialized with tool support")
         self._allowed_tools: Optional[List[str]] = None
+        self._payload_json_raw: Optional[str] = None
         self._in_audio_burst: bool = False
         self._first_output_chunk_logged: bool = False
         self._closing: bool = False
@@ -360,6 +489,16 @@ class DeepgramProvider(AIProviderInterface):
                 self._allowed_tools = list(context.get("tools") or [])
             else:
                 self._allowed_tools = []
+            self._payload_json_raw = None
+            if context and "payload_json" in context:
+                raw_payload = self._normalize_payload_json_raw(context.get("payload_json"))
+                if raw_payload:
+                    self._payload_json_raw = raw_payload
+                    logger.info(
+                        "Deepgram raw payload received from engine context",
+                        call_id=call_id,
+                        payload_bytes=len(raw_payload.encode("utf-8", errors="ignore")),
+                    )
             # Capture Deepgram request id if provided
             try:
                 rid = None
@@ -519,13 +658,22 @@ class DeepgramProvider(AIProviderInterface):
                 "greeting": greeting_val
             }
         }
+        settings = self._apply_payload_overrides(settings)
         
         # Add tools from context allowlist only.
         # Per Deepgram docs: functions go in agent.think.functions.
         try:
             tools_schemas = self.tool_adapter.get_tools_config(list(self._allowed_tools or []))
             if tools_schemas:
-                settings["agent"]["think"]["functions"] = tools_schemas
+                agent_block = settings.get("agent")
+                if not isinstance(agent_block, dict):
+                    agent_block = {}
+                    settings["agent"] = agent_block
+                think_block = agent_block.get("think")
+                if not isinstance(think_block, dict):
+                    think_block = {}
+                    agent_block["think"] = think_block
+                think_block["functions"] = tools_schemas
                 logger.info(
                     "✅ Deepgram functions configured",
                     call_id=self.call_id,
@@ -549,14 +697,22 @@ class DeepgramProvider(AIProviderInterface):
                     "speak": { "provider": { "type": "deepgram", "model": speak_model } }
                 }
             }
+            self._last_settings_minimal = self._apply_payload_overrides(self._last_settings_minimal)
         except Exception:
             self._last_settings_minimal = None
         self._last_settings_payload = settings
-        # Log the exact Settings payload being sent to Deepgram
+        log_payload = {
+            "type": settings.get("type"),
+            "campaign": settings.get("campaign"),
+            "variables_count": len(settings.get("variables") or {}),
+            "variables_keys": list((settings.get("variables") or {}).keys())[:20],
+            "has_instructions": bool(((settings.get("agent") or {}).get("think") or {}).get("instructions")),
+            "tools_count": len((((settings.get("agent") or {}).get("think") or {}).get("functions") or [])),
+        }
         logger.info(
             "Sending Settings to Deepgram Voice Agent",
             call_id=self.call_id,
-            settings_payload=settings,
+            settings_payload=log_payload,
         )
         await self.websocket.send(json.dumps(settings))
         # Mark settings sent; readiness only upon server response (ACK) or timeout

@@ -3877,6 +3877,8 @@ class Engine:
         Actualmente solo nos interesan las variables de canal:
           - __title
           - __name
+          - __REDIS_CALL_ID
+          - PAYLOAD / __PAYLOAD
 
         Estas se copian a session.channel_vars para que PromptMetadataInjector
         pueda resolver {title}/{name} desde:
@@ -3904,8 +3906,8 @@ class Engine:
             if not channel_id or not variable:
                 return
 
-            # Solo procesar las variables de contacto relevantes
-            if variable not in ("__title", "__name", "__REDIS_CALL_ID"):
+            # Solo procesar variables relevantes para prompts/contexto runtime.
+            if variable not in ("__title", "__name", "__REDIS_CALL_ID", "PAYLOAD", "__PAYLOAD"):
                 return
 
             # Intentar resolver la sesión asociada a este channel_id
@@ -3931,6 +3933,11 @@ class Engine:
                 elif variable == "__REDIS_CALL_ID":
                     buf.setdefault("REDIS_CALL_ID", value)
                     buf.setdefault("redis_call_id", value)
+                elif variable in ("PAYLOAD", "__PAYLOAD"):
+                    payload_raw = value if isinstance(value, str) else ("" if value is None else str(value))
+                    if variable == "__PAYLOAD":
+                        buf.setdefault("PAYLOAD", payload_raw)
+                    buf.setdefault("payload_json", payload_raw)
 
                 logger.debug(
                     "Buffered contact variable for channel without session",
@@ -3962,6 +3969,11 @@ class Engine:
             elif variable == "__REDIS_CALL_ID":
                 channel_vars.setdefault("REDIS_CALL_ID", value)
                 channel_vars.setdefault("redis_call_id", value)
+            elif variable in ("PAYLOAD", "__PAYLOAD"):
+                payload_raw = value if isinstance(value, str) else ("" if value is None else str(value))
+                if variable == "__PAYLOAD":
+                    channel_vars.setdefault("PAYLOAD", payload_raw)
+                channel_vars.setdefault("payload_json", payload_raw)
                     
 
             # Persistir cambios en SessionStore
@@ -9649,19 +9661,27 @@ class Engine:
                                 ),
                             )
                         if context_config.prompt:
-                            prompt_to_apply = context_config.prompt
-                            if getattr(session, "is_outbound", False) and getattr(session, "outbound_custom_vars", None):
-                                prompt_to_apply = self._append_outbound_custom_vars_to_prompt(
-                                    prompt_to_apply,
-                                    getattr(session, "outbound_custom_vars", {}) or {},
+                            if str(provider_name or "").strip() == "deepgram":
+                                session.provider_overrides.pop("prompt", None)
+                                logger.info(
+                                    "Skipping context prompt override for Deepgram provider",
+                                    call_id=session.call_id,
+                                    context=transport.context,
                                 )
-                            session.provider_overrides["prompt"] = prompt_to_apply
-                            logger.info(
-                                "Stored context prompt for provider session",
-                                call_id=session.call_id,
-                                context=transport.context,
-                                prompt_length=len(prompt_to_apply or ""),
-                            )
+                            else:
+                                prompt_to_apply = context_config.prompt
+                                if getattr(session, "is_outbound", False) and getattr(session, "outbound_custom_vars", None):
+                                    prompt_to_apply = self._append_outbound_custom_vars_to_prompt(
+                                        prompt_to_apply,
+                                        getattr(session, "outbound_custom_vars", {}) or {},
+                                    )
+                                session.provider_overrides["prompt"] = prompt_to_apply
+                                logger.info(
+                                    "Stored context prompt for provider session",
+                                    call_id=session.call_id,
+                                    context=transport.context,
+                                    prompt_length=len(prompt_to_apply or ""),
+                                )
                         await self._save_session(session)
                     except Exception as exc:
                         logger.error(
@@ -10802,31 +10822,48 @@ class Engine:
             # Note: Context greeting/prompt injection now happens earlier in P1 _resolve_audio_profile()
             # to ensure config is set BEFORE provider session starts and reads it.
             
-            # Build context dict for providers that need it (Google Live, OpenAI Realtime)
+            # Build context dict for providers that need it (Deepgram, Google Live, OpenAI Realtime)
             provider_context = {}
             try:
-                if session.context_name:
-                    context_config = self.transport_orchestrator.get_context_config(session.context_name)
+                logger.debug(
+                    "Building provider context",
+                    call_id=call_id,
+                    context_name=session.context_name,
+                )
+
+                # allowed_tools in ai-agent.yaml is the mandatory runtime universe.
+                allowed_tools: list[str] = []
+                cfg_tools = getattr(self.config, "tools", {}) or {}
+                raw_allowed = cfg_tools.get("allowed_tools") if isinstance(cfg_tools, dict) else None
+                if isinstance(raw_allowed, list):
+                    allowed_tools = [str(t).strip() for t in raw_allowed if str(t).strip()]
+
+                if allowed_tools:
+                    provider_context["tools"] = allowed_tools
                     logger.debug(
-                        "Building provider context",
+                        "Added tools to provider context",
                         call_id=call_id,
-                        context_name=session.context_name,
-                        has_context_config=bool(context_config),
-                        config_type=type(context_config).__name__ if context_config else None,
-                        has_tools_attr=hasattr(context_config, 'tools') if context_config else False,
+                        tools=provider_context["tools"],
+                        tools_count=len(provider_context["tools"]),
+                        tools_source="global",
                     )
-                    if context_config:
-                        # Contexts are the source of truth for tool allowlisting.
-                        provider_context["tools"] = list(getattr(context_config, "tools", None) or [])
-                        logger.debug(
-                            "Added tools to provider context",
-                            call_id=call_id,
-                            tools=provider_context["tools"],
-                            tools_count=len(provider_context["tools"]),
-                        )
-                        # Include prompt for reference (though config.instructions should already be set)
-                        if hasattr(context_config, 'prompt') and context_config.prompt:
-                            provider_context['prompt'] = context_config.prompt
+
+                # PAYLOAD passthrough raw (NO parse in engine). Provider decides parsing/merge.
+                payload_json = None
+                channel_vars = getattr(session, "channel_vars", None)
+                if isinstance(channel_vars, dict):
+                    for key in ("PAYLOAD", "__PAYLOAD", "payload_json"):
+                        raw = channel_vars.get(key)
+                        if isinstance(raw, str) and raw.strip():
+                            payload_json = raw.strip()
+                            break
+                if payload_json:
+                    provider_context["payload_json"] = payload_json
+                    logger.debug(
+                        "Added raw PAYLOAD to provider context",
+                        call_id=call_id,
+                        payload_len=len(payload_json),
+                    )
             except Exception as e:
                 logger.warning(f"Failed to build provider context: {e}", call_id=call_id, exc_info=True)
             
@@ -11056,14 +11093,15 @@ class Engine:
         tool_start_time = time.time()
 
         try:
-            # Determine allowlisted tools for this call (contexts are the source of truth).
+            # Determine allowlisted tools for this call from the mandatory global allowlist.
             allowed_tools: list[str] = []
             try:
-                if getattr(session, "context_name", None):
-                    ctx_cfg = self.transport_orchestrator.get_context_config(session.context_name)
-                    allowed_tools = list(getattr(ctx_cfg, "tools", None) or []) if ctx_cfg else []
+                cfg_tools = getattr(self.config, "tools", {}) or {}
+                raw_allowed = cfg_tools.get("allowed_tools") if isinstance(cfg_tools, dict) else None
+                if isinstance(raw_allowed, list):
+                    allowed_tools = [str(t).strip() for t in raw_allowed if str(t).strip()]
             except Exception:
-                logger.debug("Failed resolving context tool allowlist", call_id=call_id, exc_info=True)
+                logger.debug("Failed resolving global tool allowlist", call_id=call_id, exc_info=True)
 
             if function_name not in allowed_tools:
                 result = {"status": "error", "message": f"Tool '{function_name}' not allowed for this call"}
