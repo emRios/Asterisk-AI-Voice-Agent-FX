@@ -24,7 +24,7 @@ class CancelTransferTool(Tool):
     def definition(self) -> ToolDefinition:
         return ToolDefinition(
             name="cancel_transfer",
-            description="Cancel the current transfer if it hasn't been answered yet. Use when caller changes their mind.",
+            description="Cancel the current transfer or invited participant leg if it hasn't been answered yet. Use when caller changes their mind.",
             category=ToolCategory.TELEPHONY,
             requires_channel=True,
             max_execution_time=5,
@@ -59,11 +59,11 @@ class CancelTransferTool(Tool):
                     "message": "Session not found"
                 }
             
-            # Check if there's an active transfer
-            if not session.current_action or session.current_action.get('type') not in {'transfer', 'attended_transfer'}:
+            # Check if there's an active cancelable leg
+            if not session.current_action or session.current_action.get('type') not in {'transfer', 'attended_transfer', 'conference-participant'}:
                 return {
                     "status": "no_transfer",
-                    "message": "There's no transfer in progress to cancel."
+                    "message": "There's no transfer or invited participant in progress to cancel."
                 }
             
             action = session.current_action

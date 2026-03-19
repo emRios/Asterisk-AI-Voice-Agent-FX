@@ -2998,6 +2998,7 @@ class Engine:
         handlers = {
             'transfer': self._handle_transfer_answered,
             'warm-transfer': self._handle_transfer_answered,  # Warm transfer uses same handler
+            'conference-participant': self._handle_conference_participant_answered,
             'attended-transfer': self._handle_attended_transfer_answered,
             'transfer-failed': self._handle_transfer_failed,
             'voicemail-complete': self._handle_voicemail_complete,
@@ -3028,6 +3029,156 @@ class Engine:
                    call_id=call_id)
         # Don't hang up - let MOH play. Channel cleanup happens in _stop_background_music()
     
+    def _extract_conference_participant_mode(self, args: list) -> str:
+        """Parse conference participant mode from Stasis args."""
+        for token in args[3:]:
+            token_text = str(token or "").strip()
+            if token_text.lower().startswith("mode="):
+                value = token_text.split("=", 1)[1].strip().lower()
+                return value if value in {"listen", "talk"} else "talk"
+        return "talk"
+
+    async def _wait_channel_up_and_stable(
+        self,
+        channel_id: str,
+        *,
+        timeout_sec: float = 3.0,
+        poll_sec: float = 0.1,
+        settle_sec: float = 0.25,
+    ) -> bool:
+        """Wait until a channel reaches Up and remains stable for a short settling delay."""
+        deadline = time.monotonic() + max(0.1, float(timeout_sec))
+        last_state = None
+
+        while time.monotonic() < deadline:
+            try:
+                info = await self.ari_client.send_command(
+                    "GET",
+                    f"channels/{channel_id}",
+                    tolerate_statuses=[404],
+                )
+            except Exception:
+                logger.debug("Conference participant channel state probe failed", channel_id=channel_id, exc_info=True)
+                info = None
+
+            if not info:
+                logger.warning("Conference participant channel missing during Up wait", channel_id=channel_id)
+                return False
+
+            status = info.get("status") if isinstance(info, dict) else None
+            if status == 404:
+                logger.warning("Conference participant channel disappeared before reaching Up", channel_id=channel_id)
+                return False
+
+            last_state = str(info.get("state") or "")
+            if last_state == "Up":
+                if settle_sec > 0:
+                    await asyncio.sleep(max(0.0, float(settle_sec)))
+                logger.info(
+                    "Conference participant channel is Up and stable",
+                    channel_id=channel_id,
+                    settle_sec=settle_sec,
+                )
+                return True
+
+            await asyncio.sleep(max(0.05, float(poll_sec)))
+
+        logger.warning(
+            "Conference participant channel did not reach Up before timeout",
+            channel_id=channel_id,
+            last_state=last_state,
+            timeout_sec=timeout_sec,
+        )
+        return False
+
+    async def _handle_conference_participant_answered(self, channel_id: str, args: list):
+        """
+        Handle a third PJSIP leg joining an active conference bridge while AI remains attached.
+        Args: ['conference-participant', caller_id, target_extension, ...]
+        """
+        if len(args) < 2:
+            logger.error("CONFERENCE PARTICIPANT - Insufficient args", channel_id=channel_id, args=args)
+            await self.ari_client.hangup_channel(channel_id)
+            return
+
+        caller_id = args[1]
+        target = args[2] if len(args) > 2 else "unknown"
+        mode = self._extract_conference_participant_mode(args)
+
+        logger.info(
+            "CONFERENCE PARTICIPANT ANSWERED - Preparing third leg join",
+            channel_id=channel_id,
+            caller_id=caller_id,
+            target=target,
+            mode=mode,
+        )
+
+        session = await self.session_store.get_by_call_id(caller_id)
+        if not session:
+            logger.error("CONFERENCE PARTICIPANT - Session not found", caller_id=caller_id, channel_id=channel_id)
+            await self.ari_client.hangup_channel(channel_id)
+            return
+
+        if not session.bridge_id:
+            logger.error(
+                "CONFERENCE PARTICIPANT - Session bridge missing",
+                caller_id=caller_id,
+                channel_id=channel_id,
+            )
+            await self.ari_client.hangup_channel(channel_id)
+            return
+
+        is_ready = await self._wait_channel_up_and_stable(channel_id)
+        if not is_ready:
+            await self.ari_client.hangup_channel(channel_id)
+            return
+
+        try:
+            await self.ari_client.add_channel_to_bridge(session.bridge_id, channel_id)
+            logger.info(
+                "CONFERENCE PARTICIPANT COMPLETE - Third leg bridged",
+                channel_id=channel_id,
+                bridge_id=session.bridge_id,
+                caller_id=caller_id,
+                target=target,
+                mode=mode,
+            )
+
+            if mode == "listen":
+                try:
+                    await self.ari_client.send_command(
+                        "POST",
+                        f"channels/{channel_id}/mute",
+                        params={"direction": "in"},
+                    )
+                    logger.info(
+                        "CONFERENCE PARTICIPANT - Listen mode applied",
+                        channel_id=channel_id,
+                        caller_id=caller_id,
+                    )
+                except Exception:
+                    logger.warning(
+                        "CONFERENCE PARTICIPANT - Failed to apply listen mode",
+                        channel_id=channel_id,
+                        caller_id=caller_id,
+                        exc_info=True,
+                    )
+
+            if session.current_action:
+                session.current_action["answered"] = True
+                session.current_action["channel_id"] = channel_id
+                session.current_action["type"] = "conference-participant"
+                session.current_action["mode"] = mode
+            await self._save_session(session)
+
+        except Exception as e:
+            logger.error(
+                f"CONFERENCE PARTICIPANT - Failed to bridge: {e}",
+                channel_id=channel_id,
+                caller_id=caller_id,
+            )
+            await self.ari_client.hangup_channel(channel_id)
+
     async def _handle_transfer_answered(self, channel_id: str, args: list):
         """
         Handle successful transfer (target answered).
@@ -3131,6 +3282,19 @@ class Engine:
         except Exception:
             logger.debug("Failed to schedule attended transfer timeout guard", call_id=call_id, exc_info=True)
 
+    def start_conference_participant_timeout_guard(self, call_id: str, participant_channel_id: str, *, timeout_sec: float) -> None:
+        """Ensure a ringing conference participant leg is cleaned up if it never answers."""
+        try:
+            asyncio.create_task(
+                self._conference_participant_timeout_guard(
+                    call_id,
+                    participant_channel_id,
+                    timeout_sec=float(timeout_sec),
+                )
+            )
+        except Exception:
+            logger.debug("Failed to schedule conference participant timeout guard", call_id=call_id, exc_info=True)
+
     async def _attended_transfer_timeout_guard(self, call_id: str, agent_channel_id: str, *, timeout_sec: float) -> None:
         try:
             await asyncio.sleep(max(0.0, float(timeout_sec)) + 2.0)
@@ -3171,6 +3335,46 @@ class Engine:
             await self._save_session(session)
         except Exception:
             logger.debug("Attended transfer timeout guard failed", call_id=call_id, exc_info=True)
+
+    async def _conference_participant_timeout_guard(
+        self,
+        call_id: str,
+        participant_channel_id: str,
+        *,
+        timeout_sec: float,
+    ) -> None:
+        try:
+            await asyncio.sleep(max(0.0, float(timeout_sec)) + 2.0)
+            session = await self.session_store.get_by_call_id(call_id)
+            if not session:
+                return
+
+            action = getattr(session, "current_action", None) or {}
+            if action.get("type") != "conference-participant":
+                return
+            if str(action.get("channel_id") or "") != str(participant_channel_id):
+                return
+            if bool(action.get("answered", False)):
+                return
+
+            logger.info(
+                "Conference participant timed out before answer",
+                call_id=call_id,
+                participant_channel_id=participant_channel_id,
+            )
+
+            try:
+                await self.ari_client.hangup_channel(participant_channel_id)
+            except Exception:
+                pass
+
+            try:
+                session.current_action = None
+            except Exception:
+                pass
+            await self._save_session(session)
+        except Exception:
+            logger.debug("Conference participant timeout guard failed", call_id=call_id, exc_info=True)
 
     def _unregister_attended_transfer_agent_channel(self, agent_channel_id: str) -> None:
         if agent_channel_id:
@@ -10986,6 +11190,7 @@ class Engine:
             app.router.add_get('/mcp/status', self._mcp_status_handler)
             app.router.add_post('/mcp/test/{server_id}', self._mcp_test_handler)
             app.router.add_get('/sessions/stats', self._sessions_stats_handler)
+            app.router.add_post('/calls/{call_id}/conference-participant', self._conference_participant_http_handler)
             runner = web.AppRunner(app)
             await runner.setup()
             # Host/port configurable via YAML health block with environment overrides (AAVA-30)
@@ -11027,6 +11232,67 @@ class Engine:
         except Exception as exc:
             logger.debug("Sessions stats handler failed", error=str(exc), exc_info=True)
             return web.json_response({"active_calls": 0, "error": "internal_error"}, status=500)
+
+    async def _conference_participant_http_handler(self, request):
+        """Execute conference_participant as an authenticated control-plane HTTP action."""
+        if not self._is_request_authorized(request):
+            return web.json_response(
+                {"status": "error", "message": "Forbidden: requires localhost or valid HEALTH_API_TOKEN"},
+                status=403,
+            )
+
+        call_id = str(request.match_info.get("call_id") or "").strip()
+        if not call_id:
+            return web.json_response({"status": "failed", "message": "Missing call_id"}, status=400)
+
+        try:
+            payload = await request.json()
+            if not isinstance(payload, dict):
+                payload = {}
+        except Exception:
+            return web.json_response({"status": "failed", "message": "Invalid JSON body"}, status=400)
+
+        destination = payload.get("destination") or payload.get("target")
+        mode = payload.get("mode", "talk")
+        channel_id = payload.get("channel_id") or payload.get("participant_channel_id")
+
+        try:
+            session = await self.session_store.get_by_call_id(call_id)
+        except Exception as exc:
+            logger.debug("Conference participant HTTP session lookup failed", call_id=call_id, error=str(exc), exc_info=True)
+            return web.json_response({"status": "error", "message": "internal_error"}, status=500)
+
+        if not session:
+            return web.json_response({"status": "failed", "message": "Session not found"}, status=404)
+
+        try:
+            from src.tools.context import ToolExecutionContext
+            from src.tools.registry import tool_registry
+
+            tool = tool_registry.get("conference_participant")
+            if not tool:
+                return web.json_response({"status": "error", "message": "Tool 'conference_participant' not registered"}, status=500)
+
+            context = ToolExecutionContext(
+                call_id=call_id,
+                caller_channel_id=session.caller_channel_id,
+                bridge_id=session.bridge_id,
+                session_store=self.session_store,
+                ari_client=self.ari_client,
+                config=self.config.dict() if hasattr(self.config, "dict") else self.config,
+                provider_name=getattr(session, "provider_name", None),
+            )
+            result = await tool.execute(
+                {"destination": destination, "mode": mode, "channel_id": channel_id},
+                context,
+            )
+        except Exception as exc:
+            logger.error("Conference participant HTTP execution failed", call_id=call_id, error=str(exc), exc_info=True)
+            return web.json_response({"status": "error", "message": str(exc)}, status=500)
+
+        result_status = str((result or {}).get("status") or "error").lower()
+        http_status = 200 if result_status == "success" else 400
+        return web.json_response(result or {"status": "error", "message": "Unknown result"}, status=http_status)
 
     async def _mcp_status_handler(self, request):
         """Return MCP server/tool status for Admin UI (sanitized)."""

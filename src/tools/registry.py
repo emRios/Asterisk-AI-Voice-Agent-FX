@@ -291,6 +291,12 @@ After outputting a tool call, provide a brief spoken response.
             self.register(AttendedTransferTool)
         except ImportError as e:
             logger.warning(f"Could not import AttendedTransferTool: {e}")
+
+        try:
+            from src.tools.telephony.conference_participant import ConferenceParticipantTool
+            self.register(ConferenceParticipantTool)
+        except ImportError as e:
+            logger.warning(f"Could not import ConferenceParticipantTool: {e}")
         
         try:
             from src.tools.telephony.cancel_transfer import CancelTransferTool
