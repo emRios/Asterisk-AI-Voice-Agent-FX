@@ -11062,9 +11062,19 @@ class Engine:
                             payload_json = raw.strip()
                             break
                 if payload_json:
+                    try:
+                        payload_json = base64.b64decode(payload_json, validate=True).decode("utf-8", errors="ignore").strip()
+                    except Exception as exc:
+                        logger.warning(
+                            "Failed to decode PAYLOAD base64; ignoring payload",
+                            call_id=call_id,
+                            error=str(exc),
+                        )
+                        payload_json = None
+                if payload_json:
                     provider_context["payload_json"] = payload_json
                     logger.debug(
-                        "Added raw PAYLOAD to provider context",
+                        "Added decoded PAYLOAD to provider context",
                         call_id=call_id,
                         payload_len=len(payload_json),
                     )
