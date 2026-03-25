@@ -297,7 +297,13 @@ After outputting a tool call, provide a brief spoken response.
             self.register(ConferenceParticipantTool)
         except ImportError as e:
             logger.warning(f"Could not import ConferenceParticipantTool: {e}")
-        
+
+        try:
+            from src.tools.telephony.disconnect_ai import DisconnectAITool
+            self.register(DisconnectAITool)
+        except ImportError as e:
+            logger.warning(f"Could not import DisconnectAITool: {e}")
+
         try:
             from src.tools.telephony.cancel_transfer import CancelTransferTool
             self.register(CancelTransferTool)

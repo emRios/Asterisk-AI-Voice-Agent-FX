@@ -96,6 +96,11 @@ class SessionStore:
             
             return session
     
+    async def unindex_channel(self, channel_id: str) -> None:
+        """Remove a channel_id mapping without destroying the session itself."""
+        async with self._lock:
+            self._sessions_by_channel_id.pop(channel_id, None)
+
     async def set_gating_token(self, call_id: str, playback_id: str) -> bool:
         """Add a TTS gating token for a call."""
         async with self._lock:
@@ -137,7 +142,7 @@ class SessionStore:
                     session.tts_playing = True
                     session.audio_capture_enabled = False
             
-            logger.info("🔇 TTS GATING - Token added",
+            logger.info("TTS GATING - Token added",
                        call_id=call_id,
                        playback_id=playback_id,
                        active_count=session.tts_active_count,
@@ -187,7 +192,7 @@ class SessionStore:
                     session.tts_playing = True
                     session.audio_capture_enabled = False
             
-            logger.info("🔊 TTS GATING - Token removed",
+            logger.info("TTS GATING - Token removed",
                        call_id=call_id,
                        playback_id=playback_id,
                        active_count=session.tts_active_count,

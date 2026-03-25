@@ -2245,9 +2245,21 @@ class Engine:
                 )
                 asyncio.create_task(self._retry_attach_external_media_channel(external_media_id))
                 return
-            
+
+            if bool(getattr(session, "ai_detached", False)):
+                logger.info(
+                    "Ignoring ExternalMedia StasisStart for AI-detached call",
+                    call_id=session.call_id,
+                    external_media_id=external_media_id,
+                )
+                try:
+                    await self.ari_client.hangup_channel(external_media_id)
+                except Exception:
+                    pass
+                return
+
             caller_channel_id = session.caller_channel_id
-            
+
             # Add ExternalMedia channel to the bridge
             bridge_id = session.bridge_id
             if bridge_id:
@@ -2303,6 +2315,18 @@ class Engine:
                             break
 
                 if session and session.bridge_id:
+                    if bool(getattr(session, "ai_detached", False)):
+                        logger.info(
+                            "Stopping ExternalMedia attach retry for AI-detached call",
+                            call_id=session.call_id,
+                            external_media_id=external_media_id,
+                            attempt=attempt,
+                        )
+                        try:
+                            await self.ari_client.hangup_channel(external_media_id)
+                        except Exception:
+                            pass
+                        return
                     success = await self.ari_client.add_channel_to_bridge(session.bridge_id, external_media_id)
                     if success:
                         session.external_media_id = external_media_id
@@ -2370,9 +2394,11 @@ class Engine:
             else:
                 logger.info("🎯 HYBRID ARI - Step 1: Skipping answer (outbound)", channel_id=caller_channel_id)
             
-            # Create bridge immediately (use default bridge_type to prevent simple_bridge optimization)
-            logger.info("🎯 HYBRID ARI - Step 2: Creating bridge immediately", channel_id=caller_channel_id)
-            bridge_id = await self.ari_client.create_bridge()  # Uses default: mixing,dtmf_events,proxy_media
+            # Create bridge immediately (mixing,dtmf_events,proxy_media prevents simple_bridge optimization)
+            logger.info("🎯 HYBRID ARI - Step 2: Creating bridge immediately",
+                       channel_id=caller_channel_id,
+                       bridge_type="mixing,dtmf_events,proxy_media")
+            bridge_id = await self.ari_client.create_bridge()  # default: mixing,dtmf_events,proxy_media
             if not bridge_id:
                 raise RuntimeError("Failed to create mixing bridge")
             logger.info("🎯 HYBRID ARI - Step 2: ✅ Bridge created", 
@@ -2785,12 +2811,21 @@ class Engine:
                         caller_channel_id=caller_channel_id)
             await self.ari_client.hangup_channel(local_channel_id)
             return
-        
+
+        if bool(getattr(session, "ai_detached", False)):
+            logger.info(
+                "Local channel arrived for AI-detached call; hanging up helper leg",
+                call_id=caller_channel_id,
+                local_channel_id=local_channel_id,
+            )
+            await self.ari_client.hangup_channel(local_channel_id)
+            return
+
         bridge_id = session.bridge_id
-        
+
         try:
             # Add Local channel to bridge
-            logger.info("🎯 HYBRID ARI - Adding Local channel to bridge", 
+            logger.info("🎯 HYBRID ARI - Adding Local channel to bridge",
                        local_channel_id=local_channel_id,
                        bridge_id=bridge_id)
             local_success = await self.ari_client.add_channel_to_bridge(bridge_id, local_channel_id)
@@ -2881,6 +2916,15 @@ class Engine:
                 "🎯 HYBRID ARI - Session missing for AudioSocket channel",
                 audiosocket_channel_id=audiosocket_channel_id,
                 caller_channel_id=caller_channel_id,
+            )
+            await self.ari_client.hangup_channel(audiosocket_channel_id)
+            return
+
+        if bool(getattr(session, "ai_detached", False)):
+            logger.info(
+                "AudioSocket channel arrived for AI-detached call; hanging up helper leg",
+                call_id=caller_channel_id,
+                audiosocket_channel_id=audiosocket_channel_id,
             )
             await self.ari_client.hangup_channel(audiosocket_channel_id)
             return
@@ -3269,6 +3313,164 @@ class Engine:
             logger.error(f"🔀 TRANSFER - Failed to bridge: {e}",
                         channel_id=channel_id)
             await self.ari_client.hangup_channel(channel_id)
+
+    async def disconnect_ai_from_call(self, call_id: str, *, cleanup_media_channels: bool = True) -> Dict[str, Any]:
+        """
+        Detach AI media and provider session while keeping caller call leg active.
+
+        This is used by the disconnect_ai tool when a human participant should
+        continue the conversation without AI.
+        """
+        session = await self.session_store.get_by_call_id(call_id)
+        if not session:
+            return {
+                "status": "error",
+                "message": f"Session not found for call_id: {call_id}",
+                "ai_disconnected": False,
+            }
+
+        bridge_id = getattr(session, "bridge_id", None)
+        ai_channel_ids: List[str] = []
+        for channel_id in (
+            getattr(session, "external_media_id", None),
+            getattr(session, "pending_external_media_id", None),
+            getattr(session, "audiosocket_channel_id", None),
+            getattr(session, "local_channel_id", None),
+        ):
+            if channel_id and channel_id != session.caller_channel_id and channel_id not in ai_channel_ids:
+                ai_channel_ids.append(str(channel_id))
+
+        detached_channels: List[str] = []
+        failed_detach_channels: List[str] = []
+        for channel_id in ai_channel_ids:
+            if not bridge_id:
+                failed_detach_channels.append(channel_id)
+                continue
+            try:
+                removed = await self.ari_client.remove_channel_from_bridge(bridge_id, channel_id)
+                if removed:
+                    detached_channels.append(channel_id)
+                else:
+                    failed_detach_channels.append(channel_id)
+            except Exception:
+                failed_detach_channels.append(channel_id)
+                logger.warning(
+                    "Failed to detach AI media channel from bridge",
+                    call_id=call_id,
+                    bridge_id=bridge_id,
+                    channel_id=channel_id,
+                    exc_info=True,
+                )
+
+        try:
+            await self.streaming_playback_manager.stop_streaming_playback(call_id)
+        except Exception:
+            logger.debug("Streaming playback stop failed during AI disconnect", call_id=call_id, exc_info=True)
+
+        try:
+            start_task = self._provider_start_tasks.pop(call_id, None)
+            if start_task:
+                start_task.cancel()
+        except Exception:
+            pass
+
+        provider_stopped = False
+        provider = self._call_providers.pop(call_id, None)
+        if provider and hasattr(provider, "stop_session"):
+            try:
+                await provider.stop_session()
+                provider_stopped = True
+            except Exception:
+                logger.debug("Provider stop_session failed during AI disconnect", call_id=call_id, exc_info=True)
+
+        try:
+            pipeline_task = self._pipeline_tasks.pop(call_id, None)
+            if pipeline_task:
+                pipeline_task.cancel()
+            pipeline_queue = self._pipeline_queues.pop(call_id, None)
+            if pipeline_queue:
+                try:
+                    pipeline_queue.put_nowait(None)
+                except Exception:
+                    pass
+            try:
+                await self._disable_pipeline_talk_detect(session)
+            except Exception:
+                logger.debug("Pipeline talk detect disable failed during AI disconnect", call_id=call_id, exc_info=True)
+            self._pipeline_forced.pop(call_id, None)
+            if getattr(self, "pipeline_orchestrator", None) and self.pipeline_orchestrator.enabled:
+                try:
+                    await self.pipeline_orchestrator.release_pipeline(call_id)
+                except Exception:
+                    logger.debug("Pipeline release failed during AI disconnect", call_id=call_id, exc_info=True)
+        except Exception:
+            logger.debug("Pipeline detach cleanup failed", call_id=call_id, exc_info=True)
+
+        audiosocket_uuid = getattr(session, "audiosocket_uuid", None)
+
+        session.ai_detached = True
+        session.provider_session_active = False
+        session.audio_capture_enabled = False
+        session.tts_playing = False
+        session.tts_active_count = 0
+        session.tts_tokens.clear()
+        session.external_media_id = None
+        session.pending_external_media_id = None
+        session.external_media_port = None
+        try:
+            session.external_media_codec = None
+        except Exception:
+            pass
+        session.audiosocket_channel_id = None
+        session.audiosocket_conn_id = None
+        session.audiosocket_uuid = None
+        session.local_channel_id = None
+        session.status = "ai_detached"
+        await self._save_session(session)
+
+        for channel_id in ai_channel_ids:
+            try:
+                await self.session_store.unindex_channel(channel_id)
+            except Exception:
+                logger.debug("Failed to unindex detached AI channel", call_id=call_id, channel_id=channel_id, exc_info=True)
+
+        for channel_id in ai_channel_ids:
+            self.bridges.pop(channel_id, None)
+            self.pending_local_channels.pop(channel_id, None)
+            self.pending_audiosocket_channels.pop(channel_id, None)
+        self.local_channels.pop(call_id, None)
+        self.audiosocket_channels.pop(call_id, None)
+        if audiosocket_uuid:
+            self.uuidext_to_channel.pop(audiosocket_uuid, None)
+
+        if cleanup_media_channels:
+            for channel_id in ai_channel_ids:
+                try:
+                    await self.ari_client.hangup_channel(channel_id)
+                except Exception:
+                    logger.debug("Failed to hang up detached AI channel", call_id=call_id, channel_id=channel_id, exc_info=True)
+
+        if not ai_channel_ids and not provider:
+            message = "AI was already disconnected for this call."
+        else:
+            message = "AI disconnected from call. Caller remains connected."
+
+        logger.info(
+            "AI disconnect completed",
+            call_id=call_id,
+            detached_channels=detached_channels,
+            failed_detach_channels=failed_detach_channels,
+            provider_stopped=provider_stopped,
+            cleanup_media_channels=cleanup_media_channels,
+        )
+        return {
+            "status": "success",
+            "message": message,
+            "ai_disconnected": True,
+            "detached_channels": detached_channels,
+            "failed_detach_channels": failed_detach_channels,
+            "provider_stopped": provider_stopped,
+        }
 
     def register_attended_transfer_agent_channel(self, call_id: str, agent_channel_id: str) -> None:
         """Register an attended transfer agent channel to resolve DTMF events back to a call."""
@@ -10906,6 +11108,9 @@ class Engine:
             session = await self.session_store.get_by_call_id(call_id)
             if not session:
                 logger.error("Start provider session called for unknown call", call_id=call_id)
+                return
+            if bool(getattr(session, "ai_detached", False)):
+                logger.info("Skipping provider start for AI-detached call", call_id=call_id)
                 return
             # Idempotent fast-path.
             if getattr(session, "provider_session_active", False) and call_id in self._call_providers:

@@ -242,7 +242,7 @@ class ExternalMediaEngine:
                        external_host=external_host)
             
             # Create bridge
-            bridge_id = await self.ari_client.create_bridge("mixing")
+            bridge_id = await self.ari_client.create_bridge("mixing,dtmf_events,proxy_media")
             if not bridge_id:
                 logger.error("Failed to create bridge", channel_id=channel_id)
                 await self._cleanup_call(channel_id)

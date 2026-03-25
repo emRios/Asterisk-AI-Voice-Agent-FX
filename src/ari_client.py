@@ -461,7 +461,7 @@ class ARIClient:
             return False
 
 
-    async def create_bridge(self, bridge_type: str = "mixing") -> Optional[str]:
+    async def create_bridge(self, bridge_type: str = "mixing,dtmf_events,proxy_media") -> Optional[str]:
         """Create a new bridge for channel mixing."""
         try:
             response = await self.send_command(
