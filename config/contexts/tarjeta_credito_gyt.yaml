@@ -1,0 +1,568 @@
+# ============================================================================
+# Campaña: Tarjeta de Crédito G&T Continental
+# Campaña outbound para ofrecer tarjeta de crédito VISA/Mastercard
+# a clientes preseleccionados del Banco G&T Continental.
+#
+# Manejo de desvíos (sin cambios de código):
+# - En cada estado se agrega el intent "desvio".
+# - "desvio" lleva a un estado DESVIO_DESDE_<ESTADO>.
+# - DESVIO_DESDE_<ESTADO> responde breve y vuelve al mismo estado con "retomar".
+# ============================================================================
+
+name: tarjeta_credito_gyt
+
+tools:
+  - transfer
+  - hangup_call
+  - CallEventNotification
+  - disconnect_ai
+  - handoff_to_human
+greeting: |
+  Buenos días, me comunico del Banco Ge ite Continental.
+  ¿Puedo hablar con el señor Oscar Gonzales?
+
+prompt: |-
+  Eres Ana González, asesora virtual del Banco Ge ite Continental en Guatemala.
+  Realizas llamadas salientes para ofrecer una tarjeta de crédito VISA o Mastercard
+  Internacional a clientes preseleccionados.
+
+  INSTRUCCIONES DE PRONUNCIACIÓN:
+  - Montos: "mil quinientos quetzales con cincuenta centavos" (nunca "Q1,500.50").
+  - Porcentajes: "siete punto cinco por ciento" (no "7.5%").
+  - Años: "dos mil veinticuatro" (no "2024").
+  - Cantidades: "quince mil" (nunca "15,000").
+  - @: "arroba".  .com: "punto com".  WhatsApp: "watsap".
+  - Banco G&T: "Banco Ge ite".
+  - Teléfonos (8 dígitos): pares con ritmo natural.
+
+  REGLAS GENERALES:
+  - Respuestas cortas, naturales y sin muletillas.
+  - No pidas datos sensibles (DPI, número de cuenta, CVV, PIN, contraseñas).
+  - Solo confirma nombre completo y disponibilidad para hablar.
+  - Solo responde el texto para convertir a audio, nada más.
+  - No uses onomatopeyas ni emojis.
+  - Si el cliente interrumpe, detén tu respuesta y adapta el siguiente turno.
+
+  MANEJO DE DESVÍOS:
+  - Si el cliente se desvía del tema, contesta en una frase y reencauza.
+  - No te quedes conversando fuera del tema más de un turno.
+  - Reencauza con: "Para no quitarle tiempo, retomemos donde íbamos:" y la última pregunta del guion.
+
+  DATOS A RECOPILAR (cuando el cliente los ofrezca voluntariamente):
+  - Nombre completo confirmado
+  - Disponibilidad horaria para seguimiento
+  - Tipo de compras frecuentes (viajes, supermercados, centros comerciales)
+  - Medio de pago habitual (efectivo, tarjeta de crédito, tarjeta de débito)
+  - Objeciones expresadas y cómo se resolvieron
+
+  EVALUACIÓN DE INTENCIÓN DE COMPRA:
+  Internamente evalúa la intención en escala 0–100.
+  Umbral configurado: {{ intent_threshold }} sobre 100.
+  SOLO llama a `CallEventNotification` cuando:
+    - Estés en PITCH, SALUDO, PERSONALIZACION u OBJECIONES
+    - Tu estimación de intención >= {{ intent_threshold }}
+  Parámetros de CallEventNotification:
+    - event_type: "TRANSFER_REQUESTED"
+    - intent_score: tu estimación (0–100)
+    - product_name: "Tarjeta de crédito VISA/Mastercard G&T Continental"
+    - notes: 1–2 frases explicando la intención percibida
+    - priority: "high" (o "critical" si muy clara)
+  Máximo UNA llamada por conversación.
+
+intent_threshold: ${GYT_INTENT_THRESHOLD:-70}
+
+flow_config:
+  initial_state: SALUDO
+  max_state_visits: 3
+  max_visit_action: force_terminal
+  default_enforcement: advisory
+  intent_threshold: 0.7
+
+flow:
+  # ==========================================================================
+  # ETAPA 1: CONTACTO INICIAL
+  # ==========================================================================
+
+  SALUDO:
+    objetivo: >
+      Saludar a la persona con cortesia y confirmar que hablas con el titular.
+    script_base: {}
+    expected_intents: [si, si_soy_yo, si_es, desvio]
+    transitions:
+      es_titular: MOTIVO_LLAMADA
+      no_es_titular: DESPEDIDA_NO_TITULAR
+      no_disponible: REAGENDAR
+      desvio: DESVIO_DESDE_SALUDO
+    on_enter:
+      - action: function_call
+        function: CallEventNotification
+        args:
+          event_type: "CALL_STARTED"
+          product_name: "Tarjeta de credito VISA/Mastercard G&T Continental"
+          notes: "Inicio de llamada: validacion de titular"
+          priority: "high"
+    timeout_secs: 15
+    timeout_action: prompt
+    timeout_prompt: "Hola, me escucha?"
+
+  DESVIO_DESDE_SALUDO:
+    objetivo: >
+      Manejar desvio y regresar al saludo (confirmacion de titular).
+    script_base: |-
+      Entiendo; para no quitarle tiempo, en esta llamada me enfoco en la informacion de la tarjeta.
+      Para no quitarle tiempo, retomemos donde estabamos: puedo hablar con el senor o la senora titular de la linea, por favor?
+    expected_intents: [retomar, sigue_fuera_tema, quiere_terminar]
+    transitions:
+      retomar: SALUDO
+      sigue_fuera_tema: DESPEDIDA_NO_INTERES
+      quiere_terminar: DESPEDIDA_NO_INTERES
+
+  MOTIVO_LLAMADA:
+    objetivo: >
+      Explicar de forma breve el motivo de la llamada y confirmar si el cliente
+      dispone de un minuto para escuchar la oferta.
+    script_base: |-
+      Gracias por tomar la llamada.
+      Le contacto porque tenemos una oferta exclusiva de tarjeta de credito VISA o Mastercard
+      del Banco Ge ite Continental para clientes preseleccionados.
+      Tiene un minuto para que se la presente brevemente?
+    expected_intents: [acepta_escuchar, no_tiene_tiempo, rechazo_directo, desvio]
+    transitions:
+      acepta_escuchar: PREPARAR_HUMANO
+      no_tiene_tiempo: REAGENDAR
+      rechazo_directo: MANEJO_RECHAZO_INICIAL
+      desvio: DESVIO_DESDE_MOTIVO_LLAMADA
+    timeout_secs: 15
+    timeout_action: prompt
+    timeout_prompt: "Le parece bien si le cuento en un minuto de que se trata?"
+
+  DESVIO_DESDE_MOTIVO_LLAMADA:
+    objetivo: >
+      Manejar desvio y regresar a la pregunta de disponibilidad para escuchar la oferta.
+    script_base: |-
+      Entiendo; para no quitarle tiempo, en esta llamada me enfoco en la tarjeta.
+      Para no quitarle tiempo, retomemos donde estabamos: tiene un minuto para que le presente brevemente la oferta?
+    expected_intents: [retomar, sigue_fuera_tema, quiere_terminar]
+    transitions:
+      retomar: MOTIVO_LLAMADA
+      sigue_fuera_tema: DESPEDIDA_NO_INTERES
+      quiere_terminar: DESPEDIDA_NO_INTERES
+
+  PREPARAR_HUMANO:
+    objetivo: >
+      Solicitar al marcador la incorporacion anticipada del agente humano en modo escucha
+      antes de continuar con la presentacion comercial.
+    script_base: |-
+      Perfecto, le agradezco. Permitame un momento y continuo con la informacion.
+    on_enter:
+      - action: function_call
+        function: CallEventNotification
+        args:
+          event_type: "TRANSFER_REQUESTED"
+          product_name: "Tarjeta de credito VISA/Mastercard G&T Continental"
+          notes: "Solicitar incorporacion anticipada de asesor humano en modo escucha antes de la presentacion"
+          priority: "high"
+    timeout_secs: 1
+    timeout_action: transition
+    timeout_transition: PRESENTACION
+
+  PRESENTACION:
+    objetivo: >
+      Presentar la oferta de forma breve mientras el agente humano ya escucha la llamada.
+      Detectar que beneficio o tipo de producto despierta mayor interes para preparar el handoff.
+    script_base: |-
+      Gracias por esperar.
+      Le presento brevemente la oferta: contamos con una tarjeta VISA o Mastercard internacional,
+      con membresia gratis, promociones y beneficios pensados para su perfil.
+      Para orientarle mejor, digame: que le llama mas la atencion, la membresia gratis,
+      los puntos y promociones, o las compras en cuotas?
+    expected_intents: [interes, quiere_mas_info, objecion, desinteres, desvio]
+    transitions:
+      interes: BENEFICIO_MEMBRESIA
+      quiere_mas_info: BENEFICIO_PUNTOS
+      objecion: OBJECIONES
+      desinteres: DESPEDIDA_NO_INTERES
+      desvio: DESVIO_DESDE_PRESENTACION
+    timeout_secs: 15
+    timeout_action: prompt
+    timeout_prompt: "Que beneficio le interesa mas: membresia gratis, puntos o cuotas?"
+
+  DESVIO_DESDE_PRESENTACION:
+    objetivo: >
+      Manejar desvio y regresar a la pregunta sobre el beneficio de mayor interes.
+    script_base: |-
+      Entiendo; para no quitarle tiempo, en esta llamada me enfoco en la tarjeta.
+      Para no quitarle tiempo, retomemos donde estabamos: que beneficio le interesa mas, la membresia gratis, los puntos o las cuotas?
+    expected_intents: [retomar, sigue_fuera_tema, quiere_terminar]
+    transitions:
+      retomar: PRESENTACION
+      sigue_fuera_tema: DESPEDIDA_NO_INTERES
+      quiere_terminar: DESPEDIDA_NO_INTERES
+
+  # ==========================================================================
+  # ETAPA 2: MANEJO DE OBJECIONES INICIALES
+  # ==========================================================================
+
+  MANEJO_RECHAZO_INICIAL:
+    objetivo: >
+      Manejar el rechazo inicial con empatía. Ofrecer un beneficio rápido
+      para captar atención. Si insiste en no querer, despedirse.
+    script_base: |-
+      Entiendo perfectamente. Solo quería mencionarle que esta tarjeta viene
+      con membresía completamente gratis y un bono de bienvenida especial.
+      ¿Le puedo dar solo un minuto para contarle?
+    expected_intents: [acepta_escuchar, insiste_rechazo, desvio]
+    transitions:
+      acepta_escuchar: PREPARAR_HUMANO
+      insiste_rechazo: DESPEDIDA_NO_INTERES
+      desvio: DESVIO_DESDE_MANEJO_RECHAZO_INICIAL
+
+  DESVIO_DESDE_MANEJO_RECHAZO_INICIAL:
+    objetivo: >
+      Manejar desvío y regresar a la objeción inicial (último intento corto).
+    script_base: |-
+      Entiendo; para no quitarle tiempo, en esta llamada me enfoco en la tarjeta.
+      Para no quitarle tiempo, retomemos donde íbamos: ¿Le puedo dar solo un minuto para contarle los beneficios?
+    expected_intents: [retomar, sigue_fuera_tema, quiere_terminar]
+    transitions:
+      retomar: MANEJO_RECHAZO_INICIAL
+      sigue_fuera_tema: DESPEDIDA_NO_INTERES
+      quiere_terminar: DESPEDIDA_NO_INTERES
+
+  REAGENDAR:
+    objetivo: >
+      Ofrecer llamar en otro momento más conveniente para el cliente.
+      Confirmar disponibilidad horaria y despedirse cordialmente.
+    script_base: |-
+      No se preocupe, entiendo que no es buen momento.
+      ¿Habría un horario que le convenga mejor para que le devuelva la llamada?
+    expected_intents: [da_horario, no_quiere_reagendar, desvio]
+    transitions:
+      da_horario: CONFIRMAR_REAGENDAMIENTO
+      no_quiere_reagendar: DESPEDIDA_NO_INTERES
+      desvio: DESVIO_DESDE_REAGENDAR
+
+  DESVIO_DESDE_REAGENDAR:
+    objetivo: >
+      Manejar desvío y regresar al reagendamiento.
+    script_base: |-
+      Entiendo; para no quitarle tiempo, en esta llamada me enfoco en la tarjeta.
+      Para no quitarle tiempo, retomemos donde íbamos: ¿Habría un horario que le convenga mejor para que le devuelva la llamada?
+    expected_intents: [retomar, sigue_fuera_tema, quiere_terminar]
+    transitions:
+      retomar: REAGENDAR
+      sigue_fuera_tema: DESPEDIDA_NO_INTERES
+      quiere_terminar: DESPEDIDA_NO_INTERES
+
+  CONFIRMAR_REAGENDAMIENTO:
+    objetivo: >
+      Confirmar el horario proporcionado por el cliente para la siguiente llamada
+      y despedirse cordialmente.
+    script_base: |-
+      Perfecto, queda anotado. Le estaremos devolviendo la llamada en el horario
+      que nos indicó. Muchísimas gracias por su tiempo y que tenga un excelente día.
+    is_terminal: true
+    on_enter:
+      - action: function_call
+        function: CallEventNotification
+        args: {event_type: "CALLBACK_SCHEDULED"}
+
+  # ==========================================================================
+  # ETAPA 3: PRESENTACIÓN DE BENEFICIOS
+  # ==========================================================================
+
+  BENEFICIO_MEMBRESIA:
+    objetivo: >
+      Presentar el primer beneficio diferenciador: membresía gratis.
+      Contrastar con la competencia que cobra membresía.
+    script_base: |-
+      Regularmente cuando le entregan una tarjeta de crédito con otros bancos,
+      le cobran membresía. La propuesta que tenemos es otorgarle una tarjeta
+      exclusiva con membresía completamente gratis, y además viene acompañada
+      de un bono de bienvenida. ¿Qué le parece?
+    expected_intents: [interes, quiere_mas_info, objecion, desinteres, desvio]
+    transitions:
+      interes: PERSONALIZACION
+      quiere_mas_info: BENEFICIO_PUNTOS
+      objecion: OBJECIONES
+      desinteres: DESPEDIDA_NO_INTERES
+      desvio: DESVIO_DESDE_BENEFICIO_MEMBRESIA
+
+  DESVIO_DESDE_BENEFICIO_MEMBRESIA:
+    objetivo: >
+      Manejar desvío y regresar al beneficio de membresía.
+    script_base: |-
+      Entiendo; para no quitarle tiempo, en esta llamada me enfoco en la tarjeta.
+      Para no quitarle tiempo, retomemos donde íbamos: esta tarjeta incluye membresía completamente gratis y bono de bienvenida. ¿Qué le parece?
+    expected_intents: [retomar, sigue_fuera_tema, quiere_terminar]
+    transitions:
+      retomar: BENEFICIO_MEMBRESIA
+      sigue_fuera_tema: DESPEDIDA_NO_INTERES
+      quiere_terminar: DESPEDIDA_NO_INTERES
+
+  BENEFICIO_PUNTOS:
+    objetivo: >
+      Presentar beneficio de acumulación de puntos y promociones.
+      Conectar con el estilo de vida del cliente.
+    script_base: |-
+      Además de la membresía gratis, con cada compra que realice acumula puntos
+      que puede canjear por productos, viajes o descuentos en comercios aliados.
+      También tiene acceso a promociones exclusivas en restaurantes,
+      supermercados y centros comerciales. ¿Le gustaría saber más?
+    expected_intents: [interes, quiere_personalizar, objecion, desinteres, desvio]
+    transitions:
+      interes: PERSONALIZACION
+      quiere_personalizar: PERSONALIZACION
+      objecion: OBJECIONES
+      desinteres: DESPEDIDA_NO_INTERES
+      desvio: DESVIO_DESDE_BENEFICIO_PUNTOS
+
+  DESVIO_DESDE_BENEFICIO_PUNTOS:
+    objetivo: >
+      Manejar desvío y regresar al beneficio de puntos.
+    script_base: |-
+      Entiendo; para no quitarle tiempo, en esta llamada me enfoco en la tarjeta.
+      Para no quitarle tiempo, retomemos donde íbamos: con sus compras acumula puntos y accede a promociones. ¿Le gustaría saber más?
+    expected_intents: [retomar, sigue_fuera_tema, quiere_terminar]
+    transitions:
+      retomar: BENEFICIO_PUNTOS
+      sigue_fuera_tema: DESPEDIDA_NO_INTERES
+      quiere_terminar: DESPEDIDA_NO_INTERES
+
+  BENEFICIO_CUOTAS:
+    objetivo: >
+      Presentar beneficio de compras en cuotas sin intereses
+      y tasas preferenciales.
+    script_base: |-
+      Otro beneficio importante es que puede financiar sus compras en cuotas
+      con tasas preferenciales, y durante los primeros tres meses tiene
+      cero por ciento de interés en compras a cuotas. Esto le da mucha
+      flexibilidad para manejar sus gastos del mes.
+    expected_intents: [interes, objecion, desinteres, desvio]
+    transitions:
+      interes: PERSONALIZACION
+      objecion: OBJECIONES
+      desinteres: DESPEDIDA_NO_INTERES
+      desvio: DESVIO_DESDE_BENEFICIO_CUOTAS
+
+  DESVIO_DESDE_BENEFICIO_CUOTAS:
+    objetivo: >
+      Manejar desvío y regresar al beneficio de cuotas.
+    script_base: |-
+      Entiendo; para no quitarle tiempo, en esta llamada me enfoco en la tarjeta.
+      Para no quitarle tiempo, retomemos donde íbamos: puede comprar en cuotas con condiciones preferenciales. ¿Qué le parece?
+    expected_intents: [retomar, sigue_fuera_tema, quiere_terminar]
+    transitions:
+      retomar: BENEFICIO_CUOTAS
+      sigue_fuera_tema: DESPEDIDA_NO_INTERES
+      quiere_terminar: DESPEDIDA_NO_INTERES
+
+  # ==========================================================================
+  # ETAPA 4: PERSONALIZACIÓN
+  # ==========================================================================
+
+  PERSONALIZACION:
+    objetivo: >
+      Conocer los hábitos de consumo del cliente para personalizar la oferta.
+      Preguntar sobre viajes, centros comerciales, supermercados.
+      Preguntar qué medio de pago usa actualmente.
+    script_base: |-
+      Para poder recomendarle la mejor opción, cuénteme:
+      ¿A usted le gusta viajar, visitar centros comerciales o consume
+      más en supermercados? ¿Actualmente realiza sus compras con efectivo,
+      tarjeta de crédito o tarjeta de débito?
+    system_prompt_modifier: >
+      En este estado, escucha atentamente los hábitos de consumo del cliente.
+      Usa la información para personalizar los beneficios en el siguiente estado.
+      Si menciona viajes, enfatiza millas y seguros. Si menciona supermercados,
+      enfatiza cashback y puntos. Si menciona centros comerciales, enfatiza
+      promociones y cuotas sin intereses.
+    expected_intents: [comparte_habitos, no_quiere_compartir, objecion, desvio]
+    transitions:
+      comparte_habitos: OFERTA_PERSONALIZADA
+      no_quiere_compartir: OFERTA_PERSONALIZADA
+      objecion: OBJECIONES
+      desvio: DESVIO_DESDE_PERSONALIZACION
+
+  DESVIO_DESDE_PERSONALIZACION:
+    objetivo: >
+      Manejar desvío y regresar a la pregunta de hábitos de consumo.
+    script_base: |-
+      Entiendo; para no quitarle tiempo, en esta llamada me enfoco en la tarjeta.
+      Para no quitarle tiempo, retomemos donde íbamos: ¿le gusta viajar, ir a centros comerciales o compra más en supermercados? ¿Y usa efectivo, tarjeta de crédito o débito?
+    expected_intents: [retomar, sigue_fuera_tema, quiere_terminar]
+    transitions:
+      retomar: PERSONALIZACION
+      sigue_fuera_tema: DESPEDIDA_NO_INTERES
+      quiere_terminar: DESPEDIDA_NO_INTERES
+
+  OFERTA_PERSONALIZADA:
+    objetivo: >
+      Presentar la oferta adaptada a los hábitos del cliente.
+      Conectar beneficios específicos con lo que el cliente mencionó.
+      Intentar un primer cierre suave.
+    script_base: |-
+      Basándome en lo que me cuenta, esta tarjeta le vendría muy bien porque
+      le permite aprovechar al máximo sus compras habituales con puntos,
+      promociones y el beneficio de cero interés los primeros meses.
+      ¿Le gustaría que dejemos anotado su interés para avanzar con el proceso?
+    system_prompt_modifier: >
+      Personaliza esta respuesta según los hábitos que el cliente compartió.
+      Si mencionó viajes: enfatiza millas, seguros de viaje y acceso a salas VIP.
+      Si mencionó supermercados: enfatiza cashback y puntos dobles en supermercados.
+      Si mencionó centros comerciales: enfatiza cuotas sin intereses y promociones.
+    expected_intents: [acepta, tiene_dudas, objecion, rechazo, desvio]
+    transitions:
+      acepta: ESCALATE_TO_HUMAN
+      tiene_dudas: OBJECIONES
+      objecion: OBJECIONES
+      rechazo: ULTIMO_INTENTO
+      desvio: DESVIO_DESDE_OFERTA_PERSONALIZADA
+
+  DESVIO_DESDE_OFERTA_PERSONALIZADA:
+    objetivo: >
+      Manejar desvío y regresar al cierre suave de la oferta.
+    script_base: |-
+      Entiendo; para no quitarle tiempo, en esta llamada me enfoco en la tarjeta.
+      Para no quitarle tiempo, retomemos donde íbamos: ¿le gustaría que dejemos anotado su interés para avanzar con el proceso?
+    expected_intents: [retomar, sigue_fuera_tema, quiere_terminar]
+    transitions:
+      retomar: OFERTA_PERSONALIZADA
+      sigue_fuera_tema: DESPEDIDA_NO_INTERES
+      quiere_terminar: DESPEDIDA_NO_INTERES
+
+  # ==========================================================================
+  # ETAPA 5: MANEJO DE OBJECIONES
+  # ==========================================================================
+
+  OBJECIONES:
+    objetivo: >
+      Escuchar y manejar objeciones del cliente con empatía.
+      Objeciones comunes: intereses altos, ya tiene tarjetas, desconfianza,
+      no necesita crédito, malas experiencias previas.
+      Responder de forma específica sin presionar.
+    script_base: |-
+      Entiendo su preocupación, es muy válida. Cuénteme un poco más
+      sobre qué le genera duda, para ver si puedo aclararle algo.
+    system_prompt_modifier: >
+      Manejo de objeciones específicas:
+      - "Ya tengo tarjetas": Esta no cobra membresía y tiene bono de bienvenida.
+      - "Los intereses son altos": Tasa preferencial y 0% los primeros 3 meses.
+      - "No confío en llamadas": Puede verificar llamando al banco directamente.
+      - "No necesito crédito": Los puntos y promociones funcionan también con pago total mensual.
+      - "Mala experiencia con bancos": G&T tiene más de ochenta años de respaldo.
+      Nunca presiones. Si después de responder la objeción sigue sin interés, cierra cordialmente.
+    expected_intents: [resuelve_duda, sigue_con_dudas, acepta, rechazo, desvio]
+    transitions:
+      resuelve_duda: OFERTA_PERSONALIZADA
+      sigue_con_dudas: ULTIMO_INTENTO
+      acepta: ESCALATE_TO_HUMAN
+      rechazo: DESPEDIDA_NO_INTERES
+      desvio: DESVIO_DESDE_OBJECIONES
+
+  DESVIO_DESDE_OBJECIONES:
+    objetivo: >
+      Manejar desvío y regresar a la solicitud de objeción/duda.
+    script_base: |-
+      Entiendo; para no quitarle tiempo, en esta llamada me enfoco en la tarjeta.
+      Para no quitarle tiempo, retomemos donde íbamos: cuénteme qué le genera duda para poder aclarárselo.
+    expected_intents: [retomar, sigue_fuera_tema, quiere_terminar]
+    transitions:
+      retomar: OBJECIONES
+      sigue_fuera_tema: DESPEDIDA_NO_INTERES
+      quiere_terminar: DESPEDIDA_NO_INTERES
+
+  ULTIMO_INTENTO:
+    objetivo: >
+      Hacer un último intento respetuoso antes de cerrar.
+      Resumir el beneficio más fuerte (membresía gratis + bono).
+      Si no acepta, despedirse cordialmente sin insistir más.
+    script_base: |-
+      Entiendo perfectamente. Solo quiero recalcarle que esta es una oferta
+      exclusiva para clientes seleccionados: membresía gratis de por vida
+      y un bono de bienvenida. Si en algún momento cambia de opinión,
+      con gusto lo atendemos. ¿Qué me dice, le dejamos anotado su interés?
+    expected_intents: [acepta, rechazo_final, desvio]
+    transitions:
+      acepta: ESCALATE_TO_HUMAN
+      rechazo_final: DESPEDIDA_NO_INTERES
+      desvio: DESVIO_DESDE_ULTIMO_INTENTO
+
+  DESVIO_DESDE_ULTIMO_INTENTO:
+    objetivo: >
+      Manejar desvío y regresar al último intento.
+    script_base: |-
+      Entiendo; para no quitarle tiempo, en esta llamada me enfoco en la tarjeta.
+      Para no quitarle tiempo, retomemos donde íbamos: ¿le dejamos anotado su interés para avanzar?
+    expected_intents: [retomar, sigue_fuera_tema, quiere_terminar]
+    transitions:
+      retomar: ULTIMO_INTENTO
+      sigue_fuera_tema: DESPEDIDA_NO_INTERES
+      quiere_terminar: DESPEDIDA_NO_INTERES
+
+  # ==========================================================================
+  # ETAPA 6: CIERRES
+  # ==========================================================================
+
+  ESCALATE_TO_HUMAN:
+    objetivo: >
+      Confirmar el interes del cliente, preparar el traspaso final y entregar la llamada
+      al asesor humano que ya se encuentra escuchando.
+    script_base: |-
+      Perfecto, le agradezco mucho su tiempo.
+      En este momento le comunicare con un asesor humano del Banco Ge ite Continental
+      para que continue con el proceso y le brinde todos los detalles.
+      Un momento por favor.
+    enforcement: strict
+    on_enter:
+      - action: function_call
+        function: CallEventNotification
+        args:
+          event_type: "PURCHASE_INTENT_HIGH"
+          product_name: "Tarjeta de credito VISA/Mastercard G&T Continental"
+    on_exit:
+      - action: function_call
+        function: handoff_to_human
+        args:
+          cleanup_media_channels: true
+    timeout_secs: 1
+    timeout_action: transition
+    timeout_transition: HANDOFF_COMPLETE
+
+  HANDOFF_COMPLETE:
+    objetivo: >
+      Estado terminal posterior al handoff tecnico al asesor humano.
+    script_base: ""
+    is_terminal: true
+
+  DESPEDIDA_NO_INTERES:
+    objetivo: >
+      Cerrar la llamada respetuosamente cuando el cliente no muestra interés.
+      Agradecer el tiempo y dejar la puerta abierta.
+    script_base: |-
+      Entendido, respeto su decisión. Le agradezco mucho el tiempo que me
+      ha brindado. Si en algún momento desea conocer nuestros productos,
+      estamos a la orden. Que tenga un excelente día.
+    is_terminal: true
+
+  DESPEDIDA_NO_TITULAR:
+    objetivo: >
+      Despedirse cordialmente cuando la persona que contesta no es el titular.
+      No revelar detalles de la oferta a terceros.
+    script_base: |-
+      Entiendo, disculpe la molestia. Intentaremos comunicarnos en otro momento.
+      Muchas gracias y que tenga un buen día.
+    is_terminal: true
+
+  DESPEDIDA_TIMEOUT:
+    objetivo: >
+      Cerrar la llamada cuando el cliente no responde después de
+      múltiples intentos de contacto.
+    script_base: |-
+      Parece que no nos podemos comunicar en este momento.
+      Intentaremos contactarle en otro horario.
+      Muchas gracias y que tenga un buen día.
+    is_terminal: true
+
+
+

@@ -597,6 +597,145 @@ class ARIClient:
             return False
 
 
+    async def mute_channel(
+        self,
+        channel_id: str,
+        direction: str = "in",
+        retries: int = 4,
+        sleep_s: float = 0.15,
+    ) -> bool:
+        """Mute a channel with short retries for transient ARI states."""
+        return await self._set_channel_mute_state(
+            channel_id=channel_id,
+            direction=direction,
+            muted=True,
+            retries=retries,
+            sleep_s=sleep_s,
+        )
+
+    async def unmute_channel(
+        self,
+        channel_id: str,
+        direction: str = "in",
+        retries: int = 4,
+        sleep_s: float = 0.15,
+    ) -> bool:
+        """Unmute a channel with short retries for transient ARI states."""
+        return await self._set_channel_mute_state(
+            channel_id=channel_id,
+            direction=direction,
+            muted=False,
+            retries=retries,
+            sleep_s=sleep_s,
+        )
+
+    async def _set_channel_mute_state(
+        self,
+        *,
+        channel_id: str,
+        direction: str,
+        muted: bool,
+        retries: int,
+        sleep_s: float,
+    ) -> bool:
+        action = "mute" if muted else "unmute"
+        method = "POST" if muted else "DELETE"
+        attempts = max(1, int(retries))
+        base_sleep = max(0.0, float(sleep_s))
+        params = {"direction": str(direction)}
+
+        for attempt in range(1, attempts + 1):
+            try:
+                response = await self.send_command(
+                    method=method,
+                    resource=f"channels/{channel_id}/mute",
+                    params=params,
+                )
+            except Exception:
+                logger.error(
+                    "ARI channel mute command raised exception",
+                    action=action,
+                    channel_id=channel_id,
+                    direction=direction,
+                    attempt=attempt,
+                    retries=attempts,
+                    exc_info=True,
+                )
+                raise
+
+            raw_status = response.get("status") if isinstance(response, dict) else None
+            status: Optional[int] = None
+            if raw_status is not None:
+                try:
+                    status = int(raw_status)
+                except (TypeError, ValueError):
+                    status = None
+
+            if status is None:
+                logger.info(
+                    "ARI channel mute command accepted without explicit status",
+                    action=action,
+                    channel_id=channel_id,
+                    direction=direction,
+                    attempt=attempt,
+                )
+                return True
+
+            if 200 <= status < 300:
+                logger.info(
+                    "ARI channel mute command succeeded",
+                    action=action,
+                    channel_id=channel_id,
+                    direction=direction,
+                    status=status,
+                    attempt=attempt,
+                )
+                return True
+
+            reason = str(response.get("reason", "") or "")
+            is_transient = status in (409, 412)
+            if is_transient and attempt < attempts:
+                delay = base_sleep * attempt
+                logger.warning(
+                    "ARI channel mute command transient failure; retrying",
+                    action=action,
+                    channel_id=channel_id,
+                    direction=direction,
+                    status=status,
+                    reason=reason,
+                    attempt=attempt,
+                    sleep_s=delay,
+                )
+                if delay > 0:
+                    await asyncio.sleep(delay)
+                continue
+
+            if is_transient:
+                logger.error(
+                    "ARI channel mute command failed after retries",
+                    action=action,
+                    channel_id=channel_id,
+                    direction=direction,
+                    status=status,
+                    reason=reason,
+                    retries=attempts,
+                )
+                return False
+
+            logger.error(
+                "ARI channel mute command failed with non-transient status",
+                action=action,
+                channel_id=channel_id,
+                direction=direction,
+                status=status,
+                reason=reason,
+            )
+            raise RuntimeError(
+                f"Failed to {action} channel {channel_id} direction={direction} with status {status}: {reason}"
+            )
+
+        return False
+
     async def play_audio_response(self, channel_id: str, audio_data: bytes):
         """Saves TTS audio to shared media directory and commands Asterisk to play it."""
         logger.info("Starting audio playback process", channel_id=channel_id, audio_size=len(audio_data))

@@ -64,6 +64,8 @@ class CallSession:
     audiosocket_uuid: Optional[str] = None
     provider_session_active: bool = False
     ai_detached: bool = False
+    human_channel_id: Optional[str] = None
+    human_audio_mode: str = "talk"
     bridge_id: Optional[str] = None
     
     # Provider and conversation state

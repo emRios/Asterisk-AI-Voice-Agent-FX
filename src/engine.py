@@ -3188,18 +3188,19 @@ class Engine:
                 mode=mode,
             )
 
+            # Fail-safe: unmute inbound audio right after join to guarantee a clean slate,
+            # then apply mute only if the requested mode is "listen".
+            # Track the effective mode based on what actually succeeded.
+            effective_mode = "talk"
+            try:
+                await self.ari_client.unmute_channel(channel_id=channel_id, direction="in", retries=2, sleep_s=0.1)
+            except Exception:
+                logger.debug("CONFERENCE PARTICIPANT - Fail-safe unmute raised", channel_id=channel_id, exc_info=True)
+
             if mode == "listen":
+                mute_ok = False
                 try:
-                    await self.ari_client.send_command(
-                        "POST",
-                        f"channels/{channel_id}/mute",
-                        params={"direction": "in"},
-                    )
-                    logger.info(
-                        "CONFERENCE PARTICIPANT - Listen mode applied",
-                        channel_id=channel_id,
-                        caller_id=caller_id,
-                    )
+                    mute_ok = await self.ari_client.mute_channel(channel_id=channel_id, direction="in", retries=4, sleep_s=0.15)
                 except Exception:
                     logger.warning(
                         "CONFERENCE PARTICIPANT - Failed to apply listen mode",
@@ -3207,6 +3208,23 @@ class Engine:
                         caller_id=caller_id,
                         exc_info=True,
                     )
+                if mute_ok:
+                    effective_mode = "listen"
+                    logger.info(
+                        "CONFERENCE PARTICIPANT - Listen mode applied",
+                        channel_id=channel_id,
+                        caller_id=caller_id,
+                    )
+                else:
+                    logger.warning(
+                        "CONFERENCE PARTICIPANT - Listen mode NOT confirmed; persisting as talk",
+                        channel_id=channel_id,
+                        caller_id=caller_id,
+                    )
+
+            # Persist human channel tracking with the mode that actually took effect
+            session.human_channel_id = channel_id
+            session.human_audio_mode = effective_mode
 
             if session.current_action:
                 session.current_action["answered"] = True
@@ -3314,6 +3332,126 @@ class Engine:
                         channel_id=channel_id)
             await self.ari_client.hangup_channel(channel_id)
 
+    async def set_human_audio_mode(self, call_id: str, mode: str) -> Dict[str, Any]:
+        """Change the human participant audio mode between 'listen' and 'talk'."""
+        requested_mode = str(mode or "").strip().lower()
+        if requested_mode not in {"listen", "talk"}:
+            return {"status": "error", "message": "mode must be 'listen' or 'talk'", "call_id": call_id}
+
+        session = await self.session_store.get_by_call_id(call_id)
+        if not session:
+            return {"status": "error", "message": f"Session not found for call_id: {call_id}", "call_id": call_id}
+
+        human_channel_id = getattr(session, "human_channel_id", None)
+        bridge_id = getattr(session, "bridge_id", None)
+        if not human_channel_id:
+            return {
+                "status": "error",
+                "message": f"Human participant channel not found for call_id: {call_id}",
+                "call_id": call_id,
+                "bridge_id": bridge_id,
+            }
+
+        try:
+            if requested_mode == "listen":
+                changed = await self.ari_client.mute_channel(channel_id=human_channel_id, direction="in", retries=4, sleep_s=0.15)
+            else:
+                changed = await self.ari_client.unmute_channel(channel_id=human_channel_id, direction="in", retries=4, sleep_s=0.15)
+        except Exception as exc:
+            logger.error("set_human_audio_mode failed", call_id=call_id, channel_id=human_channel_id, mode=requested_mode, error=str(exc), exc_info=True)
+            return {"status": "error", "message": str(exc), "call_id": call_id, "channel_id": human_channel_id, "mode": requested_mode}
+
+        if not changed:
+            logger.error("set_human_audio_mode failed after retries", call_id=call_id, channel_id=human_channel_id, mode=requested_mode)
+            return {"status": "error", "message": "Could not apply human audio mode after retries", "call_id": call_id, "channel_id": human_channel_id, "mode": requested_mode}
+
+        session.human_audio_mode = requested_mode
+        await self._save_session(session)
+        logger.info("Human audio mode updated", call_id=call_id, channel_id=human_channel_id, mode=requested_mode)
+        return {"status": "success", "call_id": call_id, "channel_id": human_channel_id, "mode": requested_mode}
+
+    async def handoff_to_human(self, call_id: str, *, cleanup_media_channels: bool = True) -> Dict[str, Any]:
+        """
+        Atomic handoff: promote human to talk, then disconnect AI.
+
+        Steps:
+        1. Validate session, bridge, human channel, ai_detached
+        2. Promote human from listen to talk (if needed)
+        3. Only if promotion succeeds, disconnect AI
+        """
+        session = await self.session_store.get_by_call_id(call_id)
+        if not session:
+            return {"status": "error", "message": f"Session not found for call_id: {call_id}", "human_promoted": False, "ai_disconnected": False}
+
+        if bool(getattr(session, "ai_detached", False)):
+            return {"status": "error", "message": "AI is already disconnected from this call.", "human_promoted": False, "ai_disconnected": True}
+
+        if not getattr(session, "bridge_id", None):
+            return {"status": "error", "message": "No active bridge for this call.", "human_promoted": False, "ai_disconnected": False}
+
+        human_channel_id = getattr(session, "human_channel_id", None)
+        if not human_channel_id:
+            return {"status": "error", "message": "No human participant is connected to this call.", "human_promoted": False, "ai_disconnected": False}
+
+        # Check human actually answered
+        action = getattr(session, "current_action", None) or {}
+        if not bool(action.get("answered", False)):
+            return {"status": "error", "message": "Human participant has not answered yet.", "human_promoted": False, "ai_disconnected": False}
+
+        # Step 1: Promote human to talk if currently in listen mode
+        current_mode = getattr(session, "human_audio_mode", "talk")
+        if current_mode == "listen":
+            promote_result = await self.set_human_audio_mode(call_id, "talk")
+            if promote_result.get("status") != "success":
+                logger.error("handoff_to_human - Failed to promote human to talk; aborting handoff", call_id=call_id, result=promote_result)
+                return {
+                    "status": "error",
+                    "message": f"Failed to promote human to talk: {promote_result.get('message', 'unknown')}",
+                    "human_promoted": False,
+                    "ai_disconnected": False,
+                }
+
+        # Step 2: Disconnect AI (only reached if promotion succeeded or human was already in talk)
+        disconnect_result = await self.disconnect_ai_from_call(call_id, cleanup_media_channels=cleanup_media_channels)
+
+        disconnect_status = disconnect_result.get("status", "error")
+        ai_disconnected = bool(disconnect_result.get("ai_disconnected", False))
+
+        # Map the disconnect outcome to the handoff outcome:
+        #   disconnect "success"  → handoff "success"
+        #   disconnect "partial"  → handoff "partial" (human promoted but AI not fully detached)
+        #   disconnect "error"    → handoff "error"   (human promoted but AI still fully attached)
+        if disconnect_status == "success":
+            handoff_status = "success"
+            message = "Handoff complete. Human is now talking, AI disconnected."
+        elif disconnect_status == "partial":
+            handoff_status = "partial"
+            message = "Human promoted to talk but AI was only partially disconnected."
+        else:
+            handoff_status = "error"
+            message = f"Human promoted to talk but AI disconnect failed: {disconnect_result.get('message', 'unknown')}"
+
+        logger.info(
+            "handoff_to_human completed",
+            call_id=call_id,
+            human_channel_id=human_channel_id,
+            human_promoted=True,
+            ai_disconnected=ai_disconnected,
+            handoff_status=handoff_status,
+            disconnect_status=disconnect_status,
+        )
+
+        return {
+            "status": handoff_status,
+            "message": message,
+            "human_promoted": True,
+            "ai_disconnected": ai_disconnected,
+            "human_channel_id": human_channel_id,
+            "detached_channels": disconnect_result.get("detached_channels", []),
+            "failed_detach_channels": disconnect_result.get("failed_detach_channels", []),
+            "provider_stopped": bool(disconnect_result.get("provider_stopped", False)),
+        }
+
     async def disconnect_ai_from_call(self, call_id: str, *, cleanup_media_channels: bool = True) -> Dict[str, Any]:
         """
         Detach AI media and provider session while keeping caller call leg active.
@@ -3362,111 +3500,147 @@ class Engine:
                     exc_info=True,
                 )
 
-        try:
-            await self.streaming_playback_manager.stop_streaming_playback(call_id)
-        except Exception:
-            logger.debug("Streaming playback stop failed during AI disconnect", call_id=call_id, exc_info=True)
-
-        try:
-            start_task = self._provider_start_tasks.pop(call_id, None)
-            if start_task:
-                start_task.cancel()
-        except Exception:
-            pass
-
-        provider_stopped = False
-        provider = self._call_providers.pop(call_id, None)
-        if provider and hasattr(provider, "stop_session"):
-            try:
-                await provider.stop_session()
-                provider_stopped = True
-            except Exception:
-                logger.debug("Provider stop_session failed during AI disconnect", call_id=call_id, exc_info=True)
-
-        try:
-            pipeline_task = self._pipeline_tasks.pop(call_id, None)
-            if pipeline_task:
-                pipeline_task.cancel()
-            pipeline_queue = self._pipeline_queues.pop(call_id, None)
-            if pipeline_queue:
-                try:
-                    pipeline_queue.put_nowait(None)
-                except Exception:
-                    pass
-            try:
-                await self._disable_pipeline_talk_detect(session)
-            except Exception:
-                logger.debug("Pipeline talk detect disable failed during AI disconnect", call_id=call_id, exc_info=True)
-            self._pipeline_forced.pop(call_id, None)
-            if getattr(self, "pipeline_orchestrator", None) and self.pipeline_orchestrator.enabled:
-                try:
-                    await self.pipeline_orchestrator.release_pipeline(call_id)
-                except Exception:
-                    logger.debug("Pipeline release failed during AI disconnect", call_id=call_id, exc_info=True)
-        except Exception:
-            logger.debug("Pipeline detach cleanup failed", call_id=call_id, exc_info=True)
-
         audiosocket_uuid = getattr(session, "audiosocket_uuid", None)
+        provider_stopped = False
 
-        session.ai_detached = True
-        session.provider_session_active = False
-        session.audio_capture_enabled = False
-        session.tts_playing = False
-        session.tts_active_count = 0
-        session.tts_tokens.clear()
-        session.external_media_id = None
-        session.pending_external_media_id = None
-        session.external_media_port = None
-        try:
-            session.external_media_codec = None
-        except Exception:
-            pass
-        session.audiosocket_channel_id = None
-        session.audiosocket_conn_id = None
-        session.audiosocket_uuid = None
-        session.local_channel_id = None
-        session.status = "ai_detached"
-        await self._save_session(session)
-
-        for channel_id in ai_channel_ids:
-            try:
-                await self.session_store.unindex_channel(channel_id)
-            except Exception:
-                logger.debug("Failed to unindex detached AI channel", call_id=call_id, channel_id=channel_id, exc_info=True)
-
-        for channel_id in ai_channel_ids:
-            self.bridges.pop(channel_id, None)
-            self.pending_local_channels.pop(channel_id, None)
-            self.pending_audiosocket_channels.pop(channel_id, None)
-        self.local_channels.pop(call_id, None)
-        self.audiosocket_channels.pop(call_id, None)
-        if audiosocket_uuid:
-            self.uuidext_to_channel.pop(audiosocket_uuid, None)
-
-        if cleanup_media_channels:
-            for channel_id in ai_channel_ids:
-                try:
-                    await self.ari_client.hangup_channel(channel_id)
-                except Exception:
-                    logger.debug("Failed to hang up detached AI channel", call_id=call_id, channel_id=channel_id, exc_info=True)
-
+        # Determine outcome BEFORE any provider/session teardown
+        provider = self._call_providers.get(call_id)
         if not ai_channel_ids and not provider:
             message = "AI was already disconnected for this call."
+            status = "success"
+            ai_disconnected = True
+        elif failed_detach_channels and not detached_channels:
+            message = "AI disconnect failed: no channels could be detached from bridge."
+            status = "error"
+            ai_disconnected = False
+        elif failed_detach_channels:
+            message = "AI partially disconnected: some channels could not be detached."
+            status = "partial"
+            ai_disconnected = True
         else:
             message = "AI disconnected from call. Caller remains connected."
+            status = "success"
+            ai_disconnected = True
+
+        # If ALL detaches failed, preserve everything so the call remains functional and retryable.
+        if status == "error":
+            logger.warning(
+                "AI disconnect aborted: all channel detaches failed; provider/session preserved",
+                call_id=call_id,
+                failed_detach_channels=failed_detach_channels,
+            )
+        else:
+            # Tear down provider, pipeline, and session state only when at least one detach succeeded.
+            try:
+                await self.streaming_playback_manager.stop_streaming_playback(call_id)
+            except Exception:
+                logger.debug("Streaming playback stop failed during AI disconnect", call_id=call_id, exc_info=True)
+
+            try:
+                start_task = self._provider_start_tasks.pop(call_id, None)
+                if start_task:
+                    start_task.cancel()
+            except Exception:
+                pass
+
+            provider_stopped = False
+            provider = self._call_providers.pop(call_id, None)
+            if provider and hasattr(provider, "stop_session"):
+                try:
+                    await provider.stop_session()
+                    provider_stopped = True
+                except Exception:
+                    logger.debug("Provider stop_session failed during AI disconnect", call_id=call_id, exc_info=True)
+
+            try:
+                pipeline_task = self._pipeline_tasks.pop(call_id, None)
+                if pipeline_task:
+                    pipeline_task.cancel()
+                pipeline_queue = self._pipeline_queues.pop(call_id, None)
+                if pipeline_queue:
+                    try:
+                        pipeline_queue.put_nowait(None)
+                    except Exception:
+                        pass
+                try:
+                    await self._disable_pipeline_talk_detect(session)
+                except Exception:
+                    logger.debug("Pipeline talk detect disable failed during AI disconnect", call_id=call_id, exc_info=True)
+                self._pipeline_forced.pop(call_id, None)
+                if getattr(self, "pipeline_orchestrator", None) and self.pipeline_orchestrator.enabled:
+                    try:
+                        await self.pipeline_orchestrator.release_pipeline(call_id)
+                    except Exception:
+                        logger.debug("Pipeline release failed during AI disconnect", call_id=call_id, exc_info=True)
+            except Exception:
+                logger.debug("Pipeline detach cleanup failed", call_id=call_id, exc_info=True)
+
+            session.ai_detached = True
+            session.provider_session_active = False
+            session.audio_capture_enabled = False
+            session.tts_playing = False
+            session.tts_active_count = 0
+            session.tts_tokens.clear()
+
+            # Only clear session references for channels that were actually detached.
+            # Channels that failed to detach are still in the bridge and must remain tracked.
+            detached_set = set(detached_channels)
+            if getattr(session, "external_media_id", None) in detached_set:
+                session.external_media_id = None
+                session.external_media_port = None
+                try:
+                    session.external_media_codec = None
+                except Exception:
+                    pass
+            if getattr(session, "pending_external_media_id", None) in detached_set:
+                session.pending_external_media_id = None
+            if getattr(session, "audiosocket_channel_id", None) in detached_set:
+                session.audiosocket_channel_id = None
+                session.audiosocket_conn_id = None
+                session.audiosocket_uuid = None
+            if getattr(session, "local_channel_id", None) in detached_set:
+                session.local_channel_id = None
+            session.status = "ai_detached"
+            await self._save_session(session)
+
+            for channel_id in detached_channels:
+                try:
+                    await self.session_store.unindex_channel(channel_id)
+                except Exception:
+                    logger.debug("Failed to unindex detached AI channel", call_id=call_id, channel_id=channel_id, exc_info=True)
+
+            for channel_id in detached_channels:
+                self.bridges.pop(channel_id, None)
+                self.pending_local_channels.pop(channel_id, None)
+                self.pending_audiosocket_channels.pop(channel_id, None)
+            # Clear call-level maps selectively: only if the corresponding session field was cleared
+            if session.local_channel_id is None:
+                self.local_channels.pop(call_id, None)
+            if session.audiosocket_channel_id is None:
+                self.audiosocket_channels.pop(call_id, None)
+                if audiosocket_uuid:
+                    self.uuidext_to_channel.pop(audiosocket_uuid, None)
+
+            if cleanup_media_channels:
+                for channel_id in detached_channels:
+                    try:
+                        await self.ari_client.hangup_channel(channel_id)
+                    except Exception:
+                        logger.debug("Failed to hang up detached AI channel", call_id=call_id, channel_id=channel_id, exc_info=True)
 
         logger.info(
             "AI disconnect completed",
             call_id=call_id,
+            status=status,
             detached_channels=detached_channels,
             failed_detach_channels=failed_detach_channels,
             provider_stopped=provider_stopped,
             cleanup_media_channels=cleanup_media_channels,
         )
         return {
-            "status": "success",
+            "status": status,
             "message": message,
-            "ai_disconnected": True,
+            "ai_disconnected": ai_disconnected,
             "detached_channels": detached_channels,
             "failed_detach_channels": failed_detach_channels,
             "provider_stopped": provider_stopped,

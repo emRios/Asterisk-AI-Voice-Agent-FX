@@ -305,6 +305,12 @@ After outputting a tool call, provide a brief spoken response.
             logger.warning(f"Could not import DisconnectAITool: {e}")
 
         try:
+            from src.tools.telephony.handoff_to_human import HandoffToHumanTool
+            self.register(HandoffToHumanTool)
+        except ImportError as e:
+            logger.warning(f"Could not import HandoffToHumanTool: {e}")
+
+        try:
             from src.tools.telephony.cancel_transfer import CancelTransferTool
             self.register(CancelTransferTool)
         except ImportError as e:
