@@ -40,6 +40,8 @@ class EventType(str, Enum):
     PURCHASE_INTENT_HIGH = "PURCHASE_INTENT_HIGH"
     TRANSFER_REQUESTED = "TRANSFER_REQUESTED"
     CALL_STARTED = "CALL_STARTED"
+    DATA_EXTRACTION = "DATA_EXTRACTION"
+    TRANSITION = "TRANSITION"
     HARD_REJECTION = "HARD_REJECTION"
     SOFT_REJECTION = "SOFT_REJECTION"
     ESCALATION_REQUIRED = "ESCALATION_REQUIRED"
@@ -70,6 +72,8 @@ class CallEventPayload(BaseModel):
     product_name: Optional[str] = None
     customer_id: Optional[str] = None
     notes: Optional[str] = Field(None, max_length=500)
+    event_description: Optional[str] = None
+    extracted_data: Optional[Dict[str, Any]] = None
     agent_id: Optional[str] = None
     priority: Priority = Priority.MEDIUM
     source: str = "AI Engine"
@@ -114,6 +118,8 @@ class CallEventNotification(Tool):
                         "PURCHASE_INTENT_HIGH",
                         "TRANSFER_REQUESTED",
                         "CALL_STARTED",
+                        "DATA_EXTRACTION",
+                        "TRANSITION",
                         "HARD_REJECTION",
                         "SOFT_REJECTION",
                         "ESCALATION_REQUIRED",
@@ -147,6 +153,18 @@ class CallEventNotification(Tool):
                     description="Justificación breve (1-2 frases).",
                 ),
                 ToolParameter(
+                    name="event_description",
+                    type="string",
+                    required=False,
+                    description="Descripción detallada opcional del evento.",
+                ),
+                ToolParameter(
+                    name="extracted_data",
+                    type="object",
+                    required=False,
+                    description="Datos estructurados extraídos de la campaña.",
+                ),
+                ToolParameter(
                     name="priority",
                     type="string",
                     required=False,
@@ -167,14 +185,23 @@ class CallEventNotification(Tool):
 
         event_type = parameters.get("event_type")
         intent_score = parameters.get("intent_score")
+        extracted_data = parameters.get("extracted_data")
 
         if event_type == "PURCHASE_INTENT_HIGH" and intent_score is None:
             raise ValueError(
                 "intent_score es obligatorio cuando event_type=PURCHASE_INTENT_HIGH"
             )
 
+        if event_type == "DATA_EXTRACTION" and extracted_data is None:
+            raise ValueError(
+                "extracted_data es obligatorio cuando event_type=DATA_EXTRACTION"
+            )
+
         if intent_score is not None and not (0 <= intent_score <= 100):
             raise ValueError("intent_score debe estar entre 0 y 100")
+
+        if extracted_data is not None and not isinstance(extracted_data, dict):
+            raise ValueError("extracted_data debe ser un objeto JSON")
 
         priority = parameters.get("priority", "medium")
         if priority not in ["low", "medium", "high", "critical"]:
@@ -208,6 +235,8 @@ class CallEventNotification(Tool):
             "product_name": parameters.get("product_name"),
             "product_id": parameters.get("product_id"),
             "notes": parameters.get("notes"),
+            "event_description": parameters.get("event_description"),
+            "extracted_data": parameters.get("extracted_data"),
             "priority": parameters.get("priority", "medium"),
             "agent_id": getattr(context, "agent_id", None),
             "metadata": {

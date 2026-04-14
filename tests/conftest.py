@@ -4,8 +4,10 @@ import types
 from types import SimpleNamespace
 from datetime import datetime
 from typing import Any, Dict, Optional
+from unittest.mock import AsyncMock
 
 import pytest
+from src.tools.context import ToolExecutionContext
 
 
 # ============== ENV HELPERS ==============
@@ -200,12 +202,6 @@ def tool_execution_context_stub(fake_redis_client_factory):
         def error(self, msg, **kw):  # pragma: no cover
             print("ERROR", msg, kw)
 
-    context = types.SimpleNamespace()
-    context.logger = Logger()
-    context.call_id = "call-123"
-    context.provider_name = "unittest"
-    context.agent_id = "agent-1"
-
     base_tool_config = {
         "tools": {
             "CallEventNotification": {
@@ -213,6 +209,7 @@ def tool_execution_context_stub(fake_redis_client_factory):
                 "enabled_event_types": [
                     "PURCHASE_INTENT_HIGH",
                     "TRANSFER_REQUESTED",
+                    "DATA_EXTRACTION",
                     "HARD_REJECTION",
                     "SOFT_REJECTION",
                 ],
@@ -224,8 +221,17 @@ def tool_execution_context_stub(fake_redis_client_factory):
         }
     }
 
+    context = ToolExecutionContext(
+        call_id="call-123",
+        caller_channel_id="caller-channel-123",
+        session_store=AsyncMock(),
+        ari_client=AsyncMock(),
+        config=base_tool_config,
+        provider_name="unittest",
+    )
+    context.logger = Logger()
+    context.agent_id = "agent-1"
     context.get_config = lambda: base_tool_config
-    context.session_store = None
     context.get_redis_client = fake_redis_client_factory
     return context
 

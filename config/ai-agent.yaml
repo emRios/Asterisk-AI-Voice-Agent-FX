@@ -130,6 +130,9 @@ tools:
   - transfer
   - hangup_call
   - CallEventNotification
+  - conference_participant
+  - disconnect_ai
+  - handoff_to_human
   ai_identity:
     name: AI Agent
     number: '6789'
@@ -236,6 +239,8 @@ tools:
     enabled_event_types:
       - PURCHASE_INTENT_HIGH
       - TRANSFER_REQUESTED
+      - DATA_EXTRACTION
+      - TRANSITION
       - HARD_REJECTION
       - SOFT_REJECTION
       - ESCALATION_REQUIRED
