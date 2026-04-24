@@ -95,7 +95,7 @@ def make_engine(session):
     import types
     from src.engine import Engine
 
-    for method_name in ("set_human_audio_mode", "handoff_to_human", "disconnect_ai_from_call"):
+    for method_name in ("set_human_audio_mode", "_wait_for_human_ready", "handoff_to_human", "disconnect_ai_from_call"):
         method = getattr(Engine, method_name)
         bound = types.MethodType(method, engine)
         setattr(engine, method_name, bound)
@@ -148,13 +148,68 @@ async def test_handoff_fails_no_human():
     """Handoff fails when no human channel is connected."""
     session = FakeSession(
         human_channel_id=None,
-        current_action={"type": "conference-participant", "answered": False},
+        current_action=None,
     )
     engine = make_engine(session)
 
     result = await engine.handoff_to_human("call-1")
 
     assert result["status"] == "error"
+    assert result["human_promoted"] is False
+    assert result["ai_disconnected"] is False
+    assert session.ai_detached is False
+
+
+@pytest.mark.asyncio
+async def test_handoff_waits_for_human_ready_before_promoting():
+    """Handoff should absorb the persistence race and succeed once answered is visible."""
+    session = FakeSession(
+        human_channel_id=None,
+        human_audio_mode="listen",
+        current_action={"type": "conference-participant", "answered": False, "channel_id": "ringing-ch-1"},
+    )
+    engine = make_engine(session)
+    engine._handoff_human_ready_timeout_sec = 0.5
+    engine._handoff_human_ready_poll_sec = 0.0
+
+    call_count = 0
+
+    async def get_by_call_id(call_id):
+        nonlocal call_count
+        call_count += 1
+        if call_count >= 3:
+            session.human_channel_id = "human-ch-1"
+            session.current_action["answered"] = True
+            session.current_action["channel_id"] = "human-ch-1"
+        return session
+
+    engine.session_store.get_by_call_id = AsyncMock(side_effect=get_by_call_id)
+
+    result = await engine.handoff_to_human("call-1")
+
+    assert result["status"] == "success"
+    assert result["human_promoted"] is True
+    assert result["ai_disconnected"] is True
+    assert session.human_audio_mode == "talk"
+    assert session.ai_detached is True
+    assert call_count >= 3
+
+
+@pytest.mark.asyncio
+async def test_handoff_times_out_when_human_stays_pending():
+    """Pending human handoff should fail cleanly after the bounded backend wait."""
+    session = FakeSession(
+        human_channel_id=None,
+        current_action={"type": "conference-participant", "answered": False, "channel_id": "ringing-ch-1"},
+    )
+    engine = make_engine(session)
+    engine._handoff_human_ready_timeout_sec = 0.0
+    engine._handoff_human_ready_poll_sec = 0.0
+
+    result = await engine.handoff_to_human("call-1")
+
+    assert result["status"] == "error"
+    assert result["message"] == "Human participant has not answered yet."
     assert result["human_promoted"] is False
     assert result["ai_disconnected"] is False
     assert session.ai_detached is False

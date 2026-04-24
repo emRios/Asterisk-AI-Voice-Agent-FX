@@ -3226,11 +3226,13 @@ class Engine:
             session.human_channel_id = channel_id
             session.human_audio_mode = effective_mode
 
-            if session.current_action:
-                session.current_action["answered"] = True
-                session.current_action["channel_id"] = channel_id
-                session.current_action["type"] = "conference-participant"
-                session.current_action["mode"] = mode
+            action = getattr(session, "current_action", None) or {}
+            action["answered"] = True
+            action["channel_id"] = channel_id
+            action["type"] = "conference-participant"
+            action["mode"] = mode
+            action["target"] = target
+            session.current_action = action
             await self._save_session(session)
 
         except Exception as e:
@@ -3370,6 +3372,72 @@ class Engine:
         logger.info("Human audio mode updated", call_id=call_id, channel_id=human_channel_id, mode=requested_mode)
         return {"status": "success", "call_id": call_id, "channel_id": human_channel_id, "mode": requested_mode}
 
+    async def _wait_for_human_ready(
+        self,
+        call_id: str,
+        *,
+        timeout_sec: float = 5.0,
+        poll_sec: float = 0.2,
+    ) -> Tuple[Optional["CallSession"], Optional[str]]:
+        """Wait briefly for the human leg to be fully tracked and answered."""
+        deadline = time.monotonic() + max(0.0, float(timeout_sec))
+        wait_started_at = time.monotonic()
+        logged_wait = False
+
+        while True:
+            session = await self.session_store.get_by_call_id(call_id)
+            if not session:
+                return None, f"Session not found for call_id: {call_id}"
+
+            if bool(getattr(session, "ai_detached", False)):
+                return session, "AI is already disconnected from this call."
+
+            if not getattr(session, "bridge_id", None):
+                return session, "No active bridge for this call."
+
+            action = getattr(session, "current_action", None) or {}
+            human_channel_id = getattr(session, "human_channel_id", None)
+            answered = bool(action.get("answered", False))
+
+            if human_channel_id and answered:
+                if logged_wait:
+                    logger.info(
+                        "handoff_to_human human became ready after wait",
+                        call_id=call_id,
+                        human_channel_id=human_channel_id,
+                        waited_ms=round((time.monotonic() - wait_started_at) * 1000, 1),
+                    )
+                return session, None
+
+            has_pending_human = (
+                bool(human_channel_id)
+                or action.get("type") == "conference-participant"
+                or bool(action.get("channel_id"))
+            )
+
+            if time.monotonic() >= deadline:
+                if has_pending_human:
+                    return session, "Human participant has not answered yet."
+                return session, "No human participant is connected to this call."
+
+            if not has_pending_human:
+                return session, "No human participant is connected to this call."
+
+            if not logged_wait:
+                logger.info(
+                    "handoff_to_human waiting for human readiness",
+                    call_id=call_id,
+                    timeout_sec=timeout_sec,
+                    poll_sec=poll_sec,
+                    action_type=action.get("type"),
+                    action_channel_id=action.get("channel_id"),
+                    answered=answered,
+                    human_channel_id=human_channel_id,
+                )
+                logged_wait = True
+
+            await asyncio.sleep(max(0.0, float(poll_sec)))
+
     async def handoff_to_human(self, call_id: str, *, cleanup_media_channels: bool = True) -> Dict[str, Any]:
         """
         Atomic handoff: promote human to talk, then disconnect AI.
@@ -3379,24 +3447,22 @@ class Engine:
         2. Promote human from listen to talk (if needed)
         3. Only if promotion succeeds, disconnect AI
         """
-        session = await self.session_store.get_by_call_id(call_id)
-        if not session:
-            return {"status": "error", "message": f"Session not found for call_id: {call_id}", "human_promoted": False, "ai_disconnected": False}
-
-        if bool(getattr(session, "ai_detached", False)):
-            return {"status": "error", "message": "AI is already disconnected from this call.", "human_promoted": False, "ai_disconnected": True}
-
-        if not getattr(session, "bridge_id", None):
-            return {"status": "error", "message": "No active bridge for this call.", "human_promoted": False, "ai_disconnected": False}
+        wait_timeout_sec = float(getattr(self, "_handoff_human_ready_timeout_sec", 5.0))
+        wait_poll_sec = float(getattr(self, "_handoff_human_ready_poll_sec", 0.2))
+        session, wait_error = await self._wait_for_human_ready(
+            call_id,
+            timeout_sec=wait_timeout_sec,
+            poll_sec=wait_poll_sec,
+        )
+        if wait_error:
+            return {
+                "status": "error",
+                "message": wait_error,
+                "human_promoted": False,
+                "ai_disconnected": bool(getattr(session, "ai_detached", False)) if session else False,
+            }
 
         human_channel_id = getattr(session, "human_channel_id", None)
-        if not human_channel_id:
-            return {"status": "error", "message": "No human participant is connected to this call.", "human_promoted": False, "ai_disconnected": False}
-
-        # Check human actually answered
-        action = getattr(session, "current_action", None) or {}
-        if not bool(action.get("answered", False)):
-            return {"status": "error", "message": "Human participant has not answered yet.", "human_promoted": False, "ai_disconnected": False}
 
         # Step 1: Promote human to talk if currently in listen mode
         current_mode = getattr(session, "human_audio_mode", "talk")
@@ -5815,6 +5881,9 @@ class Engine:
                     return
                 if not getattr(session, "provider_session_active", False):
                     return
+                # Preserve original inbound PCM for local fallback checks if we substitute silence.
+                pcm_for_barge_in = pcm_bytes
+
                 # CRITICAL FIX: Google Live needs gating, but OpenAI/Deepgram don't
                 # - Google Live: Bidirectional audio, NO server-side echo cancellation → NEEDS gating
                 # - OpenAI Realtime: Server-side AEC → gating harmful
@@ -5832,6 +5901,28 @@ class Engine:
                     )
                     # Replace audio with silence (zero-filled PCM16)
                     pcm_bytes = b'\x00' * len(pcm_bytes)
+
+                # Continuous-input providers return before the shared post-TTS guard below.
+                # Keep the stream alive but silence a short echo-tail window after TTS ends.
+                post_tts_guard_active = False
+                try:
+                    ci_cfg = getattr(self.config, "barge_in", None)
+                    ci_post_guard_ms = int(getattr(ci_cfg, "post_tts_end_protection_ms", 0)) if ci_cfg else 0
+                except Exception:
+                    ci_post_guard_ms = 0
+                if ci_post_guard_ms > 0:
+                    ci_tts_ended_ts = float(getattr(session, "tts_ended_ts", 0.0) or 0.0)
+                    if ci_tts_ended_ts > 0.0:
+                        ci_elapsed_ms = (time.time() - ci_tts_ended_ts) * 1000.0
+                        if ci_elapsed_ms < ci_post_guard_ms:
+                            pcm_bytes = b"\x00" * len(pcm_bytes)
+                            post_tts_guard_active = True
+                            logger.debug(
+                                "Echo tail guard: replacing audio with silence (continuous-input)",
+                                call_id=caller_channel_id,
+                                elapsed_ms=round(ci_elapsed_ms),
+                                guard_ms=ci_post_guard_ms,
+                            )
                 
                 # Forward to provider
                 logger.info(
@@ -5841,7 +5932,8 @@ class Engine:
                     frame_bytes=len(audio_bytes),
                     pcm_bytes=len(pcm_bytes),
                     gating_active=needs_gating and not session.audio_capture_enabled,
-                    is_silence=needs_gating and not session.audio_capture_enabled,
+                    is_silence=(needs_gating and not session.audio_capture_enabled) or post_tts_guard_active,
+                    post_tts_guard_active=post_tts_guard_active,
                 )
                 try:
                     self._update_audio_diagnostics(session, "provider_in", pcm_bytes, "slin16", pcm_rate)
@@ -5907,7 +5999,7 @@ class Engine:
                 try:
                     await self._maybe_provider_barge_in_fallback(
                         session,
-                        pcm16=pcm_bytes,
+                        pcm16=pcm_for_barge_in,
                         pcm_rate_hz=pcm_rate,
                         audiosocket_wire=audio_bytes,
                         source="audiosocket",
@@ -7172,6 +7264,26 @@ class Engine:
                         provider=provider_name,
                     )
                     return
+
+                # Continuous-input providers return before the shared post-TTS guard below.
+                # Keep the stream alive but silence a short echo-tail window after TTS ends.
+                try:
+                    ci_cfg = getattr(self.config, "barge_in", None)
+                    ci_post_guard_ms = int(getattr(ci_cfg, "post_tts_end_protection_ms", 0)) if ci_cfg else 0
+                except Exception:
+                    ci_post_guard_ms = 0
+                if ci_post_guard_ms > 0:
+                    ci_tts_ended_ts = float(getattr(session, "tts_ended_ts", 0.0) or 0.0)
+                    if ci_tts_ended_ts > 0.0:
+                        ci_elapsed_ms = (time.time() - ci_tts_ended_ts) * 1000.0
+                        if ci_elapsed_ms < ci_post_guard_ms:
+                            pcm_16k = b"\x00" * len(pcm_16k)
+                            logger.debug(
+                                "Echo tail guard: replacing audio with silence (continuous-input RTP)",
+                                call_id=caller_channel_id,
+                                elapsed_ms=round(ci_elapsed_ms),
+                                guard_ms=ci_post_guard_ms,
+                            )
                 if not getattr(session, "provider_session_active", False):
                     return
                 # Encode audio for provider (same as AudioSocket path)

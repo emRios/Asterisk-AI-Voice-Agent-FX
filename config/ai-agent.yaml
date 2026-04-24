@@ -7,11 +7,11 @@ audiosocket:
   host: "172.31.7.92"
   port: 9092
 barge_in:
-  enabled: true
+  enabled: false
   energy_threshold: 1500
   initial_protection_ms: 300
   min_ms: 300
-  post_tts_end_protection_ms: 200
+  post_tts_end_protection_ms: 300
 config_version: 4
 contexts:
   default:
@@ -30,7 +30,8 @@ contexts:
 default_provider: deepgram
 downstream_mode: stream
 external_media:
-  codec: ulaw
+  # was: ulaw
+  codec: slin16
   direction: both
   format: slin16
   port_range: 18080:18099
@@ -66,9 +67,11 @@ profiles:
     idle_cutoff_ms: 600
     internal_rate_hz: 8000
     provider_pref:
-      input_encoding: mulaw
+      # was: mulaw
+      input_encoding: linear16
       input_sample_rate_hz: 8000
-      output_encoding: mulaw
+      # was: mulaw
+      output_encoding: linear16
       output_sample_rate_hz: 8000
     transport_out:
       encoding: slin
@@ -78,12 +81,15 @@ profiles:
     idle_cutoff_ms: 800
     internal_rate_hz: 8000
     provider_pref:
-      input_encoding: mulaw
+      # was: mulaw
+      input_encoding: linear16
       input_sample_rate_hz: 8000
-      output_encoding: mulaw
+      # was: mulaw
+      output_encoding: linear16
       output_sample_rate_hz: 8000
     transport_out:
-      encoding: ulaw
+      # was: ulaw
+      encoding: slin
       sample_rate_hz: 8000
   wideband_pcm_16k:
     chunk_ms: auto
@@ -232,12 +238,20 @@ tools:
     http:
       # URL de conexión a Redis; se puede sobreescribir con la variable de entorno REDIS_URL
       url: ${CALL_EVENT_HTTP_URL:-http://172.31.7.92:8080/ingest}
+      # endpoints por evento
+      urls_by_event_type:
+        CALL_STARTED: https://j3n2gdia43.execute-api.us-east-2.amazonaws.com/dev/api/v1/calls/call-status
+        TRANSFER_REQUESTED: https://j3n2gdia43.execute-api.us-east-2.amazonaws.com/dev/api/v1/calls/call-status
+        PURCHASE_INTENT_HIGH: https://j3n2gdia43.execute-api.us-east-2.amazonaws.com/dev/api/v1/calls/call-status
+        DATA_EXTRACTION: https://j3n2gdia43.execute-api.us-east-2.amazonaws.com/dev/api/v1/calls/call-status
+        TRANSITION: https://j3n2gdia43.execute-api.us-east-2.amazonaws.com/dev/api/v1/calls/call-status
       timeout_secs: 5
     enabled: true
 
     # Tipos de eventos que esta tool está autorizada a publicar
     enabled_event_types:
       - PURCHASE_INTENT_HIGH
+      - CALL_STARTED
       - TRANSFER_REQUESTED
       - DATA_EXTRACTION
       - TRANSITION
