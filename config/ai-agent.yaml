@@ -67,11 +67,9 @@ profiles:
     idle_cutoff_ms: 600
     internal_rate_hz: 8000
     provider_pref:
-      # was: mulaw
-      input_encoding: linear16
+      input_encoding: mulaw
       input_sample_rate_hz: 8000
-      # was: mulaw
-      output_encoding: linear16
+      output_encoding: mulaw
       output_sample_rate_hz: 8000
     transport_out:
       encoding: slin
@@ -81,14 +79,11 @@ profiles:
     idle_cutoff_ms: 800
     internal_rate_hz: 8000
     provider_pref:
-      # was: mulaw
-      input_encoding: linear16
+      input_encoding: mulaw
       input_sample_rate_hz: 8000
-      # was: mulaw
-      output_encoding: linear16
+      output_encoding: mulaw
       output_sample_rate_hz: 8000
     transport_out:
-      # was: ulaw
       encoding: slin
       sample_rate_hz: 8000
   wideband_pcm_16k:
@@ -120,13 +115,13 @@ streaming:
   diag_pre_secs: 1
   empty_backoff_ticks_max: 5
   fallback_timeout_ms: 8000
-  greeting_min_start_ms: 40
-  jitter_buffer_ms: 100
+  greeting_min_start_ms: 300
+  jitter_buffer_ms: 300
   keepalive_interval_ms: 5000
   low_watermark_ms: 200
-  min_start_ms: 300
+  min_start_ms: 400
   normalizer:
-    enabled: true
+    enabled: false
     max_gain_db: 18
     target_rms: 1400
   provider_grace_ms: 200

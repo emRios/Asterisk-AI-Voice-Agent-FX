@@ -5925,7 +5925,7 @@ class Engine:
                             )
                 
                 # Forward to provider
-                logger.info(
+                logger.debug(
                     "📤 CONTINUOUS INPUT - Forwarding frame to provider",
                     call_id=caller_channel_id,
                     provider=provider_name,
@@ -5947,7 +5947,7 @@ class Engine:
                         pcm_bytes,
                         pcm_rate,
                     )
-                    logger.info(
+                    logger.debug(
                         "📤 CONTINUOUS INPUT - Encoded for provider",
                         call_id=caller_channel_id,
                         provider=provider_name,
@@ -5974,7 +5974,7 @@ class Engine:
                     # Google Live needs to know audio is already at provider_rate to skip resampling
                     try:
                         await provider.send_audio(prov_payload, prov_rate, prov_enc)
-                        logger.info(
+                        logger.debug(
                             "✅ CONTINUOUS INPUT - Frame sent to provider successfully",
                             call_id=caller_channel_id,
                             provider=provider_name,
@@ -5982,7 +5982,7 @@ class Engine:
                     except TypeError:
                         # Fallback for providers with old signature (audio_chunk only)
                         await provider.send_audio(prov_payload)
-                        logger.info(
+                        logger.debug(
                             "✅ CONTINUOUS INPUT - Frame sent to provider (legacy signature)",
                             call_id=caller_channel_id,
                             provider=provider_name,
@@ -10661,7 +10661,7 @@ class Engine:
                 except Exception:
                     gain_max_db = 0.0
                 
-                logger.info(
+                logger.debug(
                     "🔧 ENCODE CONFIG - Reading provider config",
                     call_id=call_id,
                     provider=provider_name,

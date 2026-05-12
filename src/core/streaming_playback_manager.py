@@ -1574,7 +1574,7 @@ class StreamingPlaybackManager:
             ):
                 self._resample_states[call_id] = None
                 try:
-                    logger.info(
+                    logger.debug(
                         "🎯 μ-law → PCM16 FAST PATH - Simple decode only",
                         call_id=call_id,
                         chunk_bytes=len(chunk),
