@@ -839,11 +839,9 @@ class StreamingPlaybackManager:
                         # Track per-call queued total as well as segment-local queued_bytes
                         if info is not None:
                             info['queued_total_bytes'] = int(info.get('queued_total_bytes', 0) or 0) + len(chunk)
-                        sess = await self.session_store.get_by_call_id(call_id)
-                        if sess:
-                            sess.streaming_bytes_sent += len(chunk)
-                            sess.streaming_jitter_buffer_depth = jitter_buffer.qsize()
-                            await self.session_store.upsert_call(sess)
+                        if info is not None:
+                            info['_local_bytes_sent'] = info.get('_local_bytes_sent', 0) + len(chunk)
+                            info['_local_jitter_depth'] = jitter_buffer.qsize()
                     except Exception:
                         logger.debug("Streaming metrics update failed", call_id=call_id)
 
@@ -2413,11 +2411,10 @@ class StreamingPlaybackManager:
     ) -> bool:
         """Send audio chunk via configured streaming transport."""
         try:
-            session = await self.session_store.get_by_call_id(call_id)
-            if not session:
-                logger.warning("Cannot stream audio - session not found", call_id=call_id)
+            stream_info = self.active_streams.get(call_id)
+            if not stream_info:
+                logger.warning("Cannot stream audio - stream not active", call_id=call_id)
                 return False
-            stream_info = self.active_streams.get(call_id, {})
             if self.audio_diag_callback:
                 try:
                     effective_fmt = (
@@ -2457,7 +2454,8 @@ class StreamingPlaybackManager:
                 # Cache codec check per call for performance
                 rtp_chunk = chunk
                 if call_id not in self._rtp_codec_cache:
-                    codec_str = str(getattr(session, 'external_media_codec', 'ulaw')).lower()
+                    _rtp_session = await self.session_store.get_by_call_id(call_id)
+                    codec_str = str(getattr(_rtp_session, 'external_media_codec', 'ulaw')).lower() if _rtp_session else 'ulaw'
                     self._rtp_codec_cache[call_id] = codec_str in ('slin16', 'slin', 'pcm16', 'linear16')
                     
                 # Fast path: byte-swap only if needed for PCM16
@@ -2469,8 +2467,7 @@ class StreamingPlaybackManager:
                         logger.warning("RTP byte-swap failed, sending original", call_id=call_id, error=str(e))
                         rtp_chunk = chunk
 
-                ssrc = getattr(session, "ssrc", None)
-                success = await self.rtp_server.send_audio(call_id, rtp_chunk, ssrc=ssrc)
+                success = await self.rtp_server.send_audio(call_id, rtp_chunk, ssrc=None)
                 if not success:
                     logger.warning("RTP streaming send failed", call_id=call_id, stream_id=stream_id)
                 else:
@@ -2488,10 +2485,16 @@ class StreamingPlaybackManager:
                 if not self.audiosocket_server:
                     logger.warning("Streaming transport unavailable (no AudioSocket server)", call_id=call_id)
                     return False
-                conn_id = getattr(session, "audiosocket_conn_id", None)
+                conn_id = stream_info.get('_cached_conn_id')
                 if not conn_id:
-                    logger.warning("Streaming transport missing AudioSocket connection", call_id=call_id)
-                    return False
+                    _session = await self.session_store.get_by_call_id(call_id)
+                    if not _session:
+                        return False
+                    conn_id = getattr(_session, "audiosocket_conn_id", None)
+                    if not conn_id:
+                        logger.warning("Streaming transport missing AudioSocket connection", call_id=call_id)
+                        return False
+                    stream_info['_cached_conn_id'] = conn_id
                 if self.audio_capture_manager:
                     try:
                         self.audio_capture_manager.append_encoded(
@@ -2573,7 +2576,8 @@ class StreamingPlaybackManager:
                     except Exception:
                         logger.debug("Per-segment tap snapshot failed", call_id=call_id, stream_id=stream_id, exc_info=True)
                 if self.audiosocket_broadcast_debug:
-                    conns = list(set(getattr(session, 'audiosocket_conns', []) or []))
+                    _bcast_session = await self.session_store.get_by_call_id(call_id)
+                    conns = list(set(getattr(_bcast_session, 'audiosocket_conns', []) or [])) if _bcast_session else []
                     sent = 0
                     for cid in conns or [conn_id]:
                         if await self.audiosocket_server.send_audio(cid, chunk):
@@ -2587,8 +2591,20 @@ class StreamingPlaybackManager:
                 # Normal single-conn send
                 success = await self.audiosocket_server.send_audio(conn_id, chunk)
                 if not success:
-                    logger.warning("AudioSocket streaming send failed", call_id=call_id, stream_id=stream_id)
-                else:
+                    stream_info['_cached_conn_id'] = None
+                    _retry_session = await self.session_store.get_by_call_id(call_id)
+                    if not _retry_session:
+                        return False
+                    conn_id = getattr(_retry_session, "audiosocket_conn_id", None)
+                    if not conn_id:
+                        logger.warning("Streaming transport missing AudioSocket connection", call_id=call_id)
+                        return False
+                    stream_info['_cached_conn_id'] = conn_id
+                    success = await self.audiosocket_server.send_audio(conn_id, chunk)
+                    if not success:
+                        stream_info['_cached_conn_id'] = None
+                        logger.warning("AudioSocket streaming send failed", call_id=call_id, stream_id=stream_id)
+                if success:
                     try:
                         _STREAM_TX_BYTES.inc(len(chunk))
                         if call_id in self.active_streams:
@@ -3465,8 +3481,21 @@ class StreamingPlaybackManager:
                     )
             except Exception:
                 logger.debug("Streaming tuning summary unavailable", call_id=call_id)
-            # Remove from active streams
+            # Flush local accumulators to session store before removing active stream
             if call_id in self.active_streams:
+                _flush_info = self.active_streams[call_id]
+                try:
+                    sess = await self.session_store.get_by_call_id(call_id)
+                    if sess:
+                        sess.streaming_bytes_sent += _flush_info.get('_local_bytes_sent', 0)
+                        sess.streaming_jitter_buffer_depth = _flush_info.get('_local_jitter_depth', 0)
+                        sess.streaming_started = False
+                        sess.current_stream_id = None
+                        await self.session_store.upsert_call(sess)
+                    _flush_info['_local_bytes_sent'] = 0
+                    _flush_info['_local_jitter_depth'] = 0
+                except Exception:
+                    pass
                 del self.active_streams[call_id]
             self._refresh_streaming_summary_metrics()
             # Record last segment end timestamp for adaptive gating of next segment
@@ -3484,15 +3513,7 @@ class StreamingPlaybackManager:
             self._rtp_codec_cache.pop(call_id, None)
             # Metrics are aggregate; refreshed when active_streams changes.
             
-            # Reset session streaming flags
-            try:
-                sess = await self.session_store.get_by_call_id(call_id)
-                if sess:
-                    sess.streaming_started = False
-                    sess.current_stream_id = None
-                    await self.session_store.upsert_call(sess)
-            except Exception:
-                pass
+            # Session streaming flags already reset in flush above
             # Clear any remainder record after flushing
             self.frame_remainders.pop(call_id, None)
             
@@ -3526,6 +3547,104 @@ class StreamingPlaybackManager:
     async def get_active_streams(self) -> Dict[str, Dict[str, Any]]:
         """Get information about active streams."""
         return dict(self.active_streams)
+
+    def get_monitoring_snapshot(self) -> Dict[str, Any]:
+        """Return a JSON-safe real-time snapshot of active streaming calls."""
+        now = time.time()
+
+        def _as_int(value: Any, default: int = 0) -> int:
+            try:
+                return int(value)
+            except Exception:
+                return default
+
+        def _as_float(value: Any, default: float = 0.0) -> float:
+            try:
+                return float(value)
+            except Exception:
+                return default
+
+        details = []
+        total_tx_bytes = 0
+        total_provider_bytes = 0
+        total_underflows = 0
+        total_filler_frames = 0
+        total_frames_sent = 0
+        max_jitter_depth = 0
+        max_last_chunk_age_s = 0.0
+
+        for call_id, info in list((self.active_streams or {}).items()):
+            stream_id = str(info.get("stream_id") or "")
+            start_time = _as_float(info.get("start_time"), now)
+            tx_bytes = _as_int(info.get("tx_bytes"))
+            provider_bytes = _as_int(info.get("provider_bytes"))
+            underflows = _as_int(info.get("underflow_events"))
+            filler_frames = _as_int(info.get("filler_frames"))
+            frames_sent = _as_int(info.get("frames_sent"))
+            jitter_depth = _as_int(info.get("jitter_depth"))
+            last_chunk_age_s = _as_float(info.get("last_chunk_age_s"))
+
+            total_tx_bytes += tx_bytes
+            total_provider_bytes += provider_bytes
+            total_underflows += underflows
+            total_filler_frames += filler_frames
+            total_frames_sent += frames_sent
+            max_jitter_depth = max(max_jitter_depth, jitter_depth)
+            max_last_chunk_age_s = max(max_last_chunk_age_s, last_chunk_age_s)
+
+            details.append({
+                "call_id": call_id,
+                "stream_id": stream_id,
+                "playback_type": str(info.get("playback_type") or ""),
+                "stream_active": self.is_stream_active(call_id),
+                "stream_uptime_s": round(max(0.0, now - start_time), 3),
+                "startup_ready": bool(info.get("startup_ready")),
+                "first_frame_observed": bool(info.get("first_frame_observed")),
+                "source_encoding": self._canonicalize_encoding(info.get("source_encoding")) or None,
+                "source_sample_rate": _as_int(info.get("source_sample_rate")),
+                "target_format": self._canonicalize_encoding(info.get("target_format")) or None,
+                "target_sample_rate": _as_int(info.get("target_sample_rate")),
+                "queued_bytes": _as_int(info.get("queued_bytes")),
+                "queued_total_bytes": _as_int(info.get("queued_total_bytes")),
+                "tx_bytes": tx_bytes,
+                "tx_total_bytes": _as_int(info.get("tx_total_bytes")),
+                "provider_bytes": provider_bytes,
+                "provider_total_bytes": _as_int(info.get("provider_total_bytes")),
+                "frames_sent": frames_sent,
+                "underflow_events": underflows,
+                "filler_frames": filler_frames,
+                "jitter_depth": jitter_depth,
+                "last_chunk_age_s": round(last_chunk_age_s, 3),
+                "buffer_depth_max_frames": _as_int(info.get("buffer_depth_max_frames")),
+                "buffer_depth_min_frames": _as_int(info.get("buffer_depth_min_frames")),
+                "segments_played": _as_int(info.get("segments_played")),
+                "min_start_chunks": _as_int(info.get("min_start_chunks")),
+                "idle_ticks": _as_int(info.get("idle_ticks")),
+                "idle_cutoff_ticks": _as_int(info.get("idle_cutoff_ticks")),
+                "last_real_emit_age_s": round(
+                    max(0.0, now - _as_float(info.get("last_real_emit_ts"), now))
+                    if info.get("last_real_emit_ts") is not None else 0.0,
+                    3,
+                ),
+                "last_emit_was_filler": bool(info.get("last_emit_was_filler")),
+                "end_reason": str(info.get("end_reason") or ""),
+            })
+
+        details.sort(key=lambda item: (item.get("call_id") or "", item.get("stream_id") or ""))
+
+        return {
+            "streaming": {
+                "active_streams": len(details),
+                "total_tx_bytes": total_tx_bytes,
+                "total_provider_bytes": total_provider_bytes,
+                "total_underflows": total_underflows,
+                "total_filler_frames": total_filler_frames,
+                "total_frames_sent": total_frames_sent,
+                "max_jitter_depth": max_jitter_depth,
+                "max_last_chunk_age_s": round(max_last_chunk_age_s, 3),
+            },
+            "streaming_details": details,
+        }
     
     async def cleanup_expired_streams(self, max_age_seconds: float = 300) -> int:
         """Clean up expired streams."""

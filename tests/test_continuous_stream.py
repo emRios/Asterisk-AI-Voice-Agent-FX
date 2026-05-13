@@ -1,5 +1,6 @@
 import asyncio
 import math
+import time
 import pytest
 
 from src.core.streaming_playback_manager import StreamingPlaybackManager
@@ -87,3 +88,54 @@ async def test_mark_segment_boundary_increments_and_resets_attack():
     info = mgr.active_streams[call_id]
     assert info['segments_played'] == 1
     assert info.get('attack_bytes_remaining') == expected_attack
+
+
+def test_monitoring_snapshot_serializes_active_stream():
+    mgr = make_manager()
+    call_id = "test-call-4"
+    now = time.time()
+    mgr.active_streams[call_id] = {
+        'stream_id': "stream:resp:test-call-4:1",
+        'playback_type': "streaming-response",
+        'start_time': now - 5.0,
+        'source_encoding': "slin16",
+        'source_sample_rate': 16000,
+        'target_format': "ulaw",
+        'target_sample_rate': 8000,
+        'queued_bytes': 320,
+        'queued_total_bytes': 1280,
+        'tx_bytes': 640,
+        'tx_total_bytes': 2560,
+        'provider_bytes': 960,
+        'provider_total_bytes': 3840,
+        'frames_sent': 12,
+        'underflow_events': 1,
+        'filler_frames': 2,
+        'jitter_depth': 3,
+        'last_chunk_age_s': 0.12,
+        'buffer_depth_max_frames': 4,
+        'buffer_depth_min_frames': 1,
+        'segments_played': 2,
+        'min_start_chunks': 3,
+        'idle_ticks': 1,
+        'idle_cutoff_ticks': 6,
+        'last_real_emit_ts': now - 0.05,
+        'last_emit_was_filler': False,
+        'startup_ready': True,
+        'first_frame_observed': True,
+    }
+
+    snapshot = mgr.get_monitoring_snapshot()
+
+    assert snapshot["streaming"]["active_streams"] == 1
+    assert snapshot["streaming"]["total_tx_bytes"] == 640
+    assert snapshot["streaming"]["total_provider_bytes"] == 960
+    detail = snapshot["streaming_details"][0]
+    assert detail["call_id"] == call_id
+    assert detail["playback_type"] == "streaming-response"
+    assert detail["target_format"] == "ulaw"
+    assert detail["target_sample_rate"] == 8000
+    assert detail["tx_total_bytes"] == 2560
+    assert detail["provider_total_bytes"] == 3840
+    assert detail["underflow_events"] == 1
+    assert detail["stream_active"] is False

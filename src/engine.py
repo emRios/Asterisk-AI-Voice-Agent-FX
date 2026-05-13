@@ -11967,6 +11967,122 @@ class Engine:
         
         return result
 
+    def _serialize_audio_diagnostics(self, diagnostics: Any) -> Dict[str, Dict[str, Any]]:
+        """Return a compact, JSON-safe audio diagnostics view."""
+        if not isinstance(diagnostics, dict):
+            return {}
+
+        now = time.time()
+        stages = {}
+        for stage in ("transport_in", "provider_in", "provider_out", "transport_out:response", "transport_out:greeting"):
+            raw = diagnostics.get(stage)
+            if not isinstance(raw, dict):
+                continue
+            try:
+                updated = float(raw.get("updated", 0.0) or 0.0)
+            except Exception:
+                updated = 0.0
+            try:
+                rms = int(raw.get("rms", 0) or 0)
+            except Exception:
+                rms = 0
+            try:
+                dc_offset = int(raw.get("dc_offset", 0) or 0)
+            except Exception:
+                dc_offset = 0
+            try:
+                sample_rate = int(raw.get("sample_rate", 0) or 0)
+            except Exception:
+                sample_rate = 0
+            stages[stage] = {
+                "rms": rms,
+                "dc_offset": dc_offset,
+                "sample_rate": sample_rate,
+                "updated_age_s": round(max(0.0, now - updated), 3) if updated > 0.0 else None,
+            }
+        return stages
+
+    def _build_call_monitoring_payload(
+        self,
+        active_sessions: list,
+        streaming_snapshot: Optional[Dict[str, Any]] = None,
+    ) -> list:
+        """Build per-call monitoring details for the health endpoint."""
+        now = time.time()
+        stream_by_call: Dict[str, Dict[str, Any]] = {}
+        if isinstance(streaming_snapshot, dict):
+            for item in streaming_snapshot.get("streaming_details", []) or []:
+                if isinstance(item, dict) and item.get("call_id"):
+                    stream_by_call[str(item["call_id"])] = item
+
+        call_details = []
+        for session in active_sessions or []:
+            call_id = str(getattr(session, "call_id", "") or "")
+            if not call_id:
+                continue
+
+            created_at = getattr(session, "created_at", None)
+            try:
+                age_s = round(max(0.0, now - float(created_at or 0.0)), 3) if created_at else 0.0
+            except Exception:
+                age_s = 0.0
+
+            first_media_rx_ts = getattr(session, "first_media_rx_ts", None)
+            try:
+                media_rx_age_s = round(max(0.0, now - float(first_media_rx_ts or 0.0)), 3) if first_media_rx_ts else None
+            except Exception:
+                media_rx_age_s = None
+
+            transport_profile = getattr(session, "transport_profile", None)
+            transport_encoding = self._canonicalize_encoding(
+                getattr(transport_profile, "wire_encoding", None)
+                or getattr(transport_profile, "format", None)
+            ) or None
+            try:
+                transport_rate = int(
+                    getattr(transport_profile, "wire_sample_rate", 0)
+                    or getattr(transport_profile, "sample_rate", 0)
+                    or 0
+                )
+            except Exception:
+                transport_rate = 0
+
+            call_details.append({
+                "call_id": call_id,
+                "provider": getattr(session, "provider_name", None) or getattr(session, "provider", None) or None,
+                "pipeline": getattr(session, "pipeline_name", None) or None,
+                "conversation_state": str(getattr(session, "conversation_state", "") or ""),
+                "status": str(getattr(session, "status", "") or ""),
+                "age_s": age_s,
+                "audio_capture_enabled": bool(getattr(session, "audio_capture_enabled", False)),
+                "tts_playing": bool(getattr(session, "tts_playing", False)),
+                "tts_active_count": int(getattr(session, "tts_active_count", 0) or 0),
+                "barge_in_count": int(getattr(session, "barge_in_count", 0) or 0),
+                "streaming_started": bool(getattr(session, "streaming_started", False)),
+                "current_stream_id": getattr(session, "current_stream_id", None),
+                "streaming_bytes_sent": int(getattr(session, "streaming_bytes_sent", 0) or 0),
+                "streaming_fallback_count": int(getattr(session, "streaming_fallback_count", 0) or 0),
+                "streaming_jitter_buffer_depth": int(getattr(session, "streaming_jitter_buffer_depth", 0) or 0),
+                "streaming_keepalive_sent": int(getattr(session, "streaming_keepalive_sent", 0) or 0),
+                "streaming_keepalive_timeouts": int(getattr(session, "streaming_keepalive_timeouts", 0) or 0),
+                "last_streaming_error": getattr(session, "last_streaming_error", None),
+                "media_rx_confirmed": bool(getattr(session, "media_rx_confirmed", False)),
+                "first_media_rx_age_s": media_rx_age_s,
+                "caller_audio_format": self._canonicalize_encoding(getattr(session, "caller_audio_format", None)) or None,
+                "caller_sample_rate": int(getattr(session, "caller_sample_rate", 0) or 0),
+                "transport_encoding": transport_encoding,
+                "transport_sample_rate": transport_rate,
+                "codec_alignment_ok": bool(getattr(session, "codec_alignment_ok", True)),
+                "codec_alignment_message": getattr(session, "codec_alignment_message", None),
+                "last_turn_latency_s": round(float(getattr(session, "last_turn_latency_s", 0.0) or 0.0), 3),
+                "last_transcription_latency_s": round(float(getattr(session, "last_transcription_latency_s", 0.0) or 0.0), 3),
+                "audio_diagnostics": self._serialize_audio_diagnostics(getattr(session, "audio_diagnostics", {})),
+                "stream": stream_by_call.get(call_id),
+            })
+
+        call_details.sort(key=lambda item: (item.get("provider") or "", item.get("call_id") or ""))
+        return call_details
+
     async def _health_handler(self, request):
         """Return JSON with engine/provider status."""
         try:
@@ -12021,6 +12137,15 @@ class Engine:
             pending_timers = self.conversation_coordinator.get_pending_timer_count()
             active_sessions = await self.session_store.get_all_sessions()
             uptime_seconds = int(time.time() - self._start_time)
+            streaming_snapshot = {}
+            try:
+                spm = getattr(self, "streaming_playback_manager", None)
+                if spm is not None:
+                    streaming_snapshot = spm.get_monitoring_snapshot()
+            except Exception:
+                logger.debug("Failed to build streaming snapshot for health endpoint", exc_info=True)
+                streaming_snapshot = {}
+            call_details = self._build_call_monitoring_payload(active_sessions, streaming_snapshot)
 
             # Compute config hash for pending-changes detection
             config_hash = getattr(self, '_config_hash', None)
@@ -12054,8 +12179,9 @@ class Engine:
                     "barge_in_total": conversation_summary.get("barge_in_total", 0),
                     "pending_timers": pending_timers,
                 },
-                "streaming": {},
-                "streaming_details": [],
+                "streaming": streaming_snapshot.get("streaming", {}),
+                "streaming_details": streaming_snapshot.get("streaming_details", []),
+                "calls": call_details,
             }
             return web.json_response(payload)
         except Exception as exc:
