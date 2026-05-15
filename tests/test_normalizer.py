@@ -74,6 +74,13 @@ def test_apply_normalizer_target_zero_no_change():
     assert out == pcm
 
 
+def test_apply_normalizer_invalid_pcm_returns_original():
+    mgr = _make_manager()
+    pcm = b"\x01"
+    out = mgr._apply_normalizer(pcm, target_rms=1400, max_gain_db=12.0)
+    assert out == pcm
+
+
 def test_apply_normalizer_respects_small_max_gain():
     mgr = _make_manager()
     pcm = _make_sine_pcm16(amplitude=1000, samples=800)

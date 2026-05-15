@@ -439,4 +439,9 @@ async def main():
         logger.info("External Media engine shutdown complete")
 
 if __name__ == "__main__":
+    try:
+        import uvloop
+        uvloop.install()
+    except ImportError:
+        pass
     asyncio.run(main())
