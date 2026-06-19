@@ -44,6 +44,7 @@ from .config import (
 )
 from .pipelines import PipelineOrchestrator, PipelineOrchestratorError, PipelineResolution
 from .logging_config import get_logger, configure_logging
+from .observability import configure_observability, get_observability
 from .rtp_server import RTPServer
 from .audio.audiosocket_server import AudioSocketServer
 from .providers.base import AIProviderInterface
@@ -518,6 +519,17 @@ class Engine:
 
     async def start(self):
         """Connect to ARI and start the engine."""
+        # 0) Initialize observability (fail-open: errors here never block startup)
+        try:
+            base_url = f"{self.config.asterisk.scheme}://{self.config.asterisk.host}:{self.config.asterisk.port}/ari"
+            configure_observability(
+                ari_base_url=base_url,
+                asterisk_host=str(self.config.asterisk.host),
+                asterisk_ari_port=int(self.config.asterisk.port),
+            )
+        except Exception:
+            logger.debug("Observability init failed (non-fatal)", exc_info=True)
+
         # 1) Load providers first (low risk)
         await self._load_providers()
         
@@ -762,6 +774,16 @@ class Engine:
                 self._outbound_scheduler_task = asyncio.create_task(self._outbound_scheduler_loop())
         except Exception:
             logger.debug("Failed to start outbound scheduler task", exc_info=True)
+        # Start media sampler for periodic RTP/media metrics collection
+        try:
+            obs = get_observability()
+            rtp = getattr(self, "rtp_server", None)
+            self._media_sampler_task = asyncio.create_task(
+                obs.run_media_sampler(rtp_server=rtp, interval=15.0)
+            )
+        except Exception:
+            logger.debug("Media sampler startup failed (non-fatal)", exc_info=True)
+
         logger.info("Engine started and listening for calls.")
 
     def _parse_port_range(self, value: Optional[Any], fallback_port: int) -> Tuple[int, int]:
@@ -1792,6 +1814,17 @@ class Engine:
         for session in sessions:
             await self._cleanup_call(session.call_id)
         await self.ari_client.disconnect()
+        # Cancel media sampler task
+        try:
+            task = getattr(self, "_media_sampler_task", None)
+            if task:
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
+        except Exception:
+            pass
         # Stop RTP server if running
         if hasattr(self, 'rtp_server') and self.rtp_server:
             await self.rtp_server.stop()
@@ -12440,6 +12473,11 @@ async def main():
         pass
 
 if __name__ == "__main__":
+    try:
+        import uvloop
+        uvloop.install()
+    except ImportError:
+        pass
     try:
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):

@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from typing import Dict, Optional, Callable, Any, Tuple, Iterable
 
 from .logging_config import get_logger
+from .observability import get_observability
 
 logger = get_logger(__name__)
 
@@ -186,6 +187,10 @@ class RTPServer:
         self.session_tasks[call_id] = task
 
         logger.info("RTP session allocated", call_id=call_id, port=port, codec=self.codec)
+        try:
+            get_observability().media_connected(transport="rtp", call_id=call_id)
+        except Exception:
+            pass
         return port
 
     async def cleanup_session(self, call_id: str) -> None:
@@ -196,6 +201,10 @@ class RTPServer:
         await self._cleanup_session(session)
         self.session_tasks.pop(call_id, None)
         logger.info("RTP session cleaned up", call_id=call_id)
+        try:
+            get_observability().media_disconnected(transport="rtp", call_id=call_id)
+        except Exception:
+            pass
 
     def map_ssrc_to_call_id(self, ssrc: int, call_id: str) -> None:
         """Record SSRC → call ID mapping for outbound lookups."""
@@ -338,6 +347,10 @@ class RTPServer:
                         remote_host=addr[0],
                         remote_port=addr[1],
                     )
+                    try:
+                        get_observability().media_rejected(transport="rtp", reason="source_not_allowed", conn_id=call_id)
+                    except Exception:
+                        pass
                     continue
                 session.remote_host, session.remote_port = addr[0], addr[1]
                 logger.info(
@@ -346,6 +359,10 @@ class RTPServer:
                     remote_host=session.remote_host,
                     remote_port=session.remote_port,
                 )
+                try:
+                    get_observability().media_first_audio(transport="rtp", call_id=call_id)
+                except Exception:
+                    pass
             elif (addr[0] != session.remote_host) or (addr[1] != session.remote_port):
                 if self.allowed_remote_hosts is not None and addr[0] not in self.allowed_remote_hosts:
                     logger.warning(

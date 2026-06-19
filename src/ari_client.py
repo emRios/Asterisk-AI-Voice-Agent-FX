@@ -23,6 +23,7 @@ from websockets.asyncio.client import ClientConnection
 
 from .config import AsteriskConfig
 from .logging_config import get_logger
+from .observability import get_observability
 
 logger = get_logger(__name__)
 
@@ -109,9 +110,19 @@ class ARIClient:
             self._connected = True
             self._reconnect_attempt = 0  # Reset on successful connect
             logger.info("Successfully connected to ARI WebSocket.", scheme=ws_scheme)
+            try:
+                obs = get_observability()
+                obs.ari_connect(success=True, attempt=self._reconnect_attempt + 1)
+                obs.ari_ws_connected()
+            except Exception:
+                pass
         except Exception as e:
             self._connected = False
             logger.error("Failed to connect to ARI", error=str(e), attempt=self._reconnect_attempt + 1)
+            try:
+                get_observability().ari_connect(success=False, attempt=self._reconnect_attempt + 1, error=str(e))
+            except Exception:
+                pass
             if self.http_session and not self.http_session.closed:
                 await self.http_session.close()
                 self.http_session = None
@@ -155,6 +166,10 @@ class ARIClient:
                 # Note: PlaybackFinished is registered by Engine.start(). Avoid duplicate registration here.
                 async for message in self.websocket:
                     try:
+                        try:
+                            get_observability().ari_ws_event_received()
+                        except Exception:
+                            pass
                         event_data = json.loads(message)
                         event_type = event_data.get("type")
                         
@@ -177,6 +192,10 @@ class ARIClient:
                 self._connected = False
                 self.running = False
                 self.websocket = None
+                try:
+                    get_observability().ari_ws_disconnected()
+                except Exception:
+                    pass
                 if self._should_reconnect:
                     self._reconnect_attempt += 1
                     backoff = min(2 ** self._reconnect_attempt, self._max_reconnect_backoff)
@@ -185,15 +204,23 @@ class ARIClient:
                         attempt=self._reconnect_attempt,
                         backoff_seconds=backoff
                     )
+                    try:
+                        get_observability().ari_ws_reconnect(attempt=self._reconnect_attempt)
+                    except Exception:
+                        pass
                     await asyncio.sleep(backoff)
                 else:
                     logger.info("ARI WebSocket closed (shutdown requested).")
                     break
-                    
+
             except Exception as e:
                 self._connected = False
                 self.running = False
                 self.websocket = None
+                try:
+                    get_observability().ari_ws_disconnected()
+                except Exception:
+                    pass
                 if self._should_reconnect:
                     self._reconnect_attempt += 1
                     backoff = min(2 ** self._reconnect_attempt, self._max_reconnect_backoff)
@@ -204,6 +231,10 @@ class ARIClient:
                         error=str(e),
                         exc_info=True
                     )
+                    try:
+                        get_observability().ari_ws_reconnect(attempt=self._reconnect_attempt)
+                    except Exception:
+                        pass
                     await asyncio.sleep(backoff)
                 else:
                     logger.error("ARI listener error (shutdown requested).", exc_info=True)
@@ -283,8 +314,16 @@ class ARIClient:
                 data = {}
             data["channelVars"] = channel_vars
         
+        _cmd_start = time.time()
         try:
             async with self.http_session.request(method, url, json=data, params=params) as response:
+                _cmd_duration = time.time() - _cmd_start
+                try:
+                    get_observability().ari_command(
+                        method=method, resource=resource, status=response.status, duration=_cmd_duration,
+                    )
+                except Exception:
+                    pass
                 if response.status >= 400:
                     reason = await response.text()
                     if tolerate_statuses and response.status in tolerate_statuses:
@@ -303,7 +342,14 @@ class ARIClient:
                     return {"status": response.status}
                 return await response.json()
         except aiohttp.ClientError as e:
+            _cmd_duration = time.time() - _cmd_start
             logger.error("ARI HTTP request failed", exc_info=True)
+            try:
+                get_observability().ari_error(
+                    method=method, resource=resource, error_type="client_error", error=str(e),
+                )
+            except Exception:
+                pass
             return {"status": 500, "reason": str(e)}
 
     async def originate_channel(

@@ -1,0 +1,9 @@
+{
+  "deepgram@8000Hz": {
+    "type": "moderate",
+    "mean_interval_ms": 145.63957750238387,
+    "max_gap_ms": 20819.920539855957,
+    "variance": 2799.285240827078,
+    "optimal_buffer_ms": 197
+  }
+}
