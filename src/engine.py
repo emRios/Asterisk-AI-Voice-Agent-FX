@@ -5563,7 +5563,7 @@ class Engine:
             
             # Log every 10th frame + first 5 frames
             if frame_num <= 5 or frame_num % 10 == 0:
-                logger.info(
+                logger.debug(
                     "🎤 AUDIOSOCKET RX - Frame received",
                     call_id=caller_channel_id,
                     frame_num=frame_num,
@@ -8064,7 +8064,7 @@ class Engine:
                 seq = self._provider_chunk_seq.get(call_id, 0) + 1
                 self._provider_chunk_seq[call_id] = seq
                 try:
-                    logger.info(
+                    logger.debug(
                         "PROVIDER CHUNK",
                         call_id=call_id,
                         seq=seq,
@@ -8088,7 +8088,7 @@ class Engine:
                         out_chunk, _ = audioop.ratecv(chunk, 2, 1, rate, wire_rate, None)
                         seq = self._provider_chunk_seq.get(call_id, 0) + 1
                         self._provider_chunk_seq[call_id] = seq
-                        logger.info(
+                        logger.debug(
                             "PROVIDER CHUNK",
                             call_id=call_id,
                             seq=seq,
