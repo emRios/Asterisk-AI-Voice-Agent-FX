@@ -2238,8 +2238,7 @@ class StreamingPlaybackManager:
                     break
                 
                 # Calculate frame RMS
-                acc = sum(float(s) * float(s) for s in frame)
-                frame_rms = int(math.sqrt(acc / len(frame)))
+                frame_rms = audioop.rms(frame.tobytes(), 2)
                 
                 if frame_rms > threshold_rms:  # Found real audio
                     if i > 0:
