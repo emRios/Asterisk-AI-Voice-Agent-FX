@@ -35,8 +35,8 @@ class HangupCallTool(Tool):
                 "- User thanks you after receiving help: 'thanks', 'thank you', 'appreciate it'\n"
                 "- Conversation naturally concludes after completing user's request\n"
                 "- User explicitly requests to end the call\n"
-                "IMPORTANT: Always politely confirm the user is ready to end before using this tool. "
-                "Ask 'Is there anything else I can help with?' if uncertain."
+                "IMPORTANT: Call this tool immediately when delivering your farewell message. "
+                "Do NOT wait for user confirmation — include the farewell in the farewell_message parameter."
             ),
             category=ToolCategory.TELEPHONY,
             requires_channel=True,
