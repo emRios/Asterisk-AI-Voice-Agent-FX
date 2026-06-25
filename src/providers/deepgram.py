@@ -312,6 +312,7 @@ class DeepgramProvider(AIProviderInterface):
         # Hangup tracking (for farewell + HangupReady event)
         self._hangup_pending: bool = False
         self._farewell_message: Optional[str] = None
+        self._hangup_timeout_handle = None
         # Cache declared Deepgram input settings
         try:
             self._dg_input_rate = int(self._get_config_value('input_sample_rate_hz', 8000) or 8000)
@@ -1052,7 +1053,45 @@ class DeepgramProvider(AIProviderInterface):
                     call_id=self.call_id,
                     farewell=self._farewell_message
                 )
-            
+
+                # Fix 2: If farewell audio already finished, emit HangupReady immediately
+                if not self._in_audio_burst and self.on_event:
+                    logger.info(
+                        "🔚 No active audio burst - emitting HangupReady immediately",
+                        call_id=self.call_id,
+                    )
+                    try:
+                        await self.on_event({
+                            'type': 'HangupReady',
+                            'call_id': self.call_id,
+                            'reason': 'farewell_already_completed',
+                            'had_audio': False
+                        })
+                    except Exception as e:
+                        logger.error("Failed to emit immediate HangupReady", call_id=self.call_id, error=str(e))
+                    self._hangup_pending = False
+                    self._farewell_message = None
+                else:
+                    # Fix 1: Safety net timeout in case AgentAudioDone never arrives
+                    timeout_secs = 5
+                    loop = asyncio.get_event_loop()
+                    def _hangup_timeout():
+                        if self._hangup_pending and self.on_event:
+                            logger.warning(
+                                "🔚 Hangup timeout - forcing HangupReady",
+                                call_id=self.call_id,
+                                timeout_secs=timeout_secs,
+                            )
+                            asyncio.ensure_future(self.on_event({
+                                'type': 'HangupReady',
+                                'call_id': self.call_id,
+                                'reason': 'hangup_timeout',
+                                'had_audio': True
+                            }))
+                            self._hangup_pending = False
+                            self._farewell_message = None
+                    self._hangup_timeout_handle = loop.call_later(timeout_secs, _hangup_timeout)
+
             # Capture function name BEFORE send_tool_result (which pops it from result)
             func_name = result.get('function_name')
             func_params = event_data.get('functions', [{}])[0].get('arguments', '{}')
@@ -1567,6 +1606,10 @@ class DeepgramProvider(AIProviderInterface):
                                 # Reset hangup tracking
                                 self._hangup_pending = False
                                 self._farewell_message = None
+                                # Cancel safety net timeout if exists
+                                if self._hangup_timeout_handle:
+                                    self._hangup_timeout_handle.cancel()
+                                    self._hangup_timeout_handle = None
 
                         if self.on_event:
                             await self.on_event(event_data)
@@ -1746,6 +1789,10 @@ class DeepgramProvider(AIProviderInterface):
                         # Reset hangup tracking
                         self._hangup_pending = False
                         self._farewell_message = None
+                        # Cancel safety net timeout if exists
+                        if self._hangup_timeout_handle:
+                            self._hangup_timeout_handle.cancel()
+                            self._hangup_timeout_handle = None
                 except Exception:
                     pass
             self._in_audio_burst = False
