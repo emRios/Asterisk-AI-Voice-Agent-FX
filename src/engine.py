@@ -3226,6 +3226,23 @@ class Engine:
             session.human_channel_id = channel_id
             session.human_audio_mode = effective_mode
 
+            # Medicion 2 (tiempo de habla real del agente): activar TALK_DETECT en la pata del agente
+            # SOLO si emite audio (effective_mode == "talk") y si esta habilitado por config. El
+            # audiohook mide la direccion READ (uplink del agente) -> no cuenta la voz del cliente del mix.
+            cfg = getattr(self.config, "barge_in", None)
+            if effective_mode == "talk" and bool(getattr(cfg, "agent_talk_detect_enabled", False)):
+                try:
+                    silence_ms = int(getattr(cfg, "pipeline_talk_detect_silence_ms", 1200))
+                    thr = int(getattr(cfg, "pipeline_talk_detect_talking_threshold", 128))
+                    ok = await self.ari_client.set_channel_var(channel_id, "TALK_DETECT(set)", f"{silence_ms},{thr}")
+                    if ok:
+                        logger.info("Enabled TALK_DETECT on agent leg", channel_id=channel_id,
+                                    caller_id=caller_id, silence_ms=silence_ms, talking_threshold=thr)
+                    else:
+                        logger.warning("TALK_DETECT on agent leg NOT applied", channel_id=channel_id, caller_id=caller_id)
+                except Exception:
+                    logger.warning("Failed to enable TALK_DETECT on agent leg", channel_id=channel_id, exc_info=True)
+
             action = getattr(session, "current_action", None) or {}
             action["answered"] = True
             action["channel_id"] = channel_id
@@ -3370,6 +3387,20 @@ class Engine:
         session.human_audio_mode = requested_mode
         await self._save_session(session)
         logger.info("Human audio mode updated", call_id=call_id, channel_id=human_channel_id, mode=requested_mode)
+        # Medicion 2: seguir la voz del agente al pasar a 'talk'; quitar el detector al volver a 'listen'.
+        cfg = getattr(self.config, "barge_in", None)
+        if bool(getattr(cfg, "agent_talk_detect_enabled", False)):
+            try:
+                if requested_mode == "talk":
+                    silence_ms = int(getattr(cfg, "pipeline_talk_detect_silence_ms", 1200))
+                    thr = int(getattr(cfg, "pipeline_talk_detect_talking_threshold", 128))
+                    ok = await self.ari_client.set_channel_var(human_channel_id, "TALK_DETECT(set)", f"{silence_ms},{thr}")
+                    logger.info("Agent TALK_DETECT set on mode change", call_id=call_id, channel_id=human_channel_id, applied=bool(ok))
+                else:
+                    ok = await self.ari_client.set_channel_var(human_channel_id, "TALK_DETECT(remove)", "")
+                    logger.info("Agent TALK_DETECT removed on mode change", call_id=call_id, channel_id=human_channel_id, applied=bool(ok))
+            except Exception:
+                logger.warning("TALK_DETECT toggle on mode change failed", call_id=call_id, channel_id=human_channel_id, exc_info=True)
         return {"status": "success", "call_id": call_id, "channel_id": human_channel_id, "mode": requested_mode}
 
     async def _wait_for_human_ready(
@@ -4735,7 +4766,13 @@ class Engine:
 
             session = await self.session_store.get_by_channel_id(channel_id)
             if not session:
+                # Canal NO indexado (tipicamente la pata del agente humano; SessionStore no la indexa):
+                # registrar el evento crudo con role=agent y salir (el offline correlaciona por channel_id).
+                logger.info("TalkDetect started (raw)", channel_id=channel_id,
+                            ari_ts=event.get("timestamp"), role="agent")
                 return
+            logger.info("TalkDetect started (raw)", channel_id=channel_id,
+                        ari_ts=event.get("timestamp"), role="caller_pipeline")
             call_id = session.call_id
 
             if not bool(self._pipeline_forced.get(call_id)):
@@ -4796,7 +4833,11 @@ class Engine:
                 return
             session = await self.session_store.get_by_channel_id(channel_id)
             if not session:
+                logger.info("TalkDetect finished (raw)", channel_id=channel_id,
+                            ari_ts=event.get("timestamp"), duration=event.get("duration"), role="agent")
                 return
+            logger.info("TalkDetect finished (raw)", channel_id=channel_id,
+                        ari_ts=event.get("timestamp"), duration=event.get("duration"), role="caller_pipeline")
             call_id = session.call_id
             if not bool(self._pipeline_forced.get(call_id)):
                 return

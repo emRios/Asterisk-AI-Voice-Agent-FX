@@ -387,6 +387,9 @@ class BargeInConfig(BaseModel):
     # TALK_DETECT(set)=<dsp_silence_threshold_ms>,<dsp_talking_threshold>
     pipeline_talk_detect_silence_ms: int = Field(default=1200)
     pipeline_talk_detect_talking_threshold: int = Field(default=128)
+    # Medicion 2: habilitar TALK_DETECT sobre la pata del AGENTE humano en transferencias
+    # (metrica de tiempo de habla real del agente). Opt-in explicito (default False).
+    agent_talk_detect_enabled: bool = Field(default=False)
     # New: short guard window after TTS ends to avoid self-echo re-capture
     post_tts_end_protection_ms: int = Field(default=250)
     # Extra protection during the first greeting turn

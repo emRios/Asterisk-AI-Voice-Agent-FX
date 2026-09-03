@@ -261,3 +261,77 @@ class TestCallEventNotificationExecute:
         )
         assert res["status"] == "error"
         assert "intent_score" in (res.get("message") or "").lower()
+
+
+class TestAnsweringMachineEventType:
+    """Tests for ANSWERING_MACHINE event type registration and execution."""
+
+    def test_answering_machine_in_event_type_enum(self):
+        from src.tools.business.event_notify import EventType
+
+        assert hasattr(EventType, "ANSWERING_MACHINE")
+        assert EventType.ANSWERING_MACHINE.value == "ANSWERING_MACHINE"
+
+    def test_answering_machine_in_tool_definition_schema(self):
+        tool = CallEventNotification()
+        event_type_param = next(
+            p for p in tool.definition.parameters if p.name == "event_type"
+        )
+        assert "ANSWERING_MACHINE" in event_type_param.enum
+
+    def test_validate_parameters_accepts_answering_machine(self):
+        tool = CallEventNotification()
+        params = {
+            "event_type": "ANSWERING_MACHINE",
+            "notes": "Contestadora detectada",
+            "priority": "high",
+        }
+        assert tool.validate_parameters(params) is True
+
+    @pytest.mark.asyncio
+    async def test_execute_answering_machine_success(
+        self, tool_execution_context_stub, monkeypatch
+    ):
+        tool = CallEventNotification()
+
+        # Enable ANSWERING_MACHINE in config
+        tool_execution_context_stub.config["tools"]["CallEventNotification"][
+            "enabled_event_types"
+        ].append("ANSWERING_MACHINE")
+
+        async def fake_publish(payload, ctx, tool_config):
+            assert payload["event_type"] == "ANSWERING_MACHINE"
+            return "1720000000-am"
+
+        monkeypatch.setattr(tool, "_publish_to_redis", fake_publish)
+
+        params = {
+            "event_type": "ANSWERING_MACHINE",
+            "notes": "Contestadora detectada (AMD)",
+            "priority": "high",
+        }
+        res = await tool.execute(params, tool_execution_context_stub)
+        assert res["status"] == "success"
+        assert res["queue_message_id"] == "1720000000-am"
+
+    @pytest.mark.asyncio
+    async def test_execute_answering_machine_ignored_when_not_enabled(
+        self, tool_execution_context_stub
+    ):
+        tool = CallEventNotification()
+
+        # Ensure ANSWERING_MACHINE is NOT in enabled list
+        enabled = tool_execution_context_stub.config["tools"]["CallEventNotification"][
+            "enabled_event_types"
+        ]
+        if "ANSWERING_MACHINE" in enabled:
+            enabled.remove("ANSWERING_MACHINE")
+
+        params = {
+            "event_type": "ANSWERING_MACHINE",
+            "notes": "Contestadora detectada",
+            "priority": "high",
+        }
+        res = await tool.execute(params, tool_execution_context_stub)
+        assert res["status"] == "ignored"
+        assert "no habilitado" in res["message"]

@@ -454,7 +454,13 @@ class ARIClient:
                 f"channels/{channel_id}/variable",
                 data={"variable": variable, "value": value},
             )
-            # Some ARI implementations return {} on success.
+            # send_command devuelve {"status": >=400, "reason": ...} en error HTTP -> tratarlo como
+            # fallo (antes devolvia True aun en 4xx/5xx: falso positivo de "variable seteada").
+            if isinstance(resp, dict) and isinstance(resp.get("status"), int) and resp["status"] >= 400:
+                logger.warning("set_channel_var got error status", channel_id=channel_id,
+                               variable=variable, status=resp.get("status"))
+                return False
+            # Some ARI implementations return {} on success (204 -> {"status": 204}).
             return resp is not None
         except Exception:
             logger.error("Failed to set channel variable", channel_id=channel_id, variable=variable, exc_info=True)

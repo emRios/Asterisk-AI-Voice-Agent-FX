@@ -12,6 +12,7 @@ barge_in:
   initial_protection_ms: 300
   min_ms: 300
   post_tts_end_protection_ms: 300
+  agent_talk_detect_enabled: true      # <-- NUEVO (enciende la Medición 2)
 config_version: 4
 contexts:
   default:
@@ -240,6 +241,7 @@ tools:
         PURCHASE_INTENT_HIGH: https://j3n2gdia43.execute-api.us-east-2.amazonaws.com/dev/api/v1/calls/call-status
         DATA_EXTRACTION: https://j3n2gdia43.execute-api.us-east-2.amazonaws.com/dev/api/v1/calls/call-status
         TRANSITION: https://j3n2gdia43.execute-api.us-east-2.amazonaws.com/dev/api/v1/calls/call-status
+        ANSWERING_MACHINE: https://j3n2gdia43.execute-api.us-east-2.amazonaws.com/dev/api/v1/calls/call-status
       timeout_secs: 5
     enabled: true
 
@@ -255,6 +257,7 @@ tools:
       - ESCALATION_REQUIRED
       - POSITIVE_FEEDBACK
       - NEGATIVE_FEEDBACK
+      - ANSWERING_MACHINE
     enabled: true
 vad:
   enhanced_enabled: false
