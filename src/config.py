@@ -8,7 +8,7 @@ using Pydantic v2 for validation and type safety.
 import os
 import yaml
 from pydantic import BaseModel, Field
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Literal
 import structlog
 
 # Import configuration helpers (AAVA-40 refactor)
@@ -72,6 +72,9 @@ class AudioSocketConfig(BaseModel):
     host: str = Field(default="127.0.0.1")
     port: int = Field(default=8090)
     format: str = Field(default="ulaw")  # 'ulaw' or 'slin16'
+    # Provider-bound audio packet size. Startup-only: /reload preserves the
+    # effective value until the next process restart.
+    frame_ms: Literal[20, 60] = Field(default=20)
 
 
 class LocalProviderConfig(BaseModel):
