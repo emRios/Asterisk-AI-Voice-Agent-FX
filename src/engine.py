@@ -14,6 +14,7 @@ import json
 import ipaddress
 import sqlite3
 from collections import deque
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from typing import Dict, Any, Optional, List, Set, Tuple, Callable
@@ -177,6 +178,33 @@ _CALL_DURATION = Histogram(
     labelnames=("pipeline", "provider"),
     buckets=(10, 30, 60, 120, 180, 300, 600, 900, 1800, 3600),
 )
+_COALESCE_MSGS_OUT_TOTAL = Counter(
+    "avb_coalesce_msgs_out_total",
+    "Provider-bound audio messages emitted by the AudioSocket coalescer",
+)
+_COALESCE_PARTIAL_FLUSH_TOTAL = Counter(
+    "avb_coalesce_partial_flush_total",
+    "Partial AudioSocket coalescer flushes",
+    labelnames=("reason",),
+)
+
+_COALESCE_FRAMES_PER_MESSAGE = 3
+_COALESCE_STALL_SECONDS = 0.120
+# Terminal flushing is best-effort and must not delay call teardown indefinitely.
+_COALESCE_FLUSH_TIMEOUT_SECONDS = 0.120
+
+
+@dataclass
+class _AudioSocketCoalesceState:
+    """Private, process-local provider ingress state for one call."""
+
+    buffer: bytearray = field(default_factory=bytearray)
+    frame_count: int = 0
+    first_frame_ts: Optional[float] = None
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    first_send_logged: bool = False
+
+
 # Track call start times for duration calculation
 _call_start_times = {}  # call_id -> timestamp
 
@@ -190,6 +218,8 @@ class Engine:
 
     def __init__(self, config: AppConfig):
         self.config = config
+        self._audiosocket_frame_ms = int(getattr(getattr(config, "audiosocket", None), "frame_ms", 20) or 20)
+        self._audiosocket_coalesce_states: Dict[str, _AudioSocketCoalesceState] = {}
         self._start_time = time.time()  # Track engine start time for uptime
         self._config_hash = self._compute_config_hash()
         self._config_loaded_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -3318,16 +3348,13 @@ class Engine:
                 start_task.cancel()
         except Exception:
             pass
-        provider = self._call_providers.pop(session.call_id, None)
-        if provider:
-            try:
-                # Stop the provider's session for this call
-                if hasattr(provider, 'stop_session'):
-                    await provider.stop_session()
-                    logger.info("✅ AI provider session stopped",
-                               provider=session.provider_name)
-            except Exception as e:
-                logger.warning(f"Failed to stop provider: {e}")
+        try:
+            provider_stopped = await self._stop_call_provider(session.call_id, session)
+            if provider_stopped:
+                logger.info("✅ AI provider session stopped",
+                           provider=session.provider_name)
+        except Exception as e:
+            logger.warning(f"Failed to stop provider: {e}")
         
         # Step 3: Bridge SIP channel directly to caller
         try:
@@ -3641,13 +3668,10 @@ class Engine:
                 pass
 
             provider_stopped = False
-            provider = self._call_providers.pop(call_id, None)
-            if provider and hasattr(provider, "stop_session"):
-                try:
-                    await provider.stop_session()
-                    provider_stopped = True
-                except Exception:
-                    logger.debug("Provider stop_session failed during AI disconnect", call_id=call_id, exc_info=True)
+            try:
+                provider_stopped = await self._stop_call_provider(call_id, session)
+            except Exception:
+                logger.debug("Provider stop_session failed during AI disconnect", call_id=call_id, exc_info=True)
 
             try:
                 pipeline_task = self._pipeline_tasks.pop(call_id, None)
@@ -4297,12 +4321,10 @@ class Engine:
                 start_task.cancel()
         except Exception:
             pass
-        provider = self._call_providers.pop(call_id, None)
-        if provider and hasattr(provider, "stop_session"):
-            try:
-                await provider.stop_session()
-            except Exception:
-                logger.debug("Failed to stop provider session during attended transfer", call_id=call_id, exc_info=True)
+        try:
+            await self._stop_call_provider(call_id, session)
+        except Exception:
+            logger.debug("Failed to stop provider session during attended transfer", call_id=call_id, exc_info=True)
 
         # Bridge agent directly to caller bridge.
         try:
@@ -4937,9 +4959,7 @@ class Engine:
             except Exception:
                 pass
             try:
-                provider = self._call_providers.pop(call_id, None)
-                if provider and hasattr(provider, "stop_session"):
-                    await provider.stop_session()
+                await self._stop_call_provider(call_id, session)
             except Exception:
                 logger.debug("Provider stop_session failed during cleanup", call_id=call_id, exc_info=True)
 
@@ -5574,6 +5594,163 @@ class Engine:
         except Exception as exc:
             logger.error("Error binding AudioSocket UUID", conn_id=conn_id, uuid=uuid_str, error=str(exc), exc_info=True)
             return False
+
+    async def _send_or_coalesce_provider_audio(
+        self,
+        call_id: str,
+        provider,
+        provider_payload: Optional[bytes] = None,
+        provider_encoding: str = "",
+        provider_name: str = "",
+        *,
+        provider_active: bool = True,
+        flush_reason: Optional[str] = None,
+    ) -> None:
+        """Send provider ingress audio or manage its per-call 60 ms accumulator.
+
+        ``flush_reason`` makes the operation idempotent and terminal for this
+        call's accumulator. It is used by call cleanup and the last AudioSocket
+        disconnect; both are best-effort and bounded.
+        """
+        states = getattr(self, "_audiosocket_coalesce_states", None)
+
+        if flush_reason is not None:
+            if not states:
+                return
+            state = states.get(call_id)
+            if state is None:
+                return
+            try:
+                async with state.lock:
+                    if states.get(call_id) is not state:
+                        return
+                    partial = bytes(state.buffer)
+                    state.buffer.clear()
+                    state.frame_count = 0
+                    state.first_frame_ts = None
+                    if not partial:
+                        return
+
+                    _COALESCE_PARTIAL_FLUSH_TOTAL.labels(reason=flush_reason).inc()
+                    if not provider_active or provider is None:
+                        return
+                    try:
+                        await asyncio.wait_for(
+                            provider.send_audio(partial),
+                            timeout=_COALESCE_FLUSH_TIMEOUT_SECONDS,
+                        )
+                    except asyncio.TimeoutError:
+                        logger.warning(
+                            "AudioSocket coalescer flush timed out",
+                            call_id=call_id,
+                            reason=flush_reason,
+                            frame_bytes=len(partial),
+                        )
+                        return
+                    except Exception:
+                        logger.warning(
+                            "AudioSocket coalescer flush failed",
+                            call_id=call_id,
+                            reason=flush_reason,
+                            frame_bytes=len(partial),
+                            exc_info=True,
+                        )
+                        return
+
+                    _COALESCE_MSGS_OUT_TOTAL.inc()
+                    if not state.first_send_logged:
+                        logger.info(
+                            "AudioSocket provider coalescer first send",
+                            call_id=call_id,
+                            frame_bytes=len(partial),
+                            frames_per_msg=_COALESCE_FRAMES_PER_MESSAGE,
+                        )
+                        state.first_send_logged = True
+            finally:
+                if states.get(call_id) is state:
+                    states.pop(call_id, None)
+            return
+
+        if provider_payload is None or not provider_active or provider is None:
+            return
+
+        effective_frame_ms = int(getattr(self, "_audiosocket_frame_ms", 20) or 20)
+        should_coalesce = (
+            effective_frame_ms == 60
+            and provider_encoding.lower() in {"ulaw", "mulaw", "g711_ulaw"}
+            and provider_name != "openai_realtime"
+        )
+        if not should_coalesce:
+            await provider.send_audio(provider_payload)
+            return
+
+        if states is None:
+            states = {}
+            self._audiosocket_coalesce_states = states
+        state = states.get(call_id)
+        if state is None:
+            state = _AudioSocketCoalesceState()
+            states[call_id] = state
+
+        async with state.lock:
+            # A terminal cleanup may have removed this state while this handler
+            # was waiting for the lock. In that case the late frame is dropped.
+            if states.get(call_id) is not state:
+                return
+
+            def record_success(frame_bytes: int) -> None:
+                _COALESCE_MSGS_OUT_TOTAL.inc()
+                if not state.first_send_logged:
+                    logger.info(
+                        "AudioSocket provider coalescer first send",
+                        call_id=call_id,
+                        frame_bytes=frame_bytes,
+                        frames_per_msg=_COALESCE_FRAMES_PER_MESSAGE,
+                    )
+                    state.first_send_logged = True
+
+            now = time.monotonic()
+            if (
+                state.buffer
+                and state.first_frame_ts is not None
+                and now - state.first_frame_ts > _COALESCE_STALL_SECONDS
+            ):
+                stalled = bytes(state.buffer)
+                state.buffer.clear()
+                state.frame_count = 0
+                state.first_frame_ts = None
+                _COALESCE_PARTIAL_FLUSH_TOTAL.labels(reason="stall").inc()
+                await provider.send_audio(stalled)
+                record_success(len(stalled))
+
+            if not state.buffer:
+                state.first_frame_ts = now
+            state.buffer.extend(provider_payload)
+            state.frame_count += 1
+            if state.frame_count < _COALESCE_FRAMES_PER_MESSAGE:
+                return
+
+            combined = bytes(state.buffer)
+            state.buffer.clear()
+            state.frame_count = 0
+            state.first_frame_ts = None
+            await provider.send_audio(combined)
+            record_success(len(combined))
+
+    async def _stop_call_provider(self, call_id: str, session: CallSession) -> bool:
+        """Flush provider ingress before removing and stopping the provider."""
+        provider = self._call_providers.get(call_id)
+        await self._send_or_coalesce_provider_audio(
+            call_id,
+            provider,
+            provider_active=bool(getattr(session, "provider_session_active", False)),
+            flush_reason="terminal_cleanup",
+        )
+        provider = self._call_providers.pop(call_id, None)
+        if provider and hasattr(provider, "stop_session"):
+            await provider.stop_session()
+            return True
+        return False
 
     async def _audiosocket_handle_audio(self, conn_id: str, audio_bytes: bytes) -> None:
         """Forward inbound AudioSocket audio to the active provider for the bound call."""
@@ -6535,7 +6712,14 @@ class Engine:
                 )
             except Exception:
                 logger.debug("Provider input capture failed", call_id=session.call_id, exc_info=True)
-            await provider.send_audio(provider_payload)
+            await self._send_or_coalesce_provider_audio(
+                caller_channel_id,
+                provider,
+                provider_payload,
+                provider_encoding,
+                provider_name,
+                provider_active=True,
+            )
             
             # DEBUG: Confirm audio sent (OpenAI troubleshooting)
             if provider_name == "openai_realtime":
@@ -7064,11 +7248,14 @@ class Engine:
         """Cleanup mappings when an AudioSocket connection disconnects."""
         try:
             caller_channel_id = self.conn_to_channel.pop(conn_id, None)
+            last_connection = False
+            sess = None
             if caller_channel_id:
                 conns = self.channel_to_conns.get(caller_channel_id, set())
                 conns.discard(conn_id)
                 if not conns:
                     self.channel_to_conns.pop(caller_channel_id, None)
+                    last_connection = True
                 # Reset primary if needed
                 if self.audiosocket_primary_conn.get(caller_channel_id) == conn_id:
                     self.audiosocket_primary_conn.pop(caller_channel_id, None)
@@ -7082,6 +7269,13 @@ class Engine:
                         await self._save_session(sess)
                 except Exception:
                     pass
+                if last_connection:
+                    await self._send_or_coalesce_provider_audio(
+                        caller_channel_id,
+                        self._call_providers.get(caller_channel_id),
+                        provider_active=bool(sess and getattr(sess, "provider_session_active", False)),
+                        flush_reason="last_disconnect",
+                    )
             logger.info("AudioSocket connection disconnected", conn_id=conn_id, caller_channel_id=caller_channel_id)
         except Exception as exc:
             logger.error("Error during AudioSocket disconnect cleanup", conn_id=conn_id, error=str(exc), exc_info=True)
@@ -12279,6 +12473,20 @@ class Engine:
             logger.debug("Metrics handler failed", error=str(exc), exc_info=True)
             return web.Response(text="metrics_error", status=500)
 
+    def _defer_audiosocket_frame_ms_reload(self, new_config: AppConfig, changes: List[str]) -> None:
+        """Keep the startup-only coalescer mode stable until process restart."""
+        audiosocket = getattr(new_config, "audiosocket", None)
+        if audiosocket is None:
+            return
+        effective = int(getattr(self, "_audiosocket_frame_ms", 20) or 20)
+        requested = int(getattr(audiosocket, "frame_ms", 20) or 20)
+        if requested == effective:
+            return
+        audiosocket.frame_ms = effective
+        changes.append(
+            f"AudioSocket frame_ms={requested} deferred until restart; effective value remains {effective}"
+        )
+
     async def _reload_handler(self, request):
         """Hot-reload configuration without restarting the engine.
         
@@ -12318,7 +12526,8 @@ class Engine:
             
             # Step 2: Compare and update provider configurations
             old_providers = set(self.providers.keys()) if self.providers else set()
-            
+            self._defer_audiosocket_frame_ms_reload(new_config, changes)
+
             # Update config reference
             old_config = self.config
             self.config = new_config
