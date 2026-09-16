@@ -60,6 +60,21 @@ async def test_provider_no_retrocea_mulaw_480_con_firma_productiva():
 
 
 @pytest.mark.asyncio
+async def test_ruta_continua_deepgram_llega_al_coalescer_productivo():
+    engine = make_engine()
+    provider, websocket = make_deepgram_provider(settings_acked=True)
+    frames = [bytes([index + 1]) * 160 for index in range(3)]
+
+    for frame in frames:
+        await engine._send_continuous_provider_audio(
+            "call", provider, frame, "ulaw", "deepgram", 8000
+        )
+
+    assert websocket.sent == [b"".join(frames)]
+    assert len(websocket.sent[0]) == 480
+
+
+@pytest.mark.asyncio
 async def test_prestream_queue_con_480_se_vacia_en_siguiente_send():
     provider, websocket = make_deepgram_provider(settings_acked=False)
     payloads = [bytes([index]) * 480 for index in range(12)]
