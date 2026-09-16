@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import types
 
@@ -95,10 +96,12 @@ class StreamingPlaybackStub:
         return None
 
 
-def make_engine(frame_ms: int) -> Engine:
+def make_engine(frame_ms: int, *, integrity_probe: bool = False) -> Engine:
     engine = Engine.__new__(Engine)
     engine._audiosocket_frame_ms = frame_ms
     engine._audiosocket_coalesce_states = {}
+    engine._audiosocket_integrity_probe = integrity_probe
+    engine._audiosocket_integrity_ledgers = {}
     engine._call_providers = {}
     return engine
 
@@ -477,6 +480,7 @@ async def test_provider_inactivo_no_acumula_y_cleanup_descarta():
 def test_validador_frame_ms():
     assert AudioSocketConfig(frame_ms=20).frame_ms == 20
     assert AudioSocketConfig(frame_ms=60).frame_ms == 60
+    assert AudioSocketConfig(integrity_probe=True).integrity_probe is True
     for invalid in (30, 40, 70, 80, 100, 0, -20):
         with pytest.raises(ValidationError):
             AudioSocketConfig(frame_ms=invalid)
@@ -530,3 +534,40 @@ async def test_metricas_de_mensaje_y_flush_parcial():
 
     assert engine_module._COALESCE_MSGS_OUT_TOTAL._value.get() == msg_before + 1
     assert partial._value.get() == partial_before + 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("frame_ms", [20, 60])
+async def test_ledger_integridad_prueba_bytes_orden_y_flush(monkeypatch, frame_ms):
+    engine = make_engine(frame_ms, integrity_probe=True)
+    provider = RecordingProvider()
+    provider.request_id = "golden-request-1"
+    events = []
+    monkeypatch.setattr(
+        engine_module.logger,
+        "info",
+        lambda event, **fields: events.append((event, fields)),
+    )
+    frames = [bytes([i]) * 160 for i in range(4)]
+
+    for frame in frames:
+        await send_frame(engine, "call", provider, frame)
+    await engine._send_or_coalesce_provider_audio(
+        "call", provider, provider_active=True, flush_reason="test"
+    )
+
+    ledger = [fields for event, fields in events if event == "COALESCE_INTEGRITY_ENGINE"]
+    assert len(ledger) == 1
+    summary = ledger[0]
+    expected = b"".join(frames)
+    expected_hash = hashlib.blake2s(expected).hexdigest()
+    assert summary["request_id"] == "golden-request-1"
+    assert summary["source_bytes"] == len(expected)
+    assert summary["emitted_bytes"] == len(expected)
+    assert summary["source_hash"] == expected_hash
+    assert summary["emitted_hash"] == expected_hash
+    assert summary["verified"] is True
+    assert summary["pending_bytes"] == 0
+    assert summary["source_messages"] == 4
+    assert summary["emitted_messages"] == (4 if frame_ms == 20 else 2)
+    assert engine._audiosocket_integrity_ledgers == {}

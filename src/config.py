@@ -75,6 +75,9 @@ class AudioSocketConfig(BaseModel):
     # Provider-bound audio packet size. Startup-only: /reload preserves the
     # effective value until the next process restart.
     frame_ms: Literal[20, 60] = Field(default=20)
+    # Test-only end-to-end ledger. It hashes provider-bound bytes per call and
+    # emits one terminal summary; it never changes audio framing or payloads.
+    integrity_probe: bool = Field(default=False)
 
 
 class LocalProviderConfig(BaseModel):
