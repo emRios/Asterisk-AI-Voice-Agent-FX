@@ -40,6 +40,26 @@ class RecordingProvider:
         self.events.append("stop")
 
 
+class FormatRecordingProvider:
+    """Continuous-input provider stub preserving the productive call signature."""
+
+    def __init__(self) -> None:
+        self.sent: list[tuple[bytes, int | None, str | None]] = []
+        self.events: list[str] = []
+
+    async def send_audio(
+        self,
+        payload: bytes,
+        sample_rate: int | None = None,
+        encoding: str | None = None,
+    ) -> None:
+        self.sent.append((bytes(payload), sample_rate, encoding))
+        self.events.append("send")
+
+    async def stop_session(self) -> None:
+        self.events.append("stop")
+
+
 class SessionStoreStub:
     def __init__(self, session) -> None:
         self.session = session
@@ -176,6 +196,47 @@ async def test_no_adelanta_audio():
 
     await send_frame(engine, "call", provider, b"c" * 160)
     assert provider.sent == [b"a" * 160 + b"b" * 160 + b"c" * 160]
+
+
+@pytest.mark.asyncio
+async def test_ruta_continua_pasa_por_coalescer_y_flush_conserva_firma():
+    engine = make_engine(60)
+    provider = FormatRecordingProvider()
+    engine._call_providers["call"] = provider
+    session = types.SimpleNamespace(provider_session_active=True)
+    frames = [bytes([index]) * 160 for index in range(4)]
+
+    for frame in frames[:3]:
+        await engine._send_continuous_provider_audio(
+            "call", provider, frame, "ulaw", "deepgram", 8000
+        )
+
+    assert provider.sent == [(b"".join(frames[:3]), 8000, "ulaw")]
+
+    await engine._send_continuous_provider_audio(
+        "call", provider, frames[3], "ulaw", "deepgram", 8000
+    )
+    await engine._stop_call_provider("call", session)
+
+    assert provider.sent == [
+        (b"".join(frames[:3]), 8000, "ulaw"),
+        (frames[3], 8000, "ulaw"),
+    ]
+    assert provider.events == ["send", "send", "stop"]
+    assert engine._audiosocket_coalesce_states == {}
+
+
+@pytest.mark.asyncio
+async def test_ruta_continua_20ms_es_bypass_y_conserva_firma():
+    engine = make_engine(20)
+    provider = FormatRecordingProvider()
+
+    await engine._send_continuous_provider_audio(
+        "call", provider, b"x" * 160, "ulaw", "deepgram", 8000
+    )
+
+    assert provider.sent == [(b"x" * 160, 8000, "ulaw")]
+    assert engine._audiosocket_coalesce_states == {}
 
 
 @pytest.mark.asyncio
