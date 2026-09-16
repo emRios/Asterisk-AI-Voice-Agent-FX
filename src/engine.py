@@ -203,6 +203,10 @@ class _AudioSocketCoalesceState:
     first_frame_ts: Optional[float] = None
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     first_send_logged: bool = False
+    # Continuous-input providers may require rate/encoding arguments.  Keep the
+    # canonical payload sender with the per-call buffer so terminal flushes use
+    # the same provider contract as regular sends.
+    provider_send: Optional[Callable[[bytes], Any]] = None
 
 
 # Track call start times for duration calculation
@@ -5605,6 +5609,7 @@ class Engine:
         *,
         provider_active: bool = True,
         flush_reason: Optional[str] = None,
+        provider_send: Optional[Callable[[bytes], Any]] = None,
     ) -> None:
         """Send provider ingress audio or manage its per-call 60 ms accumulator.
 
@@ -5613,6 +5618,12 @@ class Engine:
         disconnect; both are best-effort and bounded.
         """
         states = getattr(self, "_audiosocket_coalesce_states", None)
+
+        async def emit(payload: bytes, sender: Optional[Callable[[bytes], Any]]) -> None:
+            if sender is not None:
+                await sender(payload)
+            else:
+                await provider.send_audio(payload)
 
         if flush_reason is not None:
             if not states:
@@ -5636,7 +5647,7 @@ class Engine:
                         return
                     try:
                         await asyncio.wait_for(
-                            provider.send_audio(partial),
+                            emit(partial, state.provider_send or provider_send),
                             timeout=_COALESCE_FLUSH_TIMEOUT_SECONDS,
                         )
                     except asyncio.TimeoutError:
@@ -5681,7 +5692,7 @@ class Engine:
             and provider_name != "openai_realtime"
         )
         if not should_coalesce:
-            await provider.send_audio(provider_payload)
+            await emit(provider_payload, provider_send)
             return
 
         if states is None:
@@ -5691,6 +5702,8 @@ class Engine:
         if state is None:
             state = _AudioSocketCoalesceState()
             states[call_id] = state
+        if state.provider_send is None and provider_send is not None:
+            state.provider_send = provider_send
 
         async with state.lock:
             # A terminal cleanup may have removed this state while this handler
@@ -5720,7 +5733,7 @@ class Engine:
                 state.frame_count = 0
                 state.first_frame_ts = None
                 _COALESCE_PARTIAL_FLUSH_TOTAL.labels(reason="stall").inc()
-                await provider.send_audio(stalled)
+                await emit(stalled, state.provider_send or provider_send)
                 record_success(len(stalled))
 
             if not state.buffer:
@@ -5734,8 +5747,47 @@ class Engine:
             state.buffer.clear()
             state.frame_count = 0
             state.first_frame_ts = None
-            await provider.send_audio(combined)
+            await emit(combined, state.provider_send or provider_send)
             record_success(len(combined))
+
+    async def _send_continuous_provider_audio(
+        self,
+        call_id: str,
+        provider,
+        provider_payload: bytes,
+        provider_encoding: str,
+        provider_name: str,
+        provider_rate: int,
+    ) -> None:
+        """Route continuous-input audio through the canonical coalescer seam.
+
+        The sender preserves the existing provider signature (payload, rate,
+        encoding), including the legacy one-argument fallback.  The coalescer
+        receives only a canonical ``send(payload)`` operation, which it retains
+        for a partial terminal flush of the same call.
+        """
+
+        async def send_with_provider_signature(payload: bytes) -> None:
+            try:
+                await provider.send_audio(payload, provider_rate, provider_encoding)
+            except TypeError as exc:
+                logger.warning(
+                    "Provider send_audio TypeError - falling back to old signature",
+                    call_id=call_id,
+                    provider=provider_name,
+                    error=str(exc),
+                )
+                await provider.send_audio(payload)
+
+        await self._send_or_coalesce_provider_audio(
+            call_id,
+            provider,
+            provider_payload,
+            provider_encoding,
+            provider_name,
+            provider_active=True,
+            provider_send=send_with_provider_signature,
+        )
 
     async def _stop_call_provider(self, call_id: str, session: CallSession) -> bool:
         """Flush provider ingress before removing and stopping the provider."""
@@ -6188,23 +6240,19 @@ class Engine:
                             exc_info=True,
                         )
 
-                    # CRITICAL: Pass sample_rate and encoding to prevent double resampling
-                    # Google Live needs to know audio is already at provider_rate to skip resampling
-                    try:
-                        await provider.send_audio(prov_payload, prov_rate, prov_enc)
-                        logger.debug(
-                            "✅ CONTINUOUS INPUT - Frame sent to provider successfully",
-                            call_id=caller_channel_id,
-                            provider=provider_name,
-                        )
-                    except TypeError:
-                        # Fallback for providers with old signature (audio_chunk only)
-                        await provider.send_audio(prov_payload)
-                        logger.debug(
-                            "✅ CONTINUOUS INPUT - Frame sent to provider (legacy signature)",
-                            call_id=caller_channel_id,
-                            provider=provider_name,
-                        )
+                    await self._send_continuous_provider_audio(
+                        caller_channel_id,
+                        provider,
+                        prov_payload,
+                        prov_enc,
+                        provider_name,
+                        prov_rate,
+                    )
+                    logger.debug(
+                        "✅ CONTINUOUS INPUT - Frame dispatched to provider",
+                        call_id=caller_channel_id,
+                        provider=provider_name,
+                    )
                 except Exception as e:
                     logger.error(
                         "❌ CONTINUOUS INPUT - Provider forward error",
@@ -6339,9 +6387,6 @@ class Engine:
                             )
                         except Exception:
                             logger.debug("Provider input capture failed (continuous-input)", call_id=session.call_id, exc_info=True)
-                        # CRITICAL: Pass encoding and sample_rate to provider
-                        # Google Live needs these to correctly interpret audio format
-                        # Other providers with single-param signature will ignore extras
                         logger.debug(
                             "Sending audio to provider",
                             call_id=session.call_id,
@@ -6350,17 +6395,14 @@ class Engine:
                             sample_rate=prov_rate,
                             payload_bytes=len(prov_payload),
                         )
-                        try:
-                            await provider.send_audio(prov_payload, prov_rate, prov_enc)
-                        except TypeError as e:
-                            logger.warning(
-                                "Provider send_audio TypeError - falling back to old signature",
-                                call_id=session.call_id,
-                                provider=provider_name,
-                                error=str(e),
-                            )
-                            # Fallback for providers with old signature (audio_chunk only)
-                            await provider.send_audio(prov_payload)
+                        await self._send_continuous_provider_audio(
+                            caller_channel_id,
+                            provider,
+                            prov_payload,
+                            prov_enc,
+                            provider_name,
+                            prov_rate,
+                        )
                     except Exception:
                         logger.debug("Provider continuous-input forward error", call_id=caller_channel_id, exc_info=True)
                     return
