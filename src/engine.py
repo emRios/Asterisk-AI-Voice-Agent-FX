@@ -1,5 +1,6 @@
 import asyncio
 import copy
+import hashlib
 import logging
 import math
 import os
@@ -209,6 +210,29 @@ class _AudioSocketCoalesceState:
     provider_send: Optional[Callable[[bytes], Any]] = None
 
 
+@dataclass
+class _AudioIntegrityLedger:
+    """Opt-in proof that one provider stream is byte-for-byte preserved."""
+
+    frame_ms: int
+    source_bytes: int = 0
+    source_messages: int = 0
+    emitted_bytes: int = 0
+    emitted_messages: int = 0
+    source_hasher: Any = field(default_factory=hashlib.blake2s)
+    emitted_hasher: Any = field(default_factory=hashlib.blake2s)
+
+    def add_source(self, payload: bytes) -> None:
+        self.source_bytes += len(payload)
+        self.source_messages += 1
+        self.source_hasher.update(payload)
+
+    def add_emitted(self, payload: bytes) -> None:
+        self.emitted_bytes += len(payload)
+        self.emitted_messages += 1
+        self.emitted_hasher.update(payload)
+
+
 # Track call start times for duration calculation
 _call_start_times = {}  # call_id -> timestamp
 
@@ -222,8 +246,13 @@ class Engine:
 
     def __init__(self, config: AppConfig):
         self.config = config
-        self._audiosocket_frame_ms = int(getattr(getattr(config, "audiosocket", None), "frame_ms", 20) or 20)
+        audiosocket_config = getattr(config, "audiosocket", None)
+        self._audiosocket_frame_ms = int(getattr(audiosocket_config, "frame_ms", 20) or 20)
         self._audiosocket_coalesce_states: Dict[str, _AudioSocketCoalesceState] = {}
+        self._audiosocket_integrity_probe = bool(
+            getattr(audiosocket_config, "integrity_probe", False)
+        )
+        self._audiosocket_integrity_ledgers: Dict[str, _AudioIntegrityLedger] = {}
         self._start_time = time.time()  # Track engine start time for uptime
         self._config_hash = self._compute_config_hash()
         self._config_loaded_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -5599,6 +5628,64 @@ class Engine:
             logger.error("Error binding AudioSocket UUID", conn_id=conn_id, uuid=uuid_str, error=str(exc), exc_info=True)
             return False
 
+    def _audio_integrity_ledger(self, call_id: str) -> Optional[_AudioIntegrityLedger]:
+        """Return the test-only ledger for one provider stream, if enabled."""
+        if not bool(getattr(self, "_audiosocket_integrity_probe", False)):
+            return None
+        ledgers = getattr(self, "_audiosocket_integrity_ledgers", None)
+        if ledgers is None:
+            ledgers = {}
+            self._audiosocket_integrity_ledgers = ledgers
+        ledger = ledgers.get(call_id)
+        if ledger is None:
+            ledger = _AudioIntegrityLedger(
+                frame_ms=int(getattr(self, "_audiosocket_frame_ms", 20) or 20)
+            )
+            ledgers[call_id] = ledger
+        return ledger
+
+    def _record_audio_integrity_source(self, call_id: str, payload: bytes) -> None:
+        ledger = self._audio_integrity_ledger(call_id)
+        if ledger is not None:
+            ledger.add_source(payload)
+
+    def _record_audio_integrity_emitted(self, call_id: str, payload: bytes) -> None:
+        ledger = self._audio_integrity_ledger(call_id)
+        if ledger is not None:
+            ledger.add_emitted(payload)
+
+    def _finalize_audio_integrity(
+        self, call_id: str, provider: Any, reason: str
+    ) -> None:
+        """Emit one terminal, non-recoverable summary for A/B comparison."""
+        ledgers = getattr(self, "_audiosocket_integrity_ledgers", None)
+        if not ledgers:
+            return
+        ledger = ledgers.pop(call_id, None)
+        if ledger is None:
+            return
+        source_hash = ledger.source_hasher.hexdigest()
+        emitted_hash = ledger.emitted_hasher.hexdigest()
+        verified = (
+            ledger.source_bytes == ledger.emitted_bytes
+            and source_hash == emitted_hash
+        )
+        logger.info(
+            "COALESCE_INTEGRITY_ENGINE",
+            call_id=call_id,
+            request_id=getattr(provider, "request_id", None),
+            frame_ms=ledger.frame_ms,
+            source_bytes=ledger.source_bytes,
+            source_messages=ledger.source_messages,
+            source_hash=source_hash,
+            emitted_bytes=ledger.emitted_bytes,
+            emitted_messages=ledger.emitted_messages,
+            emitted_hash=emitted_hash,
+            pending_bytes=ledger.source_bytes - ledger.emitted_bytes,
+            verified=verified,
+            reason=reason,
+        )
+
     async def _send_or_coalesce_provider_audio(
         self,
         call_id: str,
@@ -5624,14 +5711,18 @@ class Engine:
                 await sender(payload)
             else:
                 await provider.send_audio(payload)
+            # Count only a payload accepted by the provider sender. The
+            # GoldenBridge counterpart ledger proves remote ingress.
+            self._record_audio_integrity_emitted(call_id, payload)
 
         if flush_reason is not None:
-            if not states:
-                return
-            state = states.get(call_id)
-            if state is None:
-                return
+            state = None
             try:
+                if not states:
+                    return
+                state = states.get(call_id)
+                if state is None:
+                    return
                 async with state.lock:
                     if states.get(call_id) is not state:
                         return
@@ -5678,12 +5769,15 @@ class Engine:
                         )
                         state.first_send_logged = True
             finally:
-                if states.get(call_id) is state:
+                if states and state is not None and states.get(call_id) is state:
                     states.pop(call_id, None)
+                self._finalize_audio_integrity(call_id, provider, flush_reason)
             return
 
         if provider_payload is None or not provider_active or provider is None:
             return
+
+        self._record_audio_integrity_source(call_id, provider_payload)
 
         effective_frame_ms = int(getattr(self, "_audiosocket_frame_ms", 20) or 20)
         should_coalesce = (
