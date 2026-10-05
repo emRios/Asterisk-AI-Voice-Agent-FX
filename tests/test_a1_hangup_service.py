@@ -59,7 +59,7 @@ async def test_confirmed_when_ari_reports_channel_gone():
 
 
 async def test_gone_event_before_delete_returns_is_still_confirmed():
-    # StasisEnd can race ahead of the DELETE response: the waiter is registered first.
+    # ChannelDestroyed can race ahead of the DELETE response: the waiter is registered first.
     ari = FakeARI([204])
     s = svc(ari)
     ari.on_delete = lambda cid: s.notify_channel_gone(cid)
@@ -368,3 +368,20 @@ async def test_channel_destroyed_during_get_confirms():
     r = await s.request_hangup("ch1", "x")
     assert r.outcome is HangupOutcome.CONFIRMED
     assert r.attempts == 1
+
+
+async def test_server_hangup_delivery_is_retained_and_errors_logged():
+    from structlog.testing import capture_logs
+
+    async def boom(_e):
+        raise RuntimeError("engine down")
+
+    p = DeepgramProvider({}, types.SimpleNamespace(), boom)
+    p.call_id = "call-1"
+    with capture_logs() as logs:
+        t = asyncio.create_task(p._handle_server_hangup({"type": "ServerHangup"}))
+        p._track_server_hangup(t)
+        assert t in p._server_hangup_tasks
+        await asyncio.sleep(0.01)
+    assert not p._server_hangup_tasks
+    assert any(l["event"] == "ServerHangup delivery failed" for l in logs)

@@ -1021,6 +1021,18 @@ class DeepgramProvider(AIProviderInterface):
             except Exception:
                 logger.error("An unexpected error occurred while sending audio chunk", exc_info=True)
     
+    def _track_server_hangup(self, task: "asyncio.Task") -> None:
+        """Keep a strong reference to the ServerHangup delivery and log if it crashes."""
+        tasks = self.__dict__.setdefault('_server_hangup_tasks', set())
+        tasks.add(task)
+
+        def _done(t: "asyncio.Task") -> None:
+            tasks.discard(t)
+            if not t.cancelled() and t.exception() is not None:
+                logger.error("ServerHangup delivery failed", call_id=self.call_id, error=str(t.exception()))
+
+        task.add_done_callback(_done)
+
     async def _handle_server_hangup(self, event_data: Dict[str, Any]) -> None:
         """§15.A1: ``{"type": "ServerHangup", "reason": ...}`` control message from the server.
 
@@ -1459,7 +1471,7 @@ class DeepgramProvider(AIProviderInterface):
                                 # Handle function call via tool adapter
                                 asyncio.create_task(self._handle_function_call(event_data))
                             elif et == "ServerHangup":
-                                asyncio.create_task(self._handle_server_hangup(event_data))
+                                self._track_server_hangup(asyncio.create_task(self._handle_server_hangup(event_data)))
                             elif et == "ConnectionClosed":
                                 logger.info(
                                     "🔌 Deepgram ConnectionClosed",
