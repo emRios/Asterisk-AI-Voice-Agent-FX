@@ -58,6 +58,7 @@ from .providers.elevenlabs_config import ElevenLabsAgentConfig
 from .core import SessionStore, PlaybackManager, ConversationCoordinator
 from .core.vad_manager import EnhancedVADManager, VADResult
 from .core.streaming_playback_manager import StreamingPlaybackManager
+from .core.hangup_service import HangupService
 from .core.transport_orchestrator import TransportOrchestrator, TransportProfile
 from .core.models import CallSession
 from .core.outbound_store import get_outbound_store
@@ -266,6 +267,9 @@ class Engine:
         )
         # Set engine reference for event propagation
         self.ari_client.engine = self
+        # Verifiable hangup (§15.A1): single owner of "hang up and confirm".
+        self.hangup_service = HangupService(self.ari_client)
+        self._hangup_tasks: Set[asyncio.Task] = set()
         
         # Initialize core components
         self.session_store = SessionStore()
@@ -4541,6 +4545,7 @@ class Engine:
             if channel_id in self._outbound_awaiting_amd_channel_ids:
                 logger.debug("Ignoring StasisEnd during outbound AMD hop", channel_id=channel_id)
                 return
+            self.hangup_service.notify_channel_gone(channel_id)
             await self._cleanup_call(channel_id)
         except Exception as exc:
             logger.error("Error handling StasisEnd", error=str(exc), exc_info=True)
@@ -4552,6 +4557,7 @@ class Engine:
             channel_id = channel.get("id")
             if not channel_id:
                 return
+            self.hangup_service.notify_channel_gone(channel_id)
             await self._handle_outbound_channel_destroyed(event)
             logger.info("Channel destroyed", channel_id=channel_id)
             await self._cleanup_call(channel_id)
@@ -8190,6 +8196,22 @@ class Engine:
         except Exception:
             logger.debug("Transport audit encountered an error", exc_info=True)
 
+    def _spawn_hangup(self, channel_id: Optional[str], *, reason: str, call_id: Optional[str] = None) -> None:
+        """Start a verifiable hangup as an engine-owned task (fire-and-forget for the caller)."""
+        if not channel_id:
+            logger.warning("Hangup requested without caller channel", call_id=call_id, reason=reason)
+            return
+        task = asyncio.create_task(self.hangup_service.request_hangup(channel_id, reason))
+        self._hangup_tasks.add(task)
+
+        def _done(t: asyncio.Task) -> None:
+            self._hangup_tasks.discard(t)
+            if not t.cancelled() and t.exception() is not None:
+                logger.error("Hangup task crashed", call_id=call_id, channel_id=channel_id,
+                             error=str(t.exception()))
+
+        task.add_done_callback(_done)
+
     async def on_provider_event(self, event: Dict[str, Any]):
         """Handle async events from the active provider (Deepgram/OpenAI/local).
 
@@ -8205,6 +8227,16 @@ class Engine:
             session = await self.session_store.get_by_call_id(call_id)
             if not session:
                 logger.warning("Provider event for unknown call", event_type=etype, call_id=call_id)
+                return
+
+            # §15.A1: server-requested hangup without farewell → verifiable hangup,
+            # owned by the engine (survives the provider receive loop being torn down).
+            if etype == "HangupImmediate":
+                self._spawn_hangup(
+                    session.caller_channel_id,
+                    reason=str(event.get("reason") or "server_immediate"),
+                    call_id=call_id,
+                )
                 return
 
             # Option 2: Provider-owned VAD/barge-in. Provider signals interruption; platform flushes local output only.

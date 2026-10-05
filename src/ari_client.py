@@ -373,6 +373,7 @@ class ARIClient:
         response = await self.send_command("DELETE", f"channels/{channel_id}", tolerate_statuses=[404])
         if response and response.get("status") == 404:
             logger.debug("Channel hangup failed (404), likely already hung up.", channel_id=channel_id)
+        return response
 
     async def execute_application(self, channel_id: str, app_name: str, app_data: str) -> bool:
         """Execute an Asterisk application on a channel."""
