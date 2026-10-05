@@ -1027,44 +1027,17 @@ class DeepgramProvider(AIProviderInterface):
             except Exception:
                 logger.error("An unexpected error occurred while sending audio chunk", exc_info=True)
     
-    async def _maybe_handle_immediate_hangup(self, event_data: Dict[str, Any], context: Dict[str, Any]) -> bool:
-        """§15.A1: ``hangup_call {"immediate": true, "reason": ...}`` from the server.
+    async def _handle_server_hangup(self, event_data: Dict[str, Any]) -> None:
+        """§15.A1: ``{"type": "ServerHangup", "reason": ...}`` control message from the server.
 
-        Server→engine control (no-audio / no-speech closes), not an LLM tool call:
-        no farewell, no ``_hangup_pending``/``HangupReady``, no ``cleanup_after_tts``.
-        The engine performs a verifiable hangup via HangupService.
+        A message type of its own (not a FunctionCallRequest), so an LLM tool call
+        can never produce it. No farewell, no ``_hangup_pending``/``HangupReady``,
+        no ``cleanup_after_tts``: the engine performs a verifiable hangup.
         """
-        functions = event_data.get('functions') or []
-        if not functions or not isinstance(functions[0], dict):
-            return False
-        func = functions[0]
-        if func.get('name') != 'hangup_call':
-            return False
-        args = func.get('arguments') or {}
-        if isinstance(args, str):
-            try:
-                args = json.loads(args) if args.strip() else {}
-            except ValueError:
-                return False
-        if not isinstance(args, dict) or args.get('immediate') is not True:
-            return False
-        reason = str(args.get('reason') or 'server_immediate')
+        reason = str(event_data.get('reason') or 'server_immediate')
         logger.info("🔚 Immediate hangup requested by server", call_id=self.call_id, reason=reason)
         if self.on_event:
             await self.on_event({'type': 'HangupImmediate', 'call_id': self.call_id, 'reason': reason})
-        try:
-            await self.tool_adapter.send_tool_result(
-                {
-                    'function_call_id': func.get('id'),
-                    'function_name': 'hangup_call',
-                    'status': 'success',
-                    'immediate': True,
-                },
-                context,
-            )
-        except Exception:
-            logger.debug("Could not ack immediate hangup (socket likely closing)", call_id=self.call_id)
-        return True
 
     async def _handle_function_call(self, event_data: Dict[str, Any]):
         """
@@ -1086,9 +1059,6 @@ class DeepgramProvider(AIProviderInterface):
                 'websocket': self.websocket
             }
             
-            if await self._maybe_handle_immediate_hangup(event_data, context):
-                return
-
             # Execute tool via adapter
             result = await self.tool_adapter.handle_tool_call_event(event_data, context)
             
@@ -1494,6 +1464,8 @@ class DeepgramProvider(AIProviderInterface):
                                 )
                                 # Handle function call via tool adapter
                                 asyncio.create_task(self._handle_function_call(event_data))
+                            elif et == "ServerHangup":
+                                asyncio.create_task(self._handle_server_hangup(event_data))
                             elif et == "ConnectionClosed":
                                 logger.info(
                                     "🔌 Deepgram ConnectionClosed",

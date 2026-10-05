@@ -8,9 +8,11 @@ One owner for "hang up this channel and know whether it really went away":
 - The hangup runs as a single-flight Task owned by this service. Callers await it
   through ``asyncio.shield``, so cancelling the caller (e.g. the provider receive
   loop torn down by StasisEnd) does not abort the hangup.
-- Confirmation comes from ARI events, not from the DELETE status: a Future per
-  channel is registered BEFORE the DELETE and resolved by ``notify_channel_gone``
-  (wired at the top of the engine's StasisEnd / ChannelDestroyed handlers).
+- Confirmation comes from ARI, not from the DELETE status: a Future per channel
+  is registered BEFORE the DELETE and resolved by ``notify_channel_gone``, wired
+  ONLY to ChannelDestroyed. StasisEnd is not proof (transfer via continue, AMD
+  hop or app move leave Stasis with the channel alive); without ChannelDestroyed
+  the service asks ARI with a GET.
 """
 
 from __future__ import annotations
@@ -55,7 +57,7 @@ class HangupService:
         self._ari = ari_client
         self._request_timeout = request_timeout_secs
         self._confirm_timeout = confirm_timeout_secs
-        self._locks: Dict[str, asyncio.Lock] = {}
+        self._locks: Dict[str, "_LockEntry"] = {}
         self._inflight: Dict[str, "asyncio.Task[HangupResult]"] = {}
         self._gone_waiters: Dict[str, asyncio.Future] = {}
 
@@ -63,8 +65,7 @@ class HangupService:
     def notify_channel_gone(self, channel_id: Optional[str]) -> None:
         """Resolve the confirmation waiter for ``channel_id``, if any.
 
-        Called from StasisEnd (except the intentional outbound-AMD hop) and
-        ChannelDestroyed. No-op when no hangup is waiting on the channel.
+        Called from ChannelDestroyed only. No-op when no hangup is waiting.
         """
         if not channel_id:
             return
@@ -84,26 +85,29 @@ class HangupService:
         *,
         revalidate: Optional[Revalidate] = None,
     ) -> HangupResult:
-        lock = self._locks.setdefault(channel_id, asyncio.Lock())
-        async with lock:
-            task = self._inflight.get(channel_id)
-            if task is None:
-                if revalidate is not None and not await revalidate():
-                    logger.info("Hangup skipped by revalidation", channel_id=channel_id, reason=reason)
-                    return HangupResult(HangupOutcome.SKIPPED, channel_id, reason)
-                task = asyncio.create_task(self._run(channel_id, reason))
-                self._inflight[channel_id] = task
-                task.add_done_callback(lambda _t, cid=channel_id: self._forget(cid, _t))
+        entry = self._locks.get(channel_id)
+        if entry is None:
+            entry = self._locks[channel_id] = _LockEntry()
+        entry.users += 1
+        try:
+            async with entry.lock:
+                task = self._inflight.get(channel_id)
+                if task is None:
+                    if revalidate is not None and not await revalidate():
+                        logger.info("Hangup skipped by revalidation", channel_id=channel_id, reason=reason)
+                        return HangupResult(HangupOutcome.SKIPPED, channel_id, reason)
+                    task = asyncio.create_task(self._run(channel_id, reason))
+                    self._inflight[channel_id] = task
+                    task.add_done_callback(lambda _t, cid=channel_id: self._forget(cid, _t))
+        finally:
+            entry.users -= 1
+            if entry.users == 0 and self._locks.get(channel_id) is entry:
+                del self._locks[channel_id]
         return await asyncio.shield(task)
 
     def _forget(self, channel_id: str, task: "asyncio.Task[HangupResult]") -> None:
-        # Keep a finished task only while it is still the registered one; a later
-        # request on the same channel id (should not happen) starts fresh.
         if self._inflight.get(channel_id) is task:
             del self._inflight[channel_id]
-        lock = self._locks.get(channel_id)
-        if lock is not None and not lock.locked():
-            self._locks.pop(channel_id, None)
 
     # --------------------------------------------------------------- execution
     async def _run(self, channel_id: str, reason: str) -> HangupResult:
@@ -119,7 +123,9 @@ class HangupService:
                 if status == 404:
                     result.outcome = HangupOutcome.ALREADY_GONE
                     return result
-                if await self._wait_gone(gone):
+                # Wait for ChannelDestroyed only when the DELETE may have taken
+                # effect (2xx or ambiguous timeout); explicit errors go to the GET.
+                if (_is_2xx(status) or status == "timeout") and await self._wait_gone(gone):
                     result.outcome = HangupOutcome.CONFIRMED
                     return result
                 probe = await self._get(channel_id)
@@ -179,8 +185,22 @@ class HangupService:
         return _status_of(resp)
 
 
+class _LockEntry:
+    __slots__ = ("lock", "users")
+
+    def __init__(self) -> None:
+        self.lock = asyncio.Lock()
+        self.users = 0
+
+
 def _status_of(resp: Any) -> Any:
     """``send_command`` returns {"status": N, ...} on 204/errors and the JSON body on 2xx."""
-    if isinstance(resp, dict) and isinstance(resp.get("status"), int):
-        return resp["status"]
-    return 200
+    if isinstance(resp, dict):
+        status = resp.get("status")
+        return status if isinstance(status, int) else 200
+    logger.warning("Malformed ARI response", response_type=type(resp).__name__)
+    return "malformed"
+
+
+def _is_2xx(status: Any) -> bool:
+    return isinstance(status, int) and 200 <= status < 300

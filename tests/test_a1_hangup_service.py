@@ -162,6 +162,75 @@ async def test_notify_without_waiter_is_noop():
     s.notify_channel_gone(None)
 
 
+async def test_explicit_error_skips_confirmation_wait():
+    ari = FakeARI([500, 500], [200, 200])
+    s = svc(ari, confirm_timeout_secs=5.0)
+    loop = asyncio.get_running_loop()
+    t0 = loop.time()
+    r = await s.request_hangup("ch1", "x")
+    assert r.outcome is HangupOutcome.FAILED
+    assert loop.time() - t0 < 1.0  # no 5 s waits after explicit 500s
+
+
+async def test_get_timeout_and_malformed_responses():
+    class SlowGet(FakeARI):
+        async def send_command(self, method, resource, tolerate_statuses=None, **_):
+            self.calls.append((method, resource))
+            await asyncio.sleep(1)
+
+    ari = SlowGet([None, None])
+    ari.hangup_channel = None
+
+    async def malformed(cid):
+        ari.calls.append(("DELETE", cid))
+        return None
+
+    ari.hangup_channel = malformed
+    r = await svc(ari).request_hangup("ch1", "x")
+    assert r.statuses == ["malformed", "GET:timeout", "malformed", "GET:timeout"]
+    assert r.outcome is HangupOutcome.FAILED
+
+
+async def test_failed_logs_error():
+    from structlog.testing import capture_logs
+
+    ari = FakeARI([204, 204], [200, 200])
+    with capture_logs() as logs:
+        await svc(ari).request_hangup("stuck", "no_media")
+    assert any(l["log_level"] == "error" and l["event"] == "Channel could not be hung up" for l in logs)
+
+
+@pytest.mark.parametrize("mode", ["false", "raises", "cancelled"])
+async def test_lock_entry_released_when_no_task_is_created(mode):
+    s = svc(FakeARI([]))
+
+    async def revalidate():
+        if mode == "raises":
+            raise RuntimeError("boom")
+        if mode == "cancelled":
+            await asyncio.sleep(10)
+        return False
+
+    req = asyncio.create_task(s.request_hangup("ch1", "x", revalidate=revalidate))
+    if mode == "cancelled":
+        await asyncio.sleep(0.01)
+        req.cancel()
+    try:
+        await req
+    except (RuntimeError, asyncio.CancelledError):
+        pass
+    assert s._locks == {}
+    assert s._inflight == {}
+
+
+async def test_lock_entry_released_after_hangup():
+    ari = FakeARI([404])
+    s = svc(ari)
+    await s.request_hangup("ch1", "x")
+    await asyncio.sleep(0)
+    assert s._locks == {} and s._inflight == {}
+
+
 # ------------------------------------------------------------ provider route
 class WS:
     def __init__(self):
@@ -186,23 +255,24 @@ def fcr(args, name="hangup_call"):
             "functions": [{"id": "fc1", "name": name, "arguments": json.dumps(args)}]}
 
 
-async def test_immediate_hangup_bypasses_farewell_path():
+async def test_server_hangup_message_emits_immediate_hangup():
     events = []
     p = make_provider(events)
-
-    async def must_not_run(*_a, **_k):
-        raise AssertionError("tool adapter must not run for immediate hangup")
-
-    p.tool_adapter.handle_tool_call_event = must_not_run
-    await p._handle_function_call(fcr({"immediate": True, "reason": "no_media"}))
+    await p._handle_server_hangup({"type": "ServerHangup", "reason": "no_media"})
     assert events == [{"type": "HangupImmediate", "call_id": "call-1", "reason": "no_media"}]
     assert p._hangup_pending is False
-    ack = json.loads(p.websocket.sent[0])
-    assert ack["type"] == "FunctionCallResponse" and ack["id"] == "fc1" and ack["name"] == "hangup_call"
 
 
-@pytest.mark.parametrize("args", [{}, {"immediate": False}, {"immediate": "true"}, {"farewell_message": "adiós"}])
-async def test_normal_hangup_keeps_farewell_path(args):
+async def test_server_hangup_is_dispatched_by_the_receive_loop():
+    import inspect
+
+    src = inspect.getsource(DeepgramProvider._receive_loop)
+    assert 'et == "ServerHangup"' in src and "_handle_server_hangup" in src
+
+
+@pytest.mark.parametrize("args", [{"immediate": True}, {}, {"immediate": True, "reason": "x"}, {"farewell_message": "adiós"}])
+async def test_llm_hangup_call_always_goes_through_the_tool_adapter(args):
+    # An LLM tool call can never trigger the immediate path, whatever its arguments.
     events = []
     p = make_provider(events)
     seen = []
@@ -215,20 +285,6 @@ async def test_normal_hangup_keeps_farewell_path(args):
     await p._handle_function_call(fcr(args))
     assert len(seen) == 1
     assert not any(e.get("type") == "HangupImmediate" for e in events)
-
-
-async def test_other_tools_untouched():
-    events = []
-    p = make_provider(events)
-    seen = []
-
-    async def adapter(event, ctx):
-        seen.append(event)
-        return {"status": "success", "function_name": "transfer", "function_call_id": "fc1"}
-
-    p.tool_adapter.handle_tool_call_event = adapter
-    await p._handle_function_call(fcr({"immediate": True}, name="transfer"))
-    assert len(seen) == 1 and events == []
 
 
 # --------------------------------------------------------------- engine wiring
@@ -259,14 +315,14 @@ def make_engine(ari):
     return e, cleaned
 
 
-async def test_engine_hangup_immediate_confirmed_by_stasis_end():
+async def test_engine_hangup_immediate_confirmed_by_channel_destroyed():
     ari = FakeARI([204])
     e, cleaned = make_engine(ari)
     await e.on_provider_event({"type": "HangupImmediate", "call_id": "call-1", "reason": "no_media"})
     assert len(e._hangup_tasks) == 1
     task = next(iter(e._hangup_tasks))
     await asyncio.sleep(0.02)
-    await e._handle_stasis_end({"channel": {"id": "chan-9"}})
+    await e._handle_channel_destroyed({"channel": {"id": "chan-9"}})
     r = await task
     assert r.outcome is HangupOutcome.CONFIRMED and r.reason == "no_media"
     assert cleaned == ["chan-9"]
@@ -274,25 +330,41 @@ async def test_engine_hangup_immediate_confirmed_by_stasis_end():
     assert e._hangup_tasks == set()
 
 
-async def test_engine_amd_hop_stasis_end_does_not_confirm():
-    ari = FakeARI([204], [404])
-    e, cleaned = make_engine(ari)
-    e._outbound_awaiting_amd_channel_ids.add("chan-9")
+@pytest.mark.parametrize("amd_hop", [False, True])
+async def test_engine_stasis_end_never_confirms(amd_hop):
+    # Transfer via continue / AMD hop leave Stasis with the channel alive.
+    ari = FakeARI([204, 204], [200, 200])
+    e, _ = make_engine(ari)
+    if amd_hop:
+        e._outbound_awaiting_amd_channel_ids.add("chan-9")
     await e.on_provider_event({"type": "HangupImmediate", "call_id": "call-1", "reason": "x"})
     task = next(iter(e._hangup_tasks))
     await asyncio.sleep(0.02)
     await e._handle_stasis_end({"channel": {"id": "chan-9"}})
     r = await task
-    assert r.outcome is HangupOutcome.ALREADY_GONE  # resolved by the GET, not by the hop
-    assert cleaned == []
+    assert r.outcome is HangupOutcome.FAILED  # the GET still sees the channel
 
 
-async def test_engine_channel_destroyed_confirms():
-    ari = FakeARI([204])
+async def test_engine_delete_500_with_stasis_end_does_not_confirm():
+    ari = FakeARI([500, 500], [200, 200])
     e, _ = make_engine(ari)
+    ari.on_delete = lambda cid: asyncio.get_running_loop().create_task(
+        e._handle_stasis_end({"channel": {"id": cid}}))
     await e.on_provider_event({"type": "HangupImmediate", "call_id": "call-1"})
-    task = next(iter(e._hangup_tasks))
-    await asyncio.sleep(0.02)
-    await e._handle_channel_destroyed({"channel": {"id": "chan-9"}})
-    r = await task
-    assert r.outcome is HangupOutcome.CONFIRMED and r.reason == "server_immediate"
+    r = await next(iter(e._hangup_tasks))
+    assert r.outcome is HangupOutcome.FAILED
+
+
+async def test_channel_destroyed_during_get_confirms():
+    class GetRace(FakeARI):
+        async def send_command(self, method, resource, tolerate_statuses=None, **_):
+            self.calls.append((method, resource))
+            self.service.notify_channel_gone("ch1")  # destroyed while the GET is in flight
+            return {"id": "ch1", "state": "Up"}
+
+    ari = GetRace([204])
+    s = svc(ari)
+    ari.service = s
+    r = await s.request_hangup("ch1", "x")
+    assert r.outcome is HangupOutcome.CONFIRMED
+    assert r.attempts == 1

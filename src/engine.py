@@ -4545,7 +4545,6 @@ class Engine:
             if channel_id in self._outbound_awaiting_amd_channel_ids:
                 logger.debug("Ignoring StasisEnd during outbound AMD hop", channel_id=channel_id)
                 return
-            self.hangup_service.notify_channel_gone(channel_id)
             await self._cleanup_call(channel_id)
         except Exception as exc:
             logger.error("Error handling StasisEnd", error=str(exc), exc_info=True)
@@ -8229,7 +8228,7 @@ class Engine:
                 logger.warning("Provider event for unknown call", event_type=etype, call_id=call_id)
                 return
 
-            # §15.A1: server-requested hangup without farewell → verifiable hangup,
+            # §15.A1: ServerHangup control message (no farewell) → verifiable hangup,
             # owned by the engine (survives the provider receive loop being torn down).
             if etype == "HangupImmediate":
                 self._spawn_hangup(
