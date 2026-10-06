@@ -270,6 +270,10 @@ class Engine:
         # Verifiable hangup (§15.A1): single owner of "hang up and confirm".
         self.hangup_service = HangupService(self.ari_client)
         self._hangup_tasks: Set[asyncio.Task] = set()
+        # §15.A2 no-media watchdog: off | observe (log only) | active (hang up).
+        self._no_media_mode = (os.getenv("AAVA_NO_MEDIA_HANGUP_MODE", "observe") or "observe").strip().lower()
+        self._no_media_secs = float(os.getenv("AAVA_NO_MEDIA_HANGUP_SECS", "35") or "35")
+        self._no_media_watchdogs: Dict[str, asyncio.Task] = {}
         
         # Initialize core components
         self.session_store = SessionStore()
@@ -2460,6 +2464,9 @@ class Engine:
                 logger.info("🎯 HYBRID ARI - Step 1: ✅ Caller channel answered", channel_id=caller_channel_id)
             else:
                 logger.info("🎯 HYBRID ARI - Step 1: Skipping answer (outbound)", channel_id=caller_channel_id)
+            # §15.A2: the channel is Up and owned by this call from here on; the
+            # no-media clock runs independently of the rest of the setup.
+            self._arm_no_media_watchdog(caller_channel_id)
             
             # Create bridge immediately (mixing,dtmf_events,proxy_media prevents simple_bridge optimization)
             logger.info("🎯 HYBRID ARI - Step 2: Creating bridge immediately",
@@ -4908,6 +4915,7 @@ class Engine:
     async def _cleanup_call(self, channel_or_call_id: str) -> None:
         """Shared cleanup for StasisEnd/ChannelDestroyed paths."""
         resolved_call_id = None  # Track for finally block cleanup
+        self._cancel_no_media_watchdog(channel_or_call_id)
         try:
             # Resolve session by call_id first, then fallback to channel lookup.
             session = await self.session_store.get_by_call_id(channel_or_call_id)
@@ -5944,6 +5952,9 @@ class Engine:
             if not session:
                 logger.debug("No session for caller; dropping AudioSocket audio", conn_id=conn_id, caller_channel_id=caller_channel_id)
                 return
+
+            if audio_bytes and not session.media_rx_bytes_seen:
+                session.media_rx_bytes_seen = True  # §15.A2 no-media watchdog
 
             # Media-path confirmation: first inbound audio frame observed.
             # Used to gate barge-in actions so we don't trigger during setup races.
@@ -7454,6 +7465,9 @@ class Engine:
             except Exception:
                 pass
 
+            if pcm_16k and not session.media_rx_bytes_seen:
+                session.media_rx_bytes_seen = True  # §15.A2 no-media watchdog
+
             # Media-path confirmation: first inbound audio frame observed.
             # Used to gate barge-in actions so we don't trigger during setup races.
             try:
@@ -8194,6 +8208,57 @@ class Engine:
                 )
         except Exception:
             logger.debug("Transport audit encountered an error", exc_info=True)
+
+    # ------------------------------------------------------------------ §15.A2
+    def _arm_no_media_watchdog(self, channel_id: str) -> None:
+        if self._no_media_mode not in ("observe", "active") or channel_id in self._no_media_watchdogs:
+            return
+        task = asyncio.create_task(self._no_media_watchdog(channel_id, time.monotonic()))
+        self._no_media_watchdogs[channel_id] = task
+
+        def _done(t: asyncio.Task) -> None:
+            if self._no_media_watchdogs.get(channel_id) is t:
+                del self._no_media_watchdogs[channel_id]
+            if not t.cancelled() and t.exception() is not None:
+                logger.error("No-media watchdog crashed", channel_id=channel_id, error=str(t.exception()))
+
+        task.add_done_callback(_done)
+
+    def _cancel_no_media_watchdog(self, channel_id: Optional[str]) -> None:
+        task = self._no_media_watchdogs.get(channel_id) if channel_id else None
+        if task is not None and not task.done():
+            task.cancel()
+
+    async def _no_media_hangup_blocker(self, channel_id: str) -> Optional[str]:
+        """Why the no-media hangup must not happen now (None = it may)."""
+        session = await self.session_store.get_by_call_id(channel_id)
+        if session is None:
+            return None  # setup never produced a session: nothing to protect
+        if session.media_rx_bytes_seen:
+            return "media_seen"
+        for flag in ("ai_detached", "transfer_active", "handoff_in_progress"):
+            if bool(getattr(session, flag, False)):
+                return flag
+        return None
+
+    async def _no_media_watchdog(self, channel_id: str, armed_at: float) -> None:
+        await asyncio.sleep(max(0.0, armed_at + self._no_media_secs - time.monotonic()))
+        blocker = await self._no_media_hangup_blocker(channel_id)
+        if blocker is not None:
+            logger.debug("No-media watchdog stands down", channel_id=channel_id, blocker=blocker)
+            return
+        waited = round(time.monotonic() - armed_at, 1)
+        if self._no_media_mode != "active":
+            logger.warning("No-media watchdog would hang up (observe mode)",
+                           channel_id=channel_id, waited_secs=waited)
+            return
+
+        async def revalidate() -> bool:
+            return await self._no_media_hangup_blocker(channel_id) is None
+
+        logger.warning("No inbound media - hanging up", channel_id=channel_id, waited_secs=waited)
+        result = await self.hangup_service.request_hangup(channel_id, "no_media", revalidate=revalidate)
+        logger.info("No-media hangup result", channel_id=channel_id, outcome=result.outcome.value)
 
     def _spawn_hangup(self, channel_id: Optional[str], *, reason: str, call_id: Optional[str] = None) -> None:
         """Start a verifiable hangup as an engine-owned task (fire-and-forget for the caller)."""
