@@ -495,3 +495,38 @@ async def test_exemption_revokes_a_delete_waiting_for_a_connection():
         pass
     await asyncio.sleep(0.05)
     assert ari.sent == []
+
+
+@pytest.mark.parametrize("payload,expect_sent", [(b"\x01\x02", []), (b"", ["ch1"])])
+async def test_first_rtp_payload_revokes_a_pending_no_media_delete(payload, expect_sent):
+    from src.core.hangup_service import HangupService
+
+    class PoolARI:
+        def __init__(self):
+            self.acquire = asyncio.Event()
+            self.sent = []
+
+        async def hangup_channel(self, cid):
+            await self.acquire.wait()
+            self.sent.append(cid)
+            return {"status": 404}
+
+        async def send_command(self, *a, **k):
+            return {"status": 404}
+
+    e = make_engine()
+    s = session()
+    e.session_store.sessions["ch1"] = s
+    ari = PoolARI()
+    e.hangup_service = HangupService(ari, request_timeout_secs=5, confirm_timeout_secs=0.05)
+    flight = asyncio.create_task(e.hangup_service.request_hangup(
+        "ch1", "no_media", veto=lambda: "media_seen" if s.media_rx_bytes_seen else None))
+    await asyncio.sleep(0.01)  # veto passed, DELETE waiting for the pool
+    try:
+        await e._on_rtp_audio("ch1", 1234, payload)
+    except Exception:
+        pass  # the rest of the media path needs a full engine
+    ari.acquire.set()
+    await flight
+    await asyncio.sleep(0.01)
+    assert ari.sent == expect_sent
