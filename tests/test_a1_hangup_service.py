@@ -145,7 +145,7 @@ async def test_caller_cancellation_does_not_abort_hangup():
     caller = asyncio.create_task(s.request_hangup("ch1", "x"))
     await asyncio.sleep(0.02)
     assert s.in_progress("ch1")
-    hangup = s._inflight["ch1"]
+    hangup = s._inflight["ch1"].task
     caller.cancel()
     with pytest.raises(asyncio.CancelledError):
         await caller
@@ -387,14 +387,77 @@ async def test_server_hangup_delivery_is_retained_and_errors_logged():
     assert any(l["event"] == "ServerHangup delivery failed" for l in logs)
 
 
-async def test_revalidate_is_rechecked_before_the_retry_delete():
+async def test_veto_is_checked_before_the_retry_delete():
     ari = FakeARI([500, 204], [200])
-    calls = {"n": 0}
+    state = {"vetoed": False}
 
-    async def revalidate():
-        calls["n"] += 1
-        return calls["n"] < 3  # 1: request, 2: before 1st DELETE, 3: before retry → stop
+    def veto():
+        return "handoff" if state["vetoed"] else None
 
-    r = await svc(ari).request_hangup("ch1", "x", revalidate=revalidate)
+    orig = ari.hangup_channel
+
+    async def first_then_veto(cid):
+        r = await orig(cid)
+        state["vetoed"] = True  # a transfer starts after the first DELETE
+        return r
+
+    ari.hangup_channel = first_then_veto
+    r = await svc(ari).request_hangup("ch1", "x", veto=veto)
     assert r.outcome is HangupOutcome.SKIPPED
     assert [c[0] for c in ari.calls] == ["DELETE", "GET"]
+    assert r.statuses[-1] == "vetoed:handoff"
+
+
+async def test_veto_set_after_revalidation_but_before_delete_task_runs():
+    # Exemption scheduled to land after every async check, right before the DELETE.
+    ari = FakeARI([204])
+    state = {"vetoed": False}
+    loop = asyncio.get_running_loop()
+
+    async def revalidate():
+        loop.call_soon(state.__setitem__, "vetoed", True)
+        return True
+
+    r = await svc(ari).request_hangup(
+        "ch1", "x", revalidate=revalidate, veto=lambda: "handoff" if state["vetoed"] else None
+    )
+    assert r.outcome is HangupOutcome.SKIPPED
+    assert ari.calls == []
+
+
+async def test_unconditional_request_promotes_a_conditional_flight():
+    ari = FakeARI([500, 204], [200])
+    s = svc(ari)
+    ari_calls = {"n": 0}
+    orig = ari.hangup_channel
+
+    async def count(cid):
+        ari_calls["n"] += 1
+        r = await orig(cid)
+        if ari_calls["n"] == 2:
+            s.notify_channel_gone(cid)
+        return r
+
+    ari.hangup_channel = count
+    state = {"vetoed": False}
+    cond = asyncio.create_task(s.request_hangup("ch1", "no_media", veto=lambda: "x" if state["vetoed"] else None))
+    await asyncio.sleep(0)
+    state["vetoed"] = True  # the conditional caller would now veto...
+    uncond = await s.request_hangup("ch1", "server_immediate")  # ...but the server wants it gone
+    assert uncond.outcome is HangupOutcome.CONFIRMED
+    assert (await cond) is uncond
+
+
+async def test_when_idle_waits_for_the_flight():
+    ari = FakeARI([204], [404])
+    s = svc(ari)
+    fired = []
+    t = asyncio.create_task(s.request_hangup("ch1", "x"))
+    await asyncio.sleep(0.01)
+    s.when_idle("ch1", lambda: fired.append(1))
+    assert fired == []
+    await t
+    await asyncio.sleep(0)
+    assert fired == [1]
+    s.when_idle("ch1", lambda: fired.append(2))
+    assert fired == [1, 2]

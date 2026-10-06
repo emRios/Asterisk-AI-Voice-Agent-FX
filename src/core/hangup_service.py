@@ -44,6 +44,23 @@ class HangupResult:
 
 
 Revalidate = Callable[[], Awaitable[bool]]
+# Synchronous veto, evaluated in the same loop step that issues the DELETE (no
+# await in between). Returns a reason string to abort, None to proceed.
+Veto = Callable[[], Optional[str]]
+
+
+class _Vetoed(Exception):
+    def __init__(self, why: str) -> None:
+        super().__init__(why)
+        self.why = why
+
+
+class _Flight:
+    __slots__ = ("task", "veto")
+
+    def __init__(self, veto: Optional[Veto]) -> None:
+        self.task: Optional["asyncio.Task[HangupResult]"] = None
+        self.veto = veto  # None = unconditional
 
 
 class HangupService:
@@ -58,7 +75,7 @@ class HangupService:
         self._request_timeout = request_timeout_secs
         self._confirm_timeout = confirm_timeout_secs
         self._locks: Dict[str, "_LockEntry"] = {}
-        self._inflight: Dict[str, "asyncio.Task[HangupResult]"] = {}
+        self._inflight: Dict[str, _Flight] = {}
         self._gone_waiters: Dict[str, asyncio.Future] = {}
 
     # ------------------------------------------------------------------ events
@@ -74,8 +91,16 @@ class HangupService:
             fut.set_result(True)
 
     def in_progress(self, channel_id: str) -> bool:
-        task = self._inflight.get(channel_id)
-        return task is not None and not task.done()
+        flight = self._inflight.get(channel_id)
+        return flight is not None and flight.task is not None and not flight.task.done()
+
+    def when_idle(self, channel_id: str, callback: Callable[[], None]) -> None:
+        """Run ``callback`` now, or when the in-flight hangup on the channel ends."""
+        flight = self._inflight.get(channel_id)
+        if flight is None or flight.task is None or flight.task.done():
+            callback()
+        else:
+            flight.task.add_done_callback(lambda _t: callback())
 
     # ----------------------------------------------------------------- request
     async def request_hangup(
@@ -84,46 +109,60 @@ class HangupService:
         reason: str,
         *,
         revalidate: Optional[Revalidate] = None,
+        veto: Optional[Veto] = None,
     ) -> HangupResult:
+        """Hang up ``channel_id``; conditional when ``revalidate``/``veto`` are given.
+
+        ``revalidate`` (async) runs once under the lock before starting. ``veto``
+        (sync) runs right before every DELETE, in the same loop step that issues
+        it. An unconditional request joining a conditional flight promotes it to
+        unconditional (it never inherits another caller's veto).
+        """
         entry = self._locks.get(channel_id)
         if entry is None:
             entry = self._locks[channel_id] = _LockEntry()
         entry.users += 1
         try:
             async with entry.lock:
-                task = self._inflight.get(channel_id)
-                if task is None:
+                flight = self._inflight.get(channel_id)
+                if flight is None:
                     if revalidate is not None and not await revalidate():
                         logger.info("Hangup skipped by revalidation", channel_id=channel_id, reason=reason)
                         return HangupResult(HangupOutcome.SKIPPED, channel_id, reason)
-                    task = asyncio.create_task(self._run(channel_id, reason, revalidate))
-                    self._inflight[channel_id] = task
-                    task.add_done_callback(lambda _t, cid=channel_id: self._forget(cid, _t))
+                    flight = _Flight(veto)
+                    flight.task = asyncio.create_task(self._run(channel_id, reason, flight))
+                    self._inflight[channel_id] = flight
+                    flight.task.add_done_callback(lambda _t, cid=channel_id, f=flight: self._forget(cid, f))
+                elif revalidate is None and veto is None and flight.veto is not None:
+                    logger.info("Hangup promoted to unconditional", channel_id=channel_id, reason=reason)
+                    flight.veto = None
+                task = flight.task
         finally:
             entry.users -= 1
             if entry.users == 0 and self._locks.get(channel_id) is entry:
                 del self._locks[channel_id]
         return await asyncio.shield(task)
 
-    def _forget(self, channel_id: str, task: "asyncio.Task[HangupResult]") -> None:
-        if self._inflight.get(channel_id) is task:
+    def _forget(self, channel_id: str, flight: _Flight) -> None:
+        if self._inflight.get(channel_id) is flight:
             del self._inflight[channel_id]
 
     # --------------------------------------------------------------- execution
-    async def _run(self, channel_id: str, reason: str, revalidate: Optional[Revalidate] = None) -> HangupResult:
+    async def _run(self, channel_id: str, reason: str, flight: _Flight) -> HangupResult:
         loop = asyncio.get_running_loop()
         gone = loop.create_future()
         self._gone_waiters[channel_id] = gone
         result = HangupResult(HangupOutcome.FAILED, channel_id, reason)
         try:
             for attempt in (1, 2):
-                # Re-check right before every DELETE: the caller's watchdog may be
-                # cancelled (e.g. a transfer started) after the first revalidation.
-                if revalidate is not None and not await revalidate():
-                    result.outcome = HangupOutcome.SKIPPED
-                    return result
                 result.attempts = attempt
-                status = await self._delete(channel_id)
+                try:
+                    status = await self._delete(channel_id, flight)
+                except _Vetoed as v:
+                    result.attempts = attempt - 1
+                    result.outcome = HangupOutcome.SKIPPED
+                    result.statuses.append(f"vetoed:{v.why}")
+                    return result
                 result.statuses.append(status)
                 if status == 404:
                     result.outcome = HangupOutcome.ALREADY_GONE
@@ -168,9 +207,21 @@ class HangupService:
         except asyncio.TimeoutError:
             return False
 
-    async def _delete(self, channel_id: str) -> Any:
+    async def _delete(self, channel_id: str, flight: Optional[_Flight] = None) -> Any:
+        async def guarded() -> Any:
+            # Same loop step as the DELETE: nothing can run between this check
+            # and the request leaving (residual: a transfer that starts while the
+            # DELETE is already on the wire).
+            veto = flight.veto if flight is not None else None
+            why = veto() if veto is not None else None
+            if why:
+                raise _Vetoed(why)
+            return await self._ari.hangup_channel(channel_id)
+
         try:
-            resp = await asyncio.wait_for(self._ari.hangup_channel(channel_id), self._request_timeout)
+            resp = await asyncio.wait_for(guarded(), self._request_timeout)
+        except _Vetoed:
+            raise
         except asyncio.TimeoutError:
             return "timeout"
         except Exception as exc:  # network errors are retried like timeouts
