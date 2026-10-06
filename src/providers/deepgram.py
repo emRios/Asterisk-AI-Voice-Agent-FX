@@ -1053,6 +1053,45 @@ class DeepgramProvider(AIProviderInterface):
         if self.on_event:
             await self.on_event({'type': 'HangupImmediate', 'call_id': self.call_id, 'reason': reason})
 
+    async def _handle_call_summary(self, event_data: Dict[str, Any], context: Dict[str, Any]) -> None:
+        """§12.5/S3: publica una foto CALL_SUMMARY recibida por el canal de protocolo
+        de GoldenBridge (type=CallSummary). Reusa la tool CallEventNotification por el
+        camino servidor (publish_server_summary) y responde CallSummaryAck por seq."""
+        from src.tools.context import ToolExecutionContext
+
+        summary = event_data.get("summary")
+        seq = summary.get("seq") if isinstance(summary, dict) else None
+        tool = self.tool_adapter.registry.get("CallEventNotification")
+        if tool is None:
+            await self._send_call_summary_ack(seq, "error")
+            return
+        exec_context = ToolExecutionContext(
+            call_id=context.get("call_id"),
+            caller_channel_id=context.get("caller_channel_id"),
+            bridge_id=context.get("bridge_id"),
+            session_store=context.get("session_store"),
+            ari_client=context.get("ari_client"),
+            config=context.get("config"),
+            provider_name="deepgram",
+        )
+        try:
+            res = await tool.publish_server_summary(summary, exec_context)
+            status = res.get("status", "error")
+        except Exception as e:
+            logger.error("CALL_SUMMARY publish failed", call_id=context.get("call_id"), error=str(e))
+            status = "error"
+        await self._send_call_summary_ack(seq, status)
+
+    async def _send_call_summary_ack(self, seq: Any, status: str) -> None:
+        """ACK best-effort por seq; un WS cerrado no rompe nada (GB tiene su límite duro)."""
+        ws = self.websocket
+        if ws is None:
+            return
+        try:
+            await ws.send(json.dumps({"type": "CallSummaryAck", "seq": seq, "status": status}))
+        except Exception:
+            logger.debug("No se pudo enviar CallSummaryAck (WS cerrado?)", seq=seq)
+
     def _function_call_context(self) -> Dict[str, Any]:
         """Snapshot SÍNCRONO del contexto de una function call (S3): se captura en
         el receive loop antes de create_task, inmune a que stop_session borre
@@ -1138,20 +1177,11 @@ class DeepgramProvider(AIProviderInterface):
             # Send result back to Deepgram
             await self.tool_adapter.send_tool_result(result, context)
             
-            # Log tool call to session for call history (Milestone 21). S3: la foto
-            # CALL_SUMMARY NO va al historial de tools (es telemetría de GoldenBridge,
-            # no una acción de la conversación — evita ruido en el call history).
+            # Log tool call to session for call history (Milestone 21).
             call_id = context.get('call_id') or self.call_id
-            is_call_summary = False
-            try:
-                _args = (event_data.get('functions') or [{}])[0].get('arguments')
-                _parsed = json.loads(_args) if isinstance(_args, str) else (_args or {})
-                is_call_summary = isinstance(_parsed, dict) and _parsed.get('event_type') == 'CALL_SUMMARY'
-            except (ValueError, TypeError, AttributeError):
-                is_call_summary = False
             try:
                 session_store = getattr(self, '_session_store', None)
-                if session_store and call_id and func_name and not is_call_summary:
+                if session_store and call_id and func_name:
                     from datetime import datetime
                     session = await session_store.get_by_call_id(call_id)
                     if session:
@@ -1506,6 +1536,16 @@ class DeepgramProvider(AIProviderInterface):
                                 )
                             elif et == "ServerHangup":
                                 self._track_server_hangup(asyncio.create_task(self._handle_server_hangup(event_data)))
+                            elif et == "CallSummary":
+                                # F2.6.1 (S3): la "foto" por canal de protocolo propio
+                                # (NO tool call → el LLM no puede falsificarla). Contexto
+                                # capturado síncrono; tarea retenida.
+                                self._track_task(
+                                    asyncio.create_task(
+                                        self._handle_call_summary(event_data, self._function_call_context())
+                                    ),
+                                    "call_summary",
+                                )
                             elif et == "ConnectionClosed":
                                 logger.info(
                                     "🔌 Deepgram ConnectionClosed",
