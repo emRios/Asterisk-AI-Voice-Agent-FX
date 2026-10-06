@@ -310,3 +310,79 @@ def test_settings_are_validated(monkeypatch, mode, secs, expected):
     monkeypatch.setenv("AAVA_NO_MEDIA_HANGUP_MODE", mode)
     monkeypatch.setenv("AAVA_NO_MEDIA_HANGUP_SECS", secs)
     assert _no_media_settings() == expected
+
+
+async def test_exemption_between_revalidation_and_delete_skips_the_hangup():
+    # Real HangupService: the transfer starts after the watchdog's revalidation
+    # but before the DELETE. The service re-checks right before every DELETE.
+    from src.core.hangup_service import HangupService
+
+    class ARI:
+        def __init__(self):
+            self.deletes = []
+
+        async def hangup_channel(self, cid):
+            self.deletes.append(cid)
+            return {"status": 204}
+
+        async def send_command(self, *a, **k):
+            return {"status": 404}
+
+    e = make_engine()
+    e.session_store.sessions["ch1"] = session()
+    ari = ARI()
+    e.hangup_service = HangupService(ari, request_timeout_secs=0.2, confirm_timeout_secs=0.2)
+    real = e._no_media_hangup_blocker
+    calls = {"n": 0}
+
+    async def blocker(cid):
+        calls["n"] += 1
+        result = await real(cid)
+        if calls["n"] == 2:  # the watchdog's revalidation just passed...
+            e.exempt_from_no_media("ch1", "transfer")  # ...and a transfer starts
+        return result
+
+    e._no_media_hangup_blocker = blocker
+    e._arm_no_media_watchdog("ch1")
+    task = e._no_media_watchdogs["ch1"]
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass  # the exemption cancels the watchdog itself
+    await asyncio.sleep(0.05)
+    assert ari.deletes == []
+
+
+async def test_cleanup_discards_exemptions():
+    e = make_engine()
+    e.exempt_from_no_media("ch1", "transfer")
+    s = session("ch1")
+
+    class AuxStore(Store):
+        async def get_by_channel_id(self, cid):
+            return s if cid == "aux" else None
+
+    e.session_store = AuxStore()
+    e._attended_transfer_agent_channel_to_call_id = {}
+    try:
+        await e._cleanup_call("aux")
+    except Exception:
+        pass
+    assert "ch1" not in e._no_media_exempt
+
+
+@pytest.mark.parametrize("handler,args", [
+    ("_handle_transfer_answered", ["warm-transfer", "ch1", "6000"]),
+    ("_handle_attended_transfer_answered", ["attended-transfer", "ch1", "sales"]),
+])
+async def test_transfer_answered_handlers_exempt_before_any_await(handler, args):
+    e = make_engine(secs=5)
+    e._arm_no_media_watchdog("ch1")
+    coro = getattr(e, handler)("agent-1", args)
+    try:
+        coro.send(None)
+    except (StopIteration, Exception):
+        pass
+    finally:
+        coro.close()
+    assert "ch1" in e._no_media_exempt

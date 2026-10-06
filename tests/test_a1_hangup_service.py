@@ -385,3 +385,16 @@ async def test_server_hangup_delivery_is_retained_and_errors_logged():
         await asyncio.sleep(0.01)
     assert not p._server_hangup_tasks
     assert any(l["event"] == "ServerHangup delivery failed" for l in logs)
+
+
+async def test_revalidate_is_rechecked_before_the_retry_delete():
+    ari = FakeARI([500, 204], [200])
+    calls = {"n": 0}
+
+    async def revalidate():
+        calls["n"] += 1
+        return calls["n"] < 3  # 1: request, 2: before 1st DELETE, 3: before retry → stop
+
+    r = await svc(ari).request_hangup("ch1", "x", revalidate=revalidate)
+    assert r.outcome is HangupOutcome.SKIPPED
+    assert [c[0] for c in ari.calls] == ["DELETE", "GET"]
