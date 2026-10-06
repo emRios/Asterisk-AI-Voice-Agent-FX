@@ -135,6 +135,10 @@ class CallSession:
     # Media path confirmation (first inbound audio frame observed)
     media_rx_confirmed: bool = False
     first_media_rx_ts: float = 0.0
+    # §15.A2: set ONLY by an inbound frame with payload (len > 0). Unlike
+    # media_rx_confirmed (also set by talk detection, used to gate barge-in),
+    # this is the no-media watchdog's proof that the line carries audio.
+    media_rx_bytes_seen: bool = False
     streaming_bytes_sent: int = 0
     streaming_fallback_count: int = 0
     streaming_jitter_buffer_depth: int = 0
