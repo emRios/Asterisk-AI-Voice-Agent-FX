@@ -3384,6 +3384,7 @@ class Engine:
         action_type = args[0]
         caller_id = args[1]
         target = args[2] if len(args) > 2 else 'unknown'
+        _exempt_call_from_no_media(self, caller_id, "transfer_answered")  # §15.A2: before any await
         
         logger.info("🔀 TRANSFER ANSWERED - Direct SIP channel",
                    action_type=action_type,
@@ -4133,6 +4134,7 @@ class Engine:
         """
         caller_id = args[1] if len(args) > 1 else None
         destination_key = args[2] if len(args) > 2 else None
+        _exempt_call_from_no_media(self, caller_id, "attended_transfer_answered")  # §15.A2: before any await
         if not caller_id or not destination_key:
             logger.error("🔀 ATTENDED TRANSFER - Insufficient args", channel_id=channel_id, args=args)
             await self.ari_client.hangup_channel(channel_id)
@@ -4954,23 +4956,26 @@ class Engine:
     async def _cleanup_call(self, channel_or_call_id: str) -> None:
         """Shared cleanup for StasisEnd/ChannelDestroyed paths."""
         resolved_call_id = None  # Track for finally block cleanup
+        no_media_ids = {channel_or_call_id}
         self._cancel_no_media_watchdog(channel_or_call_id)
         try:
             # Resolve session by call_id first, then fallback to channel lookup.
             session = await self.session_store.get_by_call_id(channel_or_call_id)
             if not session:
                 session = await self.session_store.get_by_channel_id(channel_or_call_id)
-            if session:
-                # The watchdog is keyed by the caller channel; cleanup may enter
-                # through an auxiliary leg (AudioSocket, ExternalMedia, agent).
-                self._cancel_no_media_watchdog(getattr(session, "caller_channel_id", None))
-                self._cancel_no_media_watchdog(getattr(session, "call_id", None))
             if not session:
                 # Attended transfer agent leg is a separate SIP channel that is not tracked in SessionStore.
                 # We keep an in-memory mapping so that if either side hangs up, we can clean up the other leg.
                 mapped_call_id = self._attended_transfer_agent_channel_to_call_id.get(channel_or_call_id)
                 if mapped_call_id:
                     session = await self.session_store.get_by_call_id(mapped_call_id)
+            if session:
+                # §15.A2: the watchdog is keyed by the caller channel; cleanup may
+                # enter through an auxiliary leg (AudioSocket, ExternalMedia, agent).
+                for sid in (getattr(session, "caller_channel_id", None), getattr(session, "call_id", None)):
+                    if sid:
+                        no_media_ids.add(sid)
+                        self._cancel_no_media_watchdog(sid)
             if not session:
                 logger.debug("No session found during cleanup", identifier=channel_or_call_id)
                 return
@@ -5317,6 +5322,9 @@ class Engine:
             # Clean up in-memory guard
             if resolved_call_id:
                 _cleanup_in_progress.discard(resolved_call_id)
+            exempt = getattr(self, "_no_media_exempt", None)
+            if exempt:
+                exempt.difference_update(no_media_ids)
 
     async def _persist_call_history(self, session: CallSession, call_id: str) -> None:
         """Persist call record to history database (Milestone 21)."""

@@ -96,7 +96,7 @@ class HangupService:
                     if revalidate is not None and not await revalidate():
                         logger.info("Hangup skipped by revalidation", channel_id=channel_id, reason=reason)
                         return HangupResult(HangupOutcome.SKIPPED, channel_id, reason)
-                    task = asyncio.create_task(self._run(channel_id, reason))
+                    task = asyncio.create_task(self._run(channel_id, reason, revalidate))
                     self._inflight[channel_id] = task
                     task.add_done_callback(lambda _t, cid=channel_id: self._forget(cid, _t))
         finally:
@@ -110,13 +110,18 @@ class HangupService:
             del self._inflight[channel_id]
 
     # --------------------------------------------------------------- execution
-    async def _run(self, channel_id: str, reason: str) -> HangupResult:
+    async def _run(self, channel_id: str, reason: str, revalidate: Optional[Revalidate] = None) -> HangupResult:
         loop = asyncio.get_running_loop()
         gone = loop.create_future()
         self._gone_waiters[channel_id] = gone
         result = HangupResult(HangupOutcome.FAILED, channel_id, reason)
         try:
             for attempt in (1, 2):
+                # Re-check right before every DELETE: the caller's watchdog may be
+                # cancelled (e.g. a transfer started) after the first revalidation.
+                if revalidate is not None and not await revalidate():
+                    result.outcome = HangupOutcome.SKIPPED
+                    return result
                 result.attempts = attempt
                 status = await self._delete(channel_id)
                 result.statuses.append(status)
