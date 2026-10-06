@@ -244,6 +244,7 @@ tools:
         DATA_EXTRACTION: https://j3n2gdia43.execute-api.us-east-2.amazonaws.com/dev/api/v1/calls/call-status
         TRANSITION: https://j3n2gdia43.execute-api.us-east-2.amazonaws.com/dev/api/v1/calls/call-status
         ANSWERING_MACHINE: https://j3n2gdia43.execute-api.us-east-2.amazonaws.com/dev/api/v1/calls/call-status
+        CALL_SUMMARY: https://j3n2gdia43.execute-api.us-east-2.amazonaws.com/dev/api/v1/calls/call-status
       timeout_secs: 5
       headers:
         Authorization: ${CALL_EVENT_AUTH:-}
@@ -260,6 +261,7 @@ tools:
       - SOFT_REJECTION
       - ESCALATION_REQUIRED
       - POSITIVE_FEEDBACK
+      - CALL_SUMMARY
       - NEGATIVE_FEEDBACK
       - ANSWERING_MACHINE
     enabled: true
