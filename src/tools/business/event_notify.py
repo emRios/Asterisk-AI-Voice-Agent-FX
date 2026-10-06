@@ -48,8 +48,10 @@ class EventType(str, Enum):
     POSITIVE_FEEDBACK = "POSITIVE_FEEDBACK"
     NEGATIVE_FEEDBACK = "NEGATIVE_FEEDBACK"
     ANSWERING_MACHINE = "ANSWERING_MACHINE"
-    # F2.6.1 (S3): la "foto" de la llamada. Canal servidor→engine: lo envía
-    # GoldenBridge, NUNCA el LLM (se filtra del enum expuesto, ver `definition`).
+    # F2.6.1 (S3): la "foto" de la llamada. Llega por el canal de PROTOCOLO
+    # (type=CallSummary), NUNCA por el LLM — validate_parameters lo rechaza y
+    # se publica vía publish_server_summary. Queda en el enum porque _build_payload
+    # y _generate_event_id lo usan; fuera de _LLM_EVENT_TYPES.
     CALL_SUMMARY = "CALL_SUMMARY"
 
 
@@ -191,7 +193,7 @@ class CallEventNotification(Tool):
         # vía publish_server_summary. Un LLM que invente event_type=CALL_SUMMARY
         # por el tool-adapter se rechaza SIEMPRE (una foto falsa reclasificaría a
         # un humano real → re-llamada). Mismo patrón que ServerHangup en A1.
-        if event_type == "CALL_SUMMARY":
+        if isinstance(event_type, str) and event_type.upper() == "CALL_SUMMARY":
             raise ValueError("CALL_SUMMARY no es invocable por el LLM (canal servidor)")
         if event_type == "PURCHASE_INTENT_HIGH" and intent_score is None:
             raise ValueError(
