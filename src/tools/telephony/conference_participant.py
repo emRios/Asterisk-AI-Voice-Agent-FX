@@ -11,7 +11,7 @@ import time
 import structlog
 
 from src.tools.base import Tool, ToolCategory, ToolDefinition, ToolParameter
-from src.tools.context import ToolExecutionContext
+from src.tools.context import ToolExecutionContext, mark_handoff
 
 logger = structlog.get_logger(__name__)
 
@@ -55,6 +55,7 @@ class ConferenceParticipantTool(Tool):
         )
 
     async def execute(self, parameters: Dict[str, Any], context: ToolExecutionContext) -> Dict[str, Any]:
+        mark_handoff(context, "conference_participant")  # §15.A2: before any await
         destination = parameters.get("destination") or parameters.get("target")
         mode = str(parameters.get("mode") or "talk").strip().lower()
         channel_id = str(parameters.get("channel_id") or parameters.get("participant_channel_id") or "").strip() or None

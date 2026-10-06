@@ -31,7 +31,7 @@ from typing import Dict, Any
 import structlog
 
 from ..base import Tool, ToolDefinition, ToolParameter, ToolCategory
-from ..context import ToolExecutionContext
+from ..context import ToolExecutionContext, mark_handoff
 
 logger = structlog.get_logger(__name__)
 
@@ -71,6 +71,7 @@ class VoicemailTool(Tool):
         Returns:
             Dict with status and message
         """
+        mark_handoff(context, "voicemail")  # §15.A2: before any await
         # Get voicemail config
         config = context.get_config_value("tools.leave_voicemail")
         if not config:

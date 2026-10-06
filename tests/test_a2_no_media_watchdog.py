@@ -37,6 +37,7 @@ def make_engine(mode="active", secs=0.05):
     e._no_media_mode = mode
     e._no_media_secs = secs
     e._no_media_watchdogs = {}
+    e._no_media_exempt = set()
     return e
 
 
@@ -183,11 +184,129 @@ async def test_audiosocket_empty_frame_does_not_count_as_media():
     assert "if pcm_16k and not session.media_rx_bytes_seen:" in src
 
 
-async def test_hybrid_caller_path_arms_the_watchdog_after_answer():
-    import inspect
+class HybridARI:
+    """Just enough ARI for _handle_caller_stasis_start_hybrid to reach step 2 and stop."""
 
-    src = inspect.getsource(Engine._handle_caller_stasis_start_hybrid)
-    answer = src.index("Step 1: Skipping answer (outbound)")
-    arm = src.index("self._arm_no_media_watchdog(caller_channel_id)")
-    bridge = src.index("Step 2: Creating bridge immediately")
-    assert answer < arm < bridge
+    def __init__(self, answer_status):
+        self.answer_status = answer_status
+
+    async def send_command(self, method, resource, **_):
+        return {"status": 404}  # AAVA_OUTBOUND not set → inbound path
+
+    async def answer_channel(self, channel_id):
+        return {"status": self.answer_status}
+
+    async def create_bridge(self):
+        return None  # abort setup right after step 1
+
+
+@pytest.mark.parametrize("state,answer_status,armed", [
+    ("Up", 204, True),     # LASIK: enters Stasis already Up
+    ("Up", 500, True),     # already Up: the failed answer does not matter
+    ("Ring", 204, True),   # true inbound, answer confirmed
+    ("Ring", 500, False),  # answer failed: never start the clock
+    ("Ring", 409, False),
+])
+async def test_hybrid_arms_only_on_a_confirmed_answer(state, answer_status, armed):
+    e = make_engine(secs=5)
+    e.ari_client = HybridARI(answer_status)
+    cleaned = []
+
+    async def cleanup(cid):
+        cleaned.append(cid)  # recorder: does NOT cancel, so we can observe arming
+
+    e._cleanup_call = cleanup
+    await e._handle_caller_stasis_start_hybrid("ch1", {"state": state, "caller": {}})
+    assert cleaned == ["ch1"]  # setup aborted at step 2 as intended
+    assert ("ch1" in e._no_media_watchdogs) is armed
+    e._cancel_no_media_watchdog("ch1")
+
+
+async def test_cleanup_through_auxiliary_leg_cancels_the_watchdog():
+    e = make_engine(secs=5)
+    e._arm_no_media_watchdog("ch1")
+    task = e._no_media_watchdogs["ch1"]
+    s = session("ch1")
+
+    class AuxStore(Store):
+        async def get_by_channel_id(self, cid):
+            return s if cid == "audiosocket-7" else None
+
+    e.session_store = AuxStore()
+    e._attended_transfer_agent_channel_to_call_id = {}
+    try:
+        await e._cleanup_call("audiosocket-7")
+    except Exception:
+        pass  # rest of cleanup needs a full engine
+    await asyncio.sleep(0)
+    assert task.cancelled()
+
+
+class ToolEngineARI:
+    def __init__(self, engine):
+        self.engine = engine
+
+
+@pytest.mark.parametrize("tool_module,tool_class", [
+    ("src.tools.telephony.unified_transfer", "UnifiedTransferTool"),
+    ("src.tools.telephony.attended_transfer", "AttendedTransferTool"),
+    ("src.tools.telephony.queue_transfer", "TransferToQueueTool"),
+    ("src.tools.telephony.voicemail", "VoicemailTool"),
+    ("src.tools.telephony.handoff_to_human", "HandoffToHumanTool"),
+    ("src.tools.telephony.disconnect_ai", "DisconnectAITool"),
+    ("src.tools.telephony.conference_participant", "ConferenceParticipantTool"),
+    ("src.tools.telephony.transfer", "TransferCallTool"),
+])
+async def test_every_handoff_tool_exempts_before_its_first_await(tool_module, tool_class):
+    import importlib
+
+    from src.tools.context import ToolExecutionContext
+
+    cls = getattr(importlib.import_module(tool_module), tool_class)
+    e = make_engine(secs=5)
+    e._arm_no_media_watchdog("ch1")
+    watchdog = e._no_media_watchdogs["ch1"]
+    ctx = ToolExecutionContext(call_id="ch1", caller_channel_id="ch1", ari_client=ToolEngineARI(e))
+    coro = cls().execute({}, ctx)
+    try:
+        coro.send(None)  # run synchronously up to the first suspension point
+    except (StopIteration, Exception):
+        pass
+    finally:
+        coro.close()
+    assert "ch1" in e._no_media_exempt
+    await asyncio.sleep(0)
+    assert watchdog.cancelled()
+
+
+async def test_exemption_wins_at_revalidation():
+    e = make_engine()
+    e.session_store.sessions["ch1"] = session()
+    real = e._no_media_hangup_blocker
+    calls = {"n": 0}
+
+    async def blocker(cid):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            e._no_media_exempt.add("ch1")  # transfer starts right at the deadline
+        return await real(cid)
+
+    e._no_media_hangup_blocker = blocker
+    await run_watchdog(e)
+    assert e.hangup_service.requests == [("ch1", "no_media", False)]
+
+
+@pytest.mark.parametrize("mode,secs,expected", [
+    ("active", "40", ("active", 40.0)),
+    ("bogus", "35", ("observe", 35.0)),
+    ("observe", "nan", ("observe", 35.0)),
+    ("observe", "-1", ("observe", 35.0)),
+    ("observe", "abc", ("observe", 35.0)),
+    ("OFF", "35", ("off", 35.0)),
+])
+def test_settings_are_validated(monkeypatch, mode, secs, expected):
+    from src.engine import _no_media_settings
+
+    monkeypatch.setenv("AAVA_NO_MEDIA_HANGUP_MODE", mode)
+    monkeypatch.setenv("AAVA_NO_MEDIA_HANGUP_SECS", secs)
+    assert _no_media_settings() == expected

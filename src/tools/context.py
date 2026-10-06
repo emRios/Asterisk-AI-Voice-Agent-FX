@@ -2,6 +2,7 @@
 Tool execution context - provides access to system resources during tool execution.
 """
 
+import inspect
 from dataclasses import dataclass
 from typing import Optional, Any
 import logging
@@ -105,3 +106,19 @@ class ToolExecutionContext:
                 return default
         
         return value
+
+
+def mark_handoff(context: Any, reason: str) -> None:
+    """§15.A2: exempt the call from the no-media hangup, synchronously.
+
+    Called first thing by every transfer/handoff tool, before any await, so the
+    no-media watchdog can never hang up a call that is being handed over. The
+    exemption is permanent for the call (fail-safe: a failed transfer falls back
+    to today's behaviour, no early hangup). Tolerates partial contexts.
+    """
+    engine = getattr(getattr(context, "ari_client", None), "engine", None)
+    exempt = getattr(engine, "exempt_from_no_media", None)
+    if callable(exempt):
+        result = exempt(getattr(context, "call_id", None), reason)
+        if inspect.isawaitable(result):  # test doubles (AsyncMock); the engine's is sync
+            getattr(result, "close", lambda: None)()

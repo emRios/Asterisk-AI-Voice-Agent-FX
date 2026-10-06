@@ -9,7 +9,7 @@ from typing import Dict, Any
 import structlog
 
 from src.tools.base import Tool, ToolDefinition, ToolParameter, ToolCategory
-from src.tools.context import ToolExecutionContext
+from src.tools.context import ToolExecutionContext, mark_handoff
 
 logger = structlog.get_logger(__name__)
 
@@ -55,6 +55,7 @@ class HandoffToHumanTool(Tool):
         parameters: Dict[str, Any],
         context: ToolExecutionContext,
     ) -> Dict[str, Any]:
+        mark_handoff(context, "handoff_to_human")  # §15.A2: before any await
         cleanup_media_channels = parameters.get("cleanup_media_channels", True)
         if isinstance(cleanup_media_channels, str):
             cleanup_media_channels = cleanup_media_channels.strip().lower() in {"1", "true", "yes", "on"}
