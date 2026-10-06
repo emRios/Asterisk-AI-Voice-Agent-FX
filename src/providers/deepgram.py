@@ -476,6 +476,12 @@ class DeepgramProvider(AIProviderInterface):
         base_url = getattr(self.config, "voice_agent_base_url", None) or "wss://agent.deepgram.com/v1/agent/converse"
         ws_url = base_url
         headers = {'Authorization': f'Token {self.config.api_key}'}
+        # GoldenBridge-on-Modal uses proxy auth: pass Modal-Key/Modal-Secret headers when configured.
+        modal_key = getattr(self.config, "modal_key", None)
+        modal_secret = getattr(self.config, "modal_secret", None)
+        if modal_key and modal_secret:
+            headers['Modal-Key'] = modal_key
+            headers['Modal-Secret'] = modal_secret
 
         try:
             logger.info("Connecting to Deepgram Voice Agent...", url=ws_url)
