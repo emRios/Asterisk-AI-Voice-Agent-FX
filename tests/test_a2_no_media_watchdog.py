@@ -23,8 +23,11 @@ class FakeHangup:
     def __init__(self):
         self.requests = []
 
-    def when_idle(self, channel_id, callback):
+    def when_idle(self, channel_id, callback, key=None):
         callback()
+
+    def revoke(self, channel_id, why):
+        pass
 
     async def request_hangup(self, channel_id, reason, *, revalidate=None, veto=None):
         ok = True if revalidate is None else await revalidate()
@@ -459,3 +462,36 @@ async def test_watchdog_veto_sees_exemption_after_all_async_checks():
     e._no_media_hangup_blocker = blocker
     await run_watchdog(e)
     assert ari.deletes == []
+
+
+async def test_exemption_revokes_a_delete_waiting_for_a_connection():
+    from src.core.hangup_service import HangupService
+
+    class PoolARI:
+        def __init__(self):
+            self.acquire = asyncio.Event()
+            self.sent = []
+
+        async def hangup_channel(self, cid):
+            await self.acquire.wait()
+            self.sent.append(cid)
+            return {"status": 204}
+
+        async def send_command(self, *a, **k):
+            return {"status": 404}
+
+    e = make_engine()
+    e.session_store.sessions["ch1"] = session()
+    ari = PoolARI()
+    e.hangup_service = HangupService(ari, request_timeout_secs=5, confirm_timeout_secs=0.05)
+    e._arm_no_media_watchdog("ch1")
+    watchdog = e._no_media_watchdogs["ch1"]
+    await asyncio.sleep(0.15)  # deadline passed, veto passed, DELETE waiting for the pool
+    e.exempt_from_no_media("ch1", "transfer")
+    ari.acquire.set()
+    try:
+        await watchdog
+    except asyncio.CancelledError:
+        pass
+    await asyncio.sleep(0.05)
+    assert ari.sent == []

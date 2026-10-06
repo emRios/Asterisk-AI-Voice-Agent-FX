@@ -5328,7 +5328,7 @@ class Engine:
                 # Keep the exemption while a conditional hangup may still be in
                 # flight on that channel (shield keeps it alive past the watchdog).
                 if service is not None:
-                    service.when_idle(sid, lambda s=sid: exempt.discard(s))
+                    service.when_idle(sid, lambda s=sid: exempt.discard(s), key="no_media_exempt")
                 else:
                     exempt.discard(sid)
 
@@ -8291,6 +8291,10 @@ class Engine:
             logger.info("No-media watchdog exempted", call_id=call_id, reason=reason)
         exempt.add(call_id)
         self._cancel_no_media_watchdog(call_id)
+        service = getattr(self, "hangup_service", None)
+        revoke = getattr(service, "revoke", None)
+        if callable(revoke):
+            revoke(call_id, f"handoff:{reason}")
 
     def _cancel_no_media_watchdog(self, channel_id: Optional[str]) -> None:
         watchdogs = getattr(self, "_no_media_watchdogs", None) or {}
