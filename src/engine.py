@@ -242,6 +242,37 @@ _cleanup_in_progress: set = set()  # call_ids currently being cleaned up
 _cleanup_completed_at: dict = {}  # call_id -> epoch seconds (best-effort dedupe for repeated StasisEnd/Destroyed)
 
 
+
+def _no_media_settings() -> Tuple[str, float]:
+    """§15.A2 settings from env, validated (bad values fall back with a warning)."""
+    mode = (os.getenv("AAVA_NO_MEDIA_HANGUP_MODE", "observe") or "observe").strip().lower()
+    if mode not in ("off", "observe", "active"):
+        logger.warning("Invalid AAVA_NO_MEDIA_HANGUP_MODE, using observe", value=mode)
+        mode = "observe"
+    raw = os.getenv("AAVA_NO_MEDIA_HANGUP_SECS", "35") or "35"
+    try:
+        secs = float(raw)
+    except ValueError:
+        secs = float("nan")
+    if not (5.0 <= secs <= 600.0):  # also rejects NaN
+        logger.warning("Invalid AAVA_NO_MEDIA_HANGUP_SECS, using 35", value=raw)
+        secs = 35.0
+    return mode, secs
+
+
+def _exempt_call_from_no_media(engine: Any, call_id: Optional[str], reason: str) -> None:
+    exempt = getattr(engine, "exempt_from_no_media", None)
+    if callable(exempt):
+        exempt(call_id, reason)
+
+
+def _ari_2xx(resp: Any) -> bool:
+    """send_command returns {"status": N} on 204/errors and the JSON body on 200."""
+    if isinstance(resp, dict):
+        status = resp.get("status")
+        return not isinstance(status, int) or 200 <= status < 300
+    return False
+
 class Engine:
     """The main application engine."""
 
@@ -271,9 +302,9 @@ class Engine:
         self.hangup_service = HangupService(self.ari_client)
         self._hangup_tasks: Set[asyncio.Task] = set()
         # §15.A2 no-media watchdog: off | observe (log only) | active (hang up).
-        self._no_media_mode = (os.getenv("AAVA_NO_MEDIA_HANGUP_MODE", "observe") or "observe").strip().lower()
-        self._no_media_secs = float(os.getenv("AAVA_NO_MEDIA_HANGUP_SECS", "35") or "35")
+        self._no_media_mode, self._no_media_secs = _no_media_settings()
         self._no_media_watchdogs: Dict[str, asyncio.Task] = {}
+        self._no_media_exempt: Set[str] = set()
         
         # Initialize core components
         self.session_store = SessionStore()
@@ -2458,15 +2489,21 @@ class Engine:
         
         try:
             # Answer the caller (inbound) or skip (outbound already answered)
+            answered_up = str((channel or {}).get("state") or "") == "Up"
             if not is_outbound:
                 logger.info("🎯 HYBRID ARI - Step 1: Answering caller channel", channel_id=caller_channel_id)
-                await self.ari_client.answer_channel(caller_channel_id)
+                answer_resp = await self.ari_client.answer_channel(caller_channel_id)
+                answered_up = answered_up or _ari_2xx(answer_resp)
                 logger.info("🎯 HYBRID ARI - Step 1: ✅ Caller channel answered", channel_id=caller_channel_id)
             else:
+                answered_up = True  # outbound legs enter Stasis already answered
                 logger.info("🎯 HYBRID ARI - Step 1: Skipping answer (outbound)", channel_id=caller_channel_id)
-            # §15.A2: the channel is Up and owned by this call from here on; the
-            # no-media clock runs independently of the rest of the setup.
-            self._arm_no_media_watchdog(caller_channel_id)
+            # §15.A2: only a channel known to be Up starts the no-media clock; it
+            # runs independently of the rest of the setup.
+            if answered_up:
+                self._arm_no_media_watchdog(caller_channel_id)
+            else:
+                logger.warning("No-media watchdog not armed: answer not confirmed", channel_id=caller_channel_id)
             
             # Create bridge immediately (mixing,dtmf_events,proxy_media prevents simple_bridge optimization)
             logger.info("🎯 HYBRID ARI - Step 2: Creating bridge immediately",
@@ -3549,6 +3586,7 @@ class Engine:
         2. Promote human from listen to talk (if needed)
         3. Only if promotion succeeds, disconnect AI
         """
+        _exempt_call_from_no_media(self, call_id, "handoff_to_human")  # §15.A2: before any await
         wait_timeout_sec = float(getattr(self, "_handoff_human_ready_timeout_sec", 5.0))
         wait_poll_sec = float(getattr(self, "_handoff_human_ready_poll_sec", 0.2))
         session, wait_error = await self._wait_for_human_ready(
@@ -3627,6 +3665,7 @@ class Engine:
         This is used by the disconnect_ai tool when a human participant should
         continue the conversation without AI.
         """
+        _exempt_call_from_no_media(self, call_id, "disconnect_ai")  # §15.A2: before any await
         session = await self.session_store.get_by_call_id(call_id)
         if not session:
             return {
@@ -4921,6 +4960,11 @@ class Engine:
             session = await self.session_store.get_by_call_id(channel_or_call_id)
             if not session:
                 session = await self.session_store.get_by_channel_id(channel_or_call_id)
+            if session:
+                # The watchdog is keyed by the caller channel; cleanup may enter
+                # through an auxiliary leg (AudioSocket, ExternalMedia, agent).
+                self._cancel_no_media_watchdog(getattr(session, "caller_channel_id", None))
+                self._cancel_no_media_watchdog(getattr(session, "call_id", None))
             if not session:
                 # Attended transfer agent leg is a separate SIP channel that is not tracked in SessionStore.
                 # We keep an in-memory mapping so that if either side hangs up, we can clean up the other leg.
@@ -8224,16 +8268,29 @@ class Engine:
 
         task.add_done_callback(_done)
 
+    def exempt_from_no_media(self, call_id: Optional[str], reason: str) -> None:
+        """Permanently exempt a call from the no-media hangup (transfer/handoff started)."""
+        if not call_id:
+            return
+        exempt = self.__dict__.setdefault("_no_media_exempt", set())
+        if call_id not in exempt:
+            logger.info("No-media watchdog exempted", call_id=call_id, reason=reason)
+        exempt.add(call_id)
+        self._cancel_no_media_watchdog(call_id)
+
     def _cancel_no_media_watchdog(self, channel_id: Optional[str]) -> None:
-        task = self._no_media_watchdogs.get(channel_id) if channel_id else None
+        watchdogs = getattr(self, "_no_media_watchdogs", None) or {}
+        task = watchdogs.get(channel_id) if channel_id else None
         if task is not None and not task.done():
             task.cancel()
 
     async def _no_media_hangup_blocker(self, channel_id: str) -> Optional[str]:
         """Why the no-media hangup must not happen now (None = it may)."""
+        if channel_id in self._no_media_exempt:
+            return "handoff"
         session = await self.session_store.get_by_call_id(channel_id)
         if session is None:
-            return None  # setup never produced a session: nothing to protect
+            return None  # setup never produced a session (cleanup would have cancelled us)
         if session.media_rx_bytes_seen:
             return "media_seen"
         for flag in ("ai_detached", "transfer_active", "handoff_in_progress"):
@@ -8256,7 +8313,7 @@ class Engine:
         async def revalidate() -> bool:
             return await self._no_media_hangup_blocker(channel_id) is None
 
-        logger.warning("No inbound media - hanging up", channel_id=channel_id, waited_secs=waited)
+        logger.warning("No inbound media - hangup requested", channel_id=channel_id, waited_secs=waited)
         result = await self.hangup_service.request_hangup(channel_id, "no_media", revalidate=revalidate)
         logger.info("No-media hangup result", channel_id=channel_id, outcome=result.outcome.value)
 

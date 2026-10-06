@@ -6,7 +6,7 @@ Supports queue name resolution, position announcements, and wait time estimates.
 
 from typing import Dict, Any, Optional
 from src.tools.base import Tool, ToolDefinition, ToolParameter, ToolCategory
-from src.tools.context import ToolExecutionContext
+from src.tools.context import ToolExecutionContext, mark_handoff
 import structlog
 
 logger = structlog.get_logger(__name__)
@@ -70,6 +70,7 @@ class TransferToQueueTool(Tool):
                 ai_should_speak: True
             }
         """
+        mark_handoff(context, "queue_transfer")  # §15.A2: before any await
         await self.validate_parameters(parameters)
 
         tool_cfg = context.get_config_value("tools.transfer_to_queue") or {}

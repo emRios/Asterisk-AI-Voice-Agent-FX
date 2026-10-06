@@ -6,7 +6,7 @@ Supports warm and blind transfer modes.
 
 from typing import Dict, Any, Optional
 from src.tools.base import Tool, ToolDefinition, ToolParameter, ToolCategory
-from src.tools.context import ToolExecutionContext
+from src.tools.context import ToolExecutionContext, mark_handoff
 import structlog
 import asyncio
 import time
@@ -80,6 +80,7 @@ class TransferCallTool(Tool):
                 transfer_mode: "warm"
             }
         """
+        mark_handoff(context, "transfer")  # §15.A2: before any await
         await self.validate_parameters(parameters)
         
         target = parameters['target']

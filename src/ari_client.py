@@ -362,7 +362,7 @@ class ARIClient:
     async def answer_channel(self, channel_id: str):
         """Answer a channel."""
         logger.info("Answering channel", channel_id=channel_id)
-        await self.send_command("POST", f"channels/{channel_id}/answer")
+        return await self.send_command("POST", f"channels/{channel_id}/answer")
 
     async def hangup_channel(self, channel_id: str):
         """Hang up a channel."""
