@@ -48,6 +48,15 @@ class EventType(str, Enum):
     POSITIVE_FEEDBACK = "POSITIVE_FEEDBACK"
     NEGATIVE_FEEDBACK = "NEGATIVE_FEEDBACK"
     ANSWERING_MACHINE = "ANSWERING_MACHINE"
+    # F2.6.1 (S3): la "foto" de la llamada. Canal servidor→engine: lo envía
+    # GoldenBridge, NUNCA el LLM (se filtra del enum expuesto, ver `definition`).
+    CALL_SUMMARY = "CALL_SUMMARY"
+
+
+# Eventos que el LLM PUEDE elegir en la tool. CALL_SUMMARY se excluye: es un
+# canal de GoldenBridge, no una acción del modelo (residual conocido, como
+# hangup_call en A1: la tool no distingue origen servidor vs LLM → esconder+validar).
+_LLM_EVENT_TYPES = [e.value for e in EventType if e is not EventType.CALL_SUMMARY]
 
 
 class Priority(str, Enum):
@@ -115,7 +124,7 @@ class CallEventNotification(Tool):
                     name="event_type",
                     type="string",
                     required=True,
-                    enum=[e.value for e in EventType],
+                    enum=_LLM_EVENT_TYPES,   # S3: sin CALL_SUMMARY (no para el LLM)
                     description="Tipo de evento detectado.",
                 ),
                 ToolParameter(
@@ -177,6 +186,19 @@ class CallEventNotification(Tool):
         intent_score = parameters.get("intent_score")
         extracted_data = parameters.get("extracted_data")
 
+        # F2.6.1 (S3): CALL_SUMMARY es válido (lo manda GoldenBridge) aunque esté
+        # fuera del enum del LLM. Validación mínima de lo que el engine consume;
+        # LASIK S1 es el validador autoritativo del schema completo.
+        if event_type == "CALL_SUMMARY":
+            summary = parameters.get("summary")
+            if not isinstance(summary, dict):
+                raise ValueError("CALL_SUMMARY requiere `summary` (objeto)")
+            if summary.get("schema_version") != 1:
+                raise ValueError("CALL_SUMMARY: schema_version debe ser 1")
+            seq = summary.get("seq")
+            if not isinstance(seq, int) or isinstance(seq, bool) or seq < 1:
+                raise ValueError("CALL_SUMMARY: seq debe ser un entero >= 1")
+            return True
         if event_type == "PURCHASE_INTENT_HIGH" and intent_score is None:
             raise ValueError(
                 "intent_score es obligatorio cuando event_type=PURCHASE_INTENT_HIGH"
@@ -199,8 +221,17 @@ class CallEventNotification(Tool):
 
         return True
 
-    def _generate_event_id(self, call_id: str, event_type: str) -> str:
-        """ID determinista para idempotencia."""
+    def _generate_event_id(
+        self, call_id: str, event_type: str, parameters: Optional[Dict[str, Any]] = None
+    ) -> str:
+        """ID determinista para idempotencia.
+
+        CALL_SUMMARY (S3): id EXPLÍCITO por seq (dos fotos del mismo segundo no
+        colisionan, §12.8b). El resto conserva el md5 al segundo histórico.
+        """
+        if event_type == "CALL_SUMMARY" and parameters:
+            seq = (parameters.get("summary") or {}).get("seq")
+            return f"{call_id}:CALL_SUMMARY:{seq}"
         timestamp_prefix = datetime.utcnow().strftime("%Y%m%d%H%M%S")
         content = f"{call_id}:{event_type}:{timestamp_prefix}"
         return f"evt_{hashlib.md5(content.encode()).hexdigest()[:12]}"
@@ -215,7 +246,7 @@ class CallEventNotification(Tool):
 
         payload = {
             "event_id": self._generate_event_id(
-                context.call_id, parameters["event_type"]
+                context.call_id, parameters["event_type"], parameters
             ),
             "call_id": context.call_id,
             "caller_id": getattr(session, "caller_id", None) if session else None,
@@ -228,6 +259,10 @@ class CallEventNotification(Tool):
             "event_description": parameters.get("event_description"),
             "extracted_data": parameters.get("extracted_data"),
             "priority": parameters.get("priority", "medium"),
+            # F2.6.1 (S3): la foto viaja TAL CUAL en la raíz (sin lista blanca ni
+            # rearmado). LASIK S1 la busca en data["summary"] y es el validador
+            # autoritativo del schema completo (evita dos validadores desalineados).
+            "summary": parameters.get("summary"),
             "agent_id": getattr(context, "agent_id", None),
             "metadata": {
                 "provider": getattr(context, "provider_name", None),

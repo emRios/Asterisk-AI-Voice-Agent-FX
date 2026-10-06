@@ -1021,17 +1021,25 @@ class DeepgramProvider(AIProviderInterface):
             except Exception:
                 logger.error("An unexpected error occurred while sending audio chunk", exc_info=True)
     
-    def _track_server_hangup(self, task: "asyncio.Task") -> None:
-        """Keep a strong reference to the ServerHangup delivery and log if it crashes."""
-        tasks = self.__dict__.setdefault('_server_hangup_tasks', set())
+    def _track_task(self, task: "asyncio.Task", label: str) -> "asyncio.Task":
+        """Retiene una referencia fuerte a una tarea de fondo y loguea si revienta.
+
+        Sin esto, una tarea lanzada con create_task puede ser recolectada antes de
+        terminar (p.ej. la foto final de S3 cerca del teardown)."""
+        tasks = self.__dict__.setdefault('_bg_tasks', set())
         tasks.add(task)
 
         def _done(t: "asyncio.Task") -> None:
             tasks.discard(t)
             if not t.cancelled() and t.exception() is not None:
-                logger.error("ServerHangup delivery failed", call_id=self.call_id, error=str(t.exception()))
+                logger.error(f"{label} failed", call_id=self.call_id, error=str(t.exception()))
 
         task.add_done_callback(_done)
+        return task
+
+    def _track_server_hangup(self, task: "asyncio.Task") -> None:
+        """Compat A1: retiene la entrega de ServerHangup."""
+        self._track_task(task, "ServerHangup delivery")
 
     async def _handle_server_hangup(self, event_data: Dict[str, Any]) -> None:
         """§15.A1: ``{"type": "ServerHangup", "reason": ...}`` control message from the server.
@@ -1045,25 +1053,32 @@ class DeepgramProvider(AIProviderInterface):
         if self.on_event:
             await self.on_event({'type': 'HangupImmediate', 'call_id': self.call_id, 'reason': reason})
 
-    async def _handle_function_call(self, event_data: Dict[str, Any]):
+    def _function_call_context(self) -> Dict[str, Any]:
+        """Snapshot SÍNCRONO del contexto de una function call (S3): se captura en
+        el receive loop antes de create_task, inmune a que stop_session borre
+        self.call_id mientras la tarea corre."""
+        return {
+            'call_id': self.call_id,
+            'caller_channel_id': getattr(self, '_caller_channel_id', None),
+            'bridge_id': getattr(self, '_bridge_id', None),
+            'session_store': getattr(self, '_session_store', None),
+            'ari_client': getattr(self, '_ari_client', None),
+            'config': getattr(self, '_full_config', None),
+            'allowed_tools': self._allowed_tools,
+            'websocket': self.websocket,
+        }
+
+    async def _handle_function_call(self, event_data: Dict[str, Any], context: Optional[Dict[str, Any]] = None):
         """
         Handle function call request from Deepgram.
         
         Routes the function call to the appropriate tool via the tool adapter.
         """
         try:
-            # Build context for tool execution
-            # These will be injected by the engine when it sets up the provider
-            context = {
-                'call_id': self.call_id,
-                'caller_channel_id': getattr(self, '_caller_channel_id', None),
-                'bridge_id': getattr(self, '_bridge_id', None),
-                'session_store': getattr(self, '_session_store', None),
-                'ari_client': getattr(self, '_ari_client', None),
-                'config': getattr(self, '_full_config', None),
-                'allowed_tools': self._allowed_tools,
-                'websocket': self.websocket
-            }
+            # S3: usar el contexto capturado en el receive loop; si no vino (tests
+            # A1 llaman con un solo arg), armarlo como hoy.
+            if context is None:
+                context = self._function_call_context()
             
             # Execute tool via adapter
             result = await self.tool_adapter.handle_tool_call_event(event_data, context)
@@ -1123,12 +1138,22 @@ class DeepgramProvider(AIProviderInterface):
             # Send result back to Deepgram
             await self.tool_adapter.send_tool_result(result, context)
             
-            # Log tool call to session for call history (Milestone 21)
+            # Log tool call to session for call history (Milestone 21). S3: la foto
+            # CALL_SUMMARY NO va al historial de tools (es telemetría de GoldenBridge,
+            # no una acción de la conversación — evita ruido en el call history).
+            call_id = context.get('call_id') or self.call_id
+            is_call_summary = False
+            try:
+                _args = (event_data.get('functions') or [{}])[0].get('arguments')
+                _parsed = json.loads(_args) if isinstance(_args, str) else (_args or {})
+                is_call_summary = isinstance(_parsed, dict) and _parsed.get('event_type') == 'CALL_SUMMARY'
+            except (ValueError, TypeError, AttributeError):
+                is_call_summary = False
             try:
                 session_store = getattr(self, '_session_store', None)
-                if session_store and self.call_id and func_name:
+                if session_store and call_id and func_name and not is_call_summary:
                     from datetime import datetime
-                    session = await session_store.get_by_call_id(self.call_id)
+                    session = await session_store.get_by_call_id(call_id)
                     if session:
                         tool_record = {
                             "name": func_name,
@@ -1468,8 +1493,17 @@ class DeepgramProvider(AIProviderInterface):
                                     function_count=len(functions),
                                     request_id=getattr(self, "request_id", None),
                                 )
-                                # Handle function call via tool adapter
-                                asyncio.create_task(self._handle_function_call(event_data))
+                                # Handle function call via tool adapter. S3: capturamos
+                                # el contexto AQUÍ (síncrono) — stop_session borra
+                                # self.call_id, y una foto final cerca del cierre
+                                # perdería el call_id si se armara dentro de la tarea.
+                                fc_context = self._function_call_context()
+                                self._track_task(
+                                    asyncio.create_task(
+                                        self._handle_function_call(event_data, fc_context)
+                                    ),
+                                    "function_call",
+                                )
                             elif et == "ServerHangup":
                                 self._track_server_hangup(asyncio.create_task(self._handle_server_hangup(event_data)))
                             elif et == "ConnectionClosed":

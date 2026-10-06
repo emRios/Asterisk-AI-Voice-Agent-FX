@@ -381,9 +381,9 @@ async def test_server_hangup_delivery_is_retained_and_errors_logged():
     with capture_logs() as logs:
         t = asyncio.create_task(p._handle_server_hangup({"type": "ServerHangup"}))
         p._track_server_hangup(t)
-        assert t in p._server_hangup_tasks
+        assert t in p._bg_tasks
         await asyncio.sleep(0.01)
-    assert not p._server_hangup_tasks
+    assert not p._bg_tasks
     assert any(l["event"] == "ServerHangup delivery failed" for l in logs)
 
 
