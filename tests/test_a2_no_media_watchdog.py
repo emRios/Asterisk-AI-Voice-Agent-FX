@@ -23,8 +23,13 @@ class FakeHangup:
     def __init__(self):
         self.requests = []
 
-    async def request_hangup(self, channel_id, reason, *, revalidate=None):
+    def when_idle(self, channel_id, callback):
+        callback()
+
+    async def request_hangup(self, channel_id, reason, *, revalidate=None, veto=None):
         ok = True if revalidate is None else await revalidate()
+        if ok and veto is not None and veto():
+            ok = False
         self.requests.append((channel_id, reason, ok))
         outcome = HangupOutcome.CONFIRMED if ok else HangupOutcome.SKIPPED
         return HangupResult(outcome, channel_id, reason)
@@ -386,3 +391,71 @@ async def test_transfer_answered_handlers_exempt_before_any_await(handler, args)
     finally:
         coro.close()
     assert "ch1" in e._no_media_exempt
+
+
+async def test_exemption_cleanup_waits_for_in_flight_hangup():
+    from src.core.hangup_service import HangupService
+
+    class SlowARI:
+        def __init__(self):
+            self.deletes = []
+            self.release = asyncio.Event()
+
+        async def hangup_channel(self, cid):
+            self.deletes.append(cid)
+            return {"status": 204}
+
+        async def send_command(self, *a, **k):
+            await self.release.wait()
+            return {"status": 404}
+
+    e = make_engine()
+    ari = SlowARI()
+    e.hangup_service = HangupService(ari, request_timeout_secs=5, confirm_timeout_secs=0.01)
+    e._attended_transfer_agent_channel_to_call_id = {}
+    flight = asyncio.create_task(e.hangup_service.request_hangup("ch1", "no_media", veto=lambda: None))
+    await asyncio.sleep(0.05)  # DELETE sent, now waiting on the GET
+    e.exempt_from_no_media("ch1", "transfer")
+    try:
+        await e._cleanup_call("ch1")
+    except Exception:
+        pass
+    assert "ch1" in e._no_media_exempt  # kept while the hangup is in flight
+    ari.release.set()
+    await flight
+    await asyncio.sleep(0)
+    assert "ch1" not in e._no_media_exempt
+
+
+async def test_watchdog_veto_sees_exemption_after_all_async_checks():
+    from src.core.hangup_service import HangupService
+
+    class ARI:
+        def __init__(self):
+            self.deletes = []
+
+        async def hangup_channel(self, cid):
+            self.deletes.append(cid)
+            return {"status": 204}
+
+        async def send_command(self, *a, **k):
+            return {"status": 404}
+
+    e = make_engine()
+    e.session_store.sessions["ch1"] = session()
+    ari = ARI()
+    e.hangup_service = HangupService(ari, request_timeout_secs=0.2, confirm_timeout_secs=0.05)
+    real = e._no_media_hangup_blocker
+    loop = asyncio.get_running_loop()
+    calls = {"n": 0}
+
+    async def blocker(cid):
+        calls["n"] += 1
+        r = await real(cid)
+        if calls["n"] == 2:  # the service's revalidation passed; exempt on the next tick
+            loop.call_soon(e._no_media_exempt.add, "ch1")
+        return r
+
+    e._no_media_hangup_blocker = blocker
+    await run_watchdog(e)
+    assert ari.deletes == []

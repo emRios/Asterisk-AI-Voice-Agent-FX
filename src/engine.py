@@ -5270,8 +5270,14 @@ class Engine:
             if resolved_call_id:
                 _cleanup_in_progress.discard(resolved_call_id)
             exempt = getattr(self, "_no_media_exempt", None)
-            if exempt:
-                exempt.difference_update(no_media_ids)
+            service = getattr(self, "hangup_service", None)
+            for sid in no_media_ids if exempt else ():
+                # Keep the exemption while a conditional hangup may still be in
+                # flight on that channel (shield keeps it alive past the watchdog).
+                if service is not None:
+                    service.when_idle(sid, lambda s=sid: exempt.discard(s))
+                else:
+                    exempt.discard(sid)
 
     async def _persist_call_history(self, session: CallSession, call_id: str) -> None:
         """Persist call record to history database (Milestone 21)."""
@@ -7991,8 +7997,24 @@ class Engine:
         async def revalidate() -> bool:
             return await self._no_media_hangup_blocker(channel_id) is None
 
+        session = await self.session_store.get_by_call_id(channel_id)
+
+        def veto() -> Optional[str]:
+            # Synchronous, in-memory: runs in the same loop step as the DELETE.
+            if channel_id in getattr(self, "_no_media_exempt", ()):
+                return "handoff"
+            if session is not None:
+                if session.media_rx_bytes_seen:
+                    return "media_seen"
+                for flag in ("ai_detached", "transfer_active", "handoff_in_progress"):
+                    if bool(getattr(session, flag, False)):
+                        return flag
+            return None
+
         logger.warning("No inbound media - hangup requested", channel_id=channel_id, waited_secs=waited)
-        result = await self.hangup_service.request_hangup(channel_id, "no_media", revalidate=revalidate)
+        result = await self.hangup_service.request_hangup(
+            channel_id, "no_media", revalidate=revalidate, veto=veto
+        )
         logger.info("No-media hangup result", channel_id=channel_id, outcome=result.outcome.value)
 
     def _spawn_hangup(self, channel_id: Optional[str], *, reason: str, call_id: Optional[str] = None) -> None:
