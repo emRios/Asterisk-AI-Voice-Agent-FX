@@ -571,3 +571,47 @@ async def test_when_idle_dedupes_by_key():
     await t
     await asyncio.sleep(0)
     assert fired == [1]
+
+
+async def test_timed_out_delete_is_cancelled_so_revoke_reaches_everything():
+    # 1st DELETE times out waiting for the pool, 2nd attempt waits too, then
+    # revoke + pool released ⇒ nothing reaches Asterisk.
+    ari = PoolWaitARI([204, 204], [200])
+    s = HangupService(ari, request_timeout_secs=0.2, confirm_timeout_secs=0.01)
+    t = asyncio.create_task(s.request_hangup("ch1", "no_media", veto=lambda: None))
+    await asyncio.sleep(0.3)  # first attempt timed out at 0.2 s, second is waiting
+    s.revoke("ch1", "handoff")
+    ari.acquire.set()
+    r = await t
+    await asyncio.sleep(0.02)
+    assert ari.sent == []
+    assert r.outcome is HangupOutcome.SKIPPED
+
+
+async def test_shutdown_cancellation_propagates_and_sends_nothing():
+    ari = PoolWaitARI([204])
+    s = svc(ari)
+    t = asyncio.create_task(s.request_hangup("ch1", "server_immediate"))
+    await asyncio.sleep(0.01)
+    run = s._inflight["ch1"].task
+    run.cancel()  # engine shutdown
+    with pytest.raises(asyncio.CancelledError):
+        await t
+    ari.acquire.set()
+    await asyncio.sleep(0.02)
+    assert ari.sent == []
+
+
+async def test_shutdown_cancelling_run_and_request_together_does_not_retry():
+    ari = PoolWaitARI([204, 204])
+    s = svc(ari)
+    t = asyncio.create_task(s.request_hangup("ch1", "server_immediate"))
+    await asyncio.sleep(0.01)
+    flight = s._inflight["ch1"]
+    flight.delete_task.cancel()  # loop shutdown cancels every task...
+    flight.task.cancel()         # ...including _run, in the same tick
+    with pytest.raises(asyncio.CancelledError):
+        await t
+    ari.acquire.set()
+    await asyncio.sleep(0.02)
+    assert ari.sent == []

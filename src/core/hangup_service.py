@@ -56,13 +56,14 @@ class _Vetoed(Exception):
 
 
 class _Flight:
-    __slots__ = ("task", "veto", "revoked", "delete_task", "idle_keys")
+    __slots__ = ("task", "veto", "revoked", "delete_task", "revoked_requests", "idle_keys")
 
     def __init__(self, veto: Optional[Veto]) -> None:
         self.task: Optional["asyncio.Task[HangupResult]"] = None
         self.veto = veto  # None = unconditional
         self.revoked: Optional[str] = None  # set by revoke() on a conditional flight
         self.delete_task: Optional[asyncio.Task] = None  # the DELETE request in progress
+        self.revoked_requests: set = set()  # requests cancelled by revoke() (not by shutdown)
         self.idle_keys: set = set()
 
     @property
@@ -138,6 +139,7 @@ class HangupService:
             return
         flight.revoked = why
         if flight.delete_task is not None and not flight.delete_task.done():
+            flight.revoked_requests.add(flight.delete_task)
             flight.delete_task.cancel()
         logger.info("Conditional hangup revoked", channel_id=channel_id, why=why)
 
@@ -272,16 +274,23 @@ class HangupService:
         try:
             resp = await asyncio.wait_for(asyncio.shield(request), self._request_timeout)
         except asyncio.CancelledError:
-            if flight is not None and request.cancelled():
-                # Only revoke() cancels the request itself. If the flight was
-                # promoted meanwhile, _run retries instead of skipping.
+            if flight is not None and request in flight.revoked_requests:
+                flight.revoked_requests.discard(request)
+                # Cancelled by revoke(). If the flight was promoted meanwhile,
+                # _run retries instead of skipping.
                 raise _Vetoed(flight.revoked or "revoked")
-            request.cancel()  # our own task is being cancelled
+            request.cancel()  # our own task is being cancelled (shutdown)
             raise
         except asyncio.TimeoutError:
+            # Never leave a DELETE running behind the next attempt: a later
+            # revoke() must be able to reach every request that has not left.
+            request.cancel()
             return "timeout"
         except Exception as exc:  # network errors are retried like timeouts
             return f"error:{type(exc).__name__}"
+        finally:
+            if flight is not None and flight.delete_task is request:
+                flight.delete_task = None
         return _status_of(resp)
 
     async def _get(self, channel_id: str) -> Any:
