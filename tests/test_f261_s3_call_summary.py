@@ -265,3 +265,41 @@ def test_yaml_lists_call_summary_in_both_lists():
     cfg = yaml.safe_load((root / "config" / "ai-agent.yaml").read_text())["tools"]["CallEventNotification"]
     assert "CALL_SUMMARY" in cfg["http"]["urls_by_event_type"]
     assert "CALL_SUMMARY" in cfg["enabled_event_types"]
+
+
+async def test_ack_with_ws_none_does_not_raise():
+    p = _provider()
+    p.websocket = None
+
+    class FakeTool:
+        async def publish_server_summary(self, summary, ctx):
+            return {"status": "ok"}
+
+    p.tool_adapter = types.SimpleNamespace(registry=types.SimpleNamespace(get=lambda name: FakeTool()))
+    await p._handle_call_summary({"type": "CallSummary", "summary": _summary()}, p._function_call_context())
+
+
+async def test_invalid_summary_acks_its_seq_without_post():
+    p = _provider()
+    tool = _tool()
+    posted = []
+    tool._sync_http_post_json = lambda *a, **k: posted.append(a)
+    p.tool_adapter = types.SimpleNamespace(registry=types.SimpleNamespace(get=lambda name: tool))
+    # schema_version inválido pero seq presente → ACK error con ese seq, sin POST
+    await p._handle_call_summary(
+        {"type": "CallSummary", "summary": _summary(seq=9) | {"schema_version": 2}},
+        _server_ctx(_HTTP_CFG).__dict__ if False else p._function_call_context(),
+    )
+    assert posted == []
+    assert p.websocket.sent[-1] == {"type": "CallSummaryAck", "seq": 9, "status": "error"}
+
+
+async def test_execute_still_publishes_normal_events():
+    """Regresión: un evento normal (TRANSITION) sigue publicando por execute."""
+    tool = _tool()
+    captured = {}
+    tool._sync_http_post_json = lambda url, payload, h, t: (captured.update(payload=payload), types.SimpleNamespace(text="{}"))[1]
+    res = await tool.execute({"event_type": "TRANSITION"}, _server_ctx(
+        {"tools.CallEventNotification": {"queue_backend": "http", "enabled_event_types": ["TRANSITION"],
+                                         "http": {"urls_by_event_type": {"TRANSITION": "http://x"}, "timeout_secs": 1}}}))
+    assert res["status"] == "success" and captured["payload"]["event_type"] == "TRANSITION"
