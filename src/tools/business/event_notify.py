@@ -186,19 +186,13 @@ class CallEventNotification(Tool):
         intent_score = parameters.get("intent_score")
         extracted_data = parameters.get("extracted_data")
 
-        # F2.6.1 (S3): CALL_SUMMARY es válido (lo manda GoldenBridge) aunque esté
-        # fuera del enum del LLM. Validación mínima de lo que el engine consume;
-        # LASIK S1 es el validador autoritativo del schema completo.
+        # F2.6.1 (S3, Codex): CALL_SUMMARY NO llega por el camino del LLM. Es un
+        # mensaje de protocolo propio (type=CallSummary) que publica GoldenBridge
+        # vía publish_server_summary. Un LLM que invente event_type=CALL_SUMMARY
+        # por el tool-adapter se rechaza SIEMPRE (una foto falsa reclasificaría a
+        # un humano real → re-llamada). Mismo patrón que ServerHangup en A1.
         if event_type == "CALL_SUMMARY":
-            summary = parameters.get("summary")
-            if not isinstance(summary, dict):
-                raise ValueError("CALL_SUMMARY requiere `summary` (objeto)")
-            if summary.get("schema_version") != 1:
-                raise ValueError("CALL_SUMMARY: schema_version debe ser 1")
-            seq = summary.get("seq")
-            if not isinstance(seq, int) or isinstance(seq, bool) or seq < 1:
-                raise ValueError("CALL_SUMMARY: seq debe ser un entero >= 1")
-            return True
+            raise ValueError("CALL_SUMMARY no es invocable por el LLM (canal servidor)")
         if event_type == "PURCHASE_INTENT_HIGH" and intent_score is None:
             raise ValueError(
                 "intent_score es obligatorio cuando event_type=PURCHASE_INTENT_HIGH"
@@ -220,6 +214,18 @@ class CallEventNotification(Tool):
             raise ValueError(f"priority inválida: {priority}")
 
         return True
+
+    @staticmethod
+    def _validate_server_summary(summary: Any) -> None:
+        """Validación mínima de la foto que llega por el canal servidor (S3).
+        LASIK S1 es el validador autoritativo del schema completo."""
+        if not isinstance(summary, dict):
+            raise ValueError("CALL_SUMMARY requiere `summary` (objeto)")
+        if summary.get("schema_version") != 1:
+            raise ValueError("CALL_SUMMARY: schema_version debe ser 1")
+        seq = summary.get("seq")
+        if not isinstance(seq, int) or isinstance(seq, bool) or seq < 1:
+            raise ValueError("CALL_SUMMARY: seq debe ser un entero >= 1")
 
     def _generate_event_id(
         self, call_id: str, event_type: str, parameters: Optional[Dict[str, Any]] = None
@@ -542,9 +548,46 @@ class CallEventNotification(Tool):
         self, parameters: Dict[str, Any], context: ToolExecutionContext
     ) -> Dict[str, Any]:
         try:
-            # 1) Validación
             self.validate_parameters(parameters)
+            return await self._publish(parameters, context)
+        except ValueError as e:
+            if getattr(context, "logger", None):
+                context.logger.warning("Validación fallida", error=str(e), parameters=parameters)
+            return {"status": "error", "message": f"Validación: {str(e)}"}
+        except Exception as e:
+            if getattr(context, "logger", None):
+                context.logger.error("Error ejecutando tool", error=str(e), exc_info=True, parameters=parameters)
+            return {"status": "error", "message": f"Falló ejecución: {str(e)}", "error_type": type(e).__name__}
 
+    async def publish_server_summary(
+        self, summary: Dict[str, Any], context: ToolExecutionContext
+    ) -> Dict[str, Any]:
+        """F2.6.1 (S3): publica una foto CALL_SUMMARY recibida por el canal de
+        protocolo de GoldenBridge (NO por el LLM). Valida la foto y reusa el
+        mismo _publish que execute. Devuelve {status: ok|ignored|error, ...}."""
+        try:
+            self._validate_server_summary(summary)
+            res = await self._publish(
+                {"event_type": "CALL_SUMMARY", "summary": summary}, context
+            )
+            # normaliza al vocabulario del ACK (ok/ignored/error)
+            st = res.get("status")
+            res["status"] = "ok" if st == "success" else st
+            return res
+        except ValueError as e:
+            if getattr(context, "logger", None):
+                context.logger.warning("CALL_SUMMARY inválida", error=str(e))
+            return {"status": "error", "message": f"Validación: {str(e)}"}
+        except Exception as e:
+            if getattr(context, "logger", None):
+                context.logger.error("Error publicando CALL_SUMMARY", error=str(e), exc_info=True)
+            return {"status": "error", "message": f"Falló: {str(e)}", "error_type": type(e).__name__}
+
+    async def _publish(
+        self, parameters: Dict[str, Any], context: ToolExecutionContext
+    ) -> Dict[str, Any]:
+        """Cuerpo de publicación (post-validación): allow-list, backend, payload, POST."""
+        try:
             # 2) Config de tool
             tool_config = context.get_config_value(f"tools.{self.definition.name}", {}) or {}
             backend = str(tool_config.get("queue_backend", "none")).lower()
@@ -602,24 +645,9 @@ class CallEventNotification(Tool):
                 "queue_message_id": queue_message_id,
                 "backend": backend,
             }
-
-        except ValueError as e:
-            if getattr(context, "logger", None):
-                context.logger.warning(
-                    "Validación fallida", error=str(e), parameters=parameters
-                )
-            return {"status": "error", "message": f"Validación: {str(e)}"}
-
+        except ValueError:
+            raise
         except Exception as e:
             if getattr(context, "logger", None):
-                context.logger.error(
-                    "Error ejecutando tool",
-                    error=str(e),
-                    exc_info=True,
-                    parameters=parameters,
-                )
-            return {
-                "status": "error",
-                "message": f"Falló ejecución: {str(e)}",
-                "error_type": type(e).__name__,
-            }
+                context.logger.error("Error publicando evento", error=str(e), exc_info=True)
+            raise
