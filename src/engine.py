@@ -5689,7 +5689,7 @@ class Engine:
                 return
 
             if audio_bytes and not session.media_rx_bytes_seen:
-                session.media_rx_bytes_seen = True  # §15.A2 no-media watchdog
+                self._mark_media_rx_bytes(session, caller_channel_id)
 
             # Media-path confirmation: first inbound audio frame observed.
             # Used to gate barge-in actions so we don't trigger during setup races.
@@ -7185,6 +7185,9 @@ class Engine:
                 )
                 return
 
+            if pcm_16k and not session.media_rx_bytes_seen:
+                self._mark_media_rx_bytes(session, caller_channel_id)
+
             # Record SSRC on the session for diagnostics (RTPServer maintains SSRC mapping internally).
             try:
                 if not getattr(session, "ssrc", None):
@@ -7192,9 +7195,6 @@ class Engine:
                     await self._save_session(session)
             except Exception:
                 pass
-
-            if pcm_16k and not session.media_rx_bytes_seen:
-                session.media_rx_bytes_seen = True  # §15.A2 no-media watchdog
 
             # Media-path confirmation: first inbound audio frame observed.
             # Used to gate barge-in actions so we don't trigger during setup races.
@@ -7951,6 +7951,16 @@ class Engine:
                 logger.error("No-media watchdog crashed", channel_id=channel_id, error=str(t.exception()))
 
         task.add_done_callback(_done)
+
+    def _mark_media_rx_bytes(self, session: Any, channel_id: Optional[str]) -> None:
+        """§15.A2: first inbound payload. Synchronous: no await before the revoke,
+        so a no-media DELETE still waiting for a connection never goes out."""
+        session.media_rx_bytes_seen = True
+        service = getattr(self, "hangup_service", None)
+        revoke = getattr(service, "revoke", None)
+        if callable(revoke):
+            for cid in {channel_id, getattr(session, "caller_channel_id", None)} - {None}:
+                revoke(cid, "media_seen")
 
     def exempt_from_no_media(self, call_id: Optional[str], reason: str) -> None:
         """Permanently exempt a call from the no-media hangup (transfer/handoff started)."""
