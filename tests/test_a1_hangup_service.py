@@ -461,3 +461,113 @@ async def test_when_idle_waits_for_the_flight():
     assert fired == [1]
     s.when_idle("ch1", lambda: fired.append(2))
     assert fired == [1, 2]
+
+
+class PoolWaitARI(FakeARI):
+    """DELETE that blocks 'acquiring a connection' until released; records if it was sent."""
+
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        self.acquire = asyncio.Event()
+        self.sent = []
+
+    async def hangup_channel(self, cid):
+        await self.acquire.wait()  # waiting for the pool: nothing on the wire yet
+        self.sent.append(cid)
+        return {"status": self.delete_statuses.pop(0)}
+
+
+async def test_revoke_cancels_a_delete_still_waiting_for_a_connection():
+    ari = PoolWaitARI([204])
+    s = svc(ari)
+    t = asyncio.create_task(s.request_hangup("ch1", "no_media", veto=lambda: None))
+    await asyncio.sleep(0.01)  # veto passed, request waiting for the pool
+    s.revoke("ch1", "handoff")
+    r = await t
+    ari.acquire.set()
+    await asyncio.sleep(0.01)
+    assert r.outcome is HangupOutcome.SKIPPED
+    assert ari.sent == []
+
+
+async def test_revoke_does_not_touch_unconditional_hangups():
+    ari = PoolWaitARI([204], [404])
+    s = svc(ari)
+    t = asyncio.create_task(s.request_hangup("ch1", "server_immediate"))
+    await asyncio.sleep(0.01)
+    s.revoke("ch1", "handoff")
+    ari.acquire.set()
+    r = await t
+    assert ari.sent == ["ch1"]
+    assert r.outcome in (HangupOutcome.ALREADY_GONE, HangupOutcome.CONFIRMED)
+
+
+async def test_promotion_after_revoke_still_hangs_up():
+    ari = PoolWaitARI([204], [404])
+    s = svc(ari)
+    cond = asyncio.create_task(s.request_hangup("ch1", "no_media", veto=lambda: None))
+    await asyncio.sleep(0.01)
+    s.revoke("ch1", "handoff")  # cancels the pending request...
+    uncond = asyncio.create_task(s.request_hangup("ch1", "server_immediate"))  # ...server insists
+    await asyncio.sleep(0.01)
+    ari.acquire.set()
+    r = await uncond
+    assert ari.sent == ["ch1"]
+    assert (await cond) is r
+
+
+async def test_promotion_racing_a_veto_decision_retries():
+    ari = FakeARI([204], [404])
+    s = svc(ari)
+    state = {"n": 0}
+
+    def veto():
+        state["n"] += 1
+        if state["n"] == 1:
+            # veto decides "no", and in the same instant the server asks for an
+            # unconditional hangup (scheduled before _Vetoed is consumed)
+            asyncio.get_running_loop().call_soon(
+                lambda: asyncio.ensure_future(s.request_hangup("ch1", "server_immediate")))
+            return "x"
+        return "x"
+
+    cond = asyncio.create_task(s.request_hangup("ch1", "no_media", veto=veto))
+    await asyncio.sleep(0)
+    r = await cond
+    # Either the promotion landed first (DELETE sent) or the conditional flight
+    # finished first and the server's request started a fresh unconditional one.
+    await asyncio.sleep(0.05)
+    assert ari.calls and ari.calls[0] == ("DELETE", "ch1")
+
+
+async def test_revalidate_only_joiner_promotes_after_its_check():
+    ari = PoolWaitARI([500, 204], [200, 404])  # 1st DELETE fails → the retry re-checks the veto
+    s = svc(ari)
+    state = {"veto": None}
+    cond = asyncio.create_task(s.request_hangup("ch1", "no_media", veto=lambda: state["veto"]))
+    await asyncio.sleep(0.01)  # conditional DELETE waiting for the pool
+
+    async def yes():
+        return True
+
+    joiner = asyncio.create_task(s.request_hangup("ch1", "other", revalidate=yes))
+    await asyncio.sleep(0.01)
+    state["veto"] = "handoff"  # the first caller's veto no longer applies after promotion
+    ari.acquire.set()
+    r = await joiner
+    assert ari.sent == ["ch1", "ch1"]  # the retry went out despite the stale veto
+    assert (await cond) is r
+
+
+async def test_when_idle_dedupes_by_key():
+    ari = PoolWaitARI([204], [404])
+    s = svc(ari)
+    t = asyncio.create_task(s.request_hangup("ch1", "x"))
+    await asyncio.sleep(0.01)
+    fired = []
+    for _ in range(5):
+        s.when_idle("ch1", lambda: fired.append(1), key="k")
+    ari.acquire.set()
+    await t
+    await asyncio.sleep(0)
+    assert fired == [1]
