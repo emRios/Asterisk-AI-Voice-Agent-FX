@@ -154,6 +154,10 @@ class DeepgramProviderConfig(BaseModel):
     voice_agent_base_url: str = Field(
         default="wss://agent.deepgram.com/v1/agent/converse"
     )
+    # Modal proxy-auth credentials for GoldenBridge-on-Modal endpoint.
+    # Injected from env (MODAL_KEY/MODAL_SECRET); sent as Modal-Key/Modal-Secret headers.
+    modal_key: Optional[str] = None
+    modal_secret: Optional[str] = None
     # Provider-specific farewell hangup delay (overrides global)
     farewell_hangup_delay_sec: Optional[float] = None
 

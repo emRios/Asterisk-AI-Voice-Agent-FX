@@ -206,6 +206,18 @@ def inject_provider_api_keys(config_data: Dict[str, Any]) -> None:
         deepgram_block = providers_block.get('deepgram', {}) or {}
         if isinstance(deepgram_block, dict):
             deepgram_block['api_key'] = os.getenv('DEEPGRAM_API_KEY')
+            # GoldenBridge-on-Modal: endpoint + proxy-auth creds come from env (same way as api_key).
+            # voice_agent_base_url is a non-Optional str with a default; only override when set,
+            # otherwise an explicit None would fail pydantic validation.
+            golden_ws = os.getenv('GOLDEN_WS_URL')
+            if golden_ws:
+                deepgram_block['voice_agent_base_url'] = golden_ws
+            modal_key = os.getenv('MODAL_KEY')
+            if modal_key:
+                deepgram_block['modal_key'] = modal_key
+            modal_secret = os.getenv('MODAL_SECRET')
+            if modal_secret:
+                deepgram_block['modal_secret'] = modal_secret
             providers_block['deepgram'] = deepgram_block
         
         # Inject GOOGLE_API_KEY (for google_live provider)
