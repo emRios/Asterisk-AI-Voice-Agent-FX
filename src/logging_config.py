@@ -181,20 +181,34 @@ def configure_logging(log_level="INFO", log_to_file=False, log_file_path="servic
     except Exception:
         level_value = logging.INFO
 
+    processors = [
+        structlog.stdlib.filter_by_level,
+        structlog.stdlib.add_logger_name,
+        structlog.processors.add_log_level,
+        structlog.processors.TimeStamper(fmt="iso"),
+        add_service_context,
+        add_correlation_id,
+        sanitize_secrets,  # AAVA-37: Redact sensitive information
+        suppress_exc_info_if_disabled,
+    ]
+    # Forward a sanitized copy of each event to Logfire (fail-open; without
+    # Logfire the chain is exactly the same as before).
+    try:
+        from .logfire_setup import build_log_forwarder
+
+        forwarder = build_log_forwarder()
+    except Exception:
+        forwarder = None
+    if forwarder is not None:
+        processors.append(forwarder)
+    processors += [
+        structlog.processors.format_exc_info,
+        structlog.stdlib.ProcessorFormatter.wrap_for_formatter,
+    ]
+
     # Configure structlog to integrate with stdlib logging
     structlog.configure(
-        processors=[
-            structlog.stdlib.filter_by_level,
-            structlog.stdlib.add_logger_name,
-            structlog.processors.add_log_level,
-            structlog.processors.TimeStamper(fmt="iso"),
-            add_service_context,
-            add_correlation_id,
-            sanitize_secrets,  # AAVA-37: Redact sensitive information
-            suppress_exc_info_if_disabled,
-            structlog.processors.format_exc_info,
-            structlog.stdlib.ProcessorFormatter.wrap_for_formatter,
-        ],
+        processors=processors,
         context_class=structlog.threadlocal.wrap_dict(dict),
         logger_factory=structlog.stdlib.LoggerFactory(),
         wrapper_class=structlog.stdlib.BoundLogger,

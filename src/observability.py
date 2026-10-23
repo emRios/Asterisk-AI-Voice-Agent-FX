@@ -23,6 +23,12 @@ from typing import Any, Dict, Optional
 
 from prometheus_client import Counter, Gauge, Histogram
 
+from .logfire_setup import (
+    ensure_logfire_configured,
+    logfire_config_error,
+    logfire_enabled,
+    logfire_settings,
+)
 from .logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -151,6 +157,7 @@ _MEDIA_SESSIONS_STALLED = Gauge(
 # ---------------------------------------------------------------------------
 
 _instance: Optional[Observability] = None
+_aiohttp_instrumented = False
 
 
 class Observability:
@@ -175,8 +182,9 @@ class Observability:
 
     def _configure_logfire(self) -> None:
         """Attempt to configure Logfire. Silently skip on any failure."""
+        global _aiohttp_instrumented
         enabled = os.getenv("LOGFIRE_ENABLED", "0")
-        if enabled not in ("1", "true", "yes"):
+        if not logfire_enabled():
             logger.info("Logfire disabled (LOGFIRE_ENABLED=%s)", enabled)
             return
 
@@ -185,28 +193,30 @@ class Observability:
             return
 
         try:
-            service_name = os.getenv("LOGFIRE_SERVICE_NAME", "ai-engine")
-            environment = os.getenv("LOGFIRE_ENVIRONMENT", "production")
-            send_to_logfire = os.getenv("LOGFIRE_SEND_TO_LOGFIRE", "if-token-present")
+            # Single logfire.configure per process (shared with log forwarding).
+            if not ensure_logfire_configured():
+                logger.warning(
+                    "Logfire configuration failed; continuing without tracing",
+                    error=logfire_config_error(),
+                )
+                self._logfire_ok = False
+                return
 
-            _logfire.configure(
-                service_name=service_name,
-                environment=environment,
-                send_to_logfire=send_to_logfire,
-            )
+            # Instrument aiohttp client (outbound HTTP to Asterisk ARI) once
+            if not _aiohttp_instrumented:
+                try:
+                    _logfire.instrument_aiohttp_client()
+                    _aiohttp_instrumented = True
+                except Exception:
+                    logger.debug("Logfire aiohttp-client instrumentation failed", exc_info=True)
 
-            # Instrument aiohttp client (outbound HTTP to Asterisk ARI)
-            try:
-                _logfire.instrument_aiohttp_client()
-            except Exception:
-                logger.debug("Logfire aiohttp-client instrumentation failed", exc_info=True)
-
+            settings = logfire_settings()
             self._logfire_ok = True
             logger.info(
                 "Logfire configured",
-                service_name=service_name,
-                environment=environment,
-                send_to_logfire=send_to_logfire,
+                service_name=settings["service_name"],
+                environment=settings["environment"],
+                send_to_logfire=settings["send_to_logfire"],
             )
         except Exception:
             logger.warning("Logfire configuration failed; continuing without tracing", exc_info=True)
