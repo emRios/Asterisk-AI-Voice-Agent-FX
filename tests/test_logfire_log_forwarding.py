@@ -475,3 +475,22 @@ def test_unterminated_quote_redacts_to_end_of_line_documented():
     out = logfire_setup.redact_text('password="abc call_id=c1 status=200\nsiguiente linea')
     assert "abc" not in out and "call_id=c1" not in out
     assert out.endswith("\nsiguiente linea")
+
+
+# --------------------------------------------------------------------------- prueba en DEV
+
+
+def test_logger_and_component_not_scrubbed(lf):
+    configure_logging()
+    structlog.get_logger("src.core.session_store").info("TTS GATING - Token removed")
+    attrs = _logs(lf)[0]["attributes"]
+    assert attrs["logger"] == "src.core.session_store"
+    assert attrs["component"] == "src.core.session_store"
+
+
+def test_code_location_points_to_real_caller(lf):
+    configure_logging()
+    structlog.get_logger("t").info("donde")
+    attrs = _logs(lf)[0]["attributes"]
+    assert attrs["code.filepath"].endswith("test_logfire_log_forwarding.py")
+    assert attrs["code.function"] == "test_code_location_points_to_real_caller"

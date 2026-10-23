@@ -28,6 +28,14 @@ except Exception:
     _logfire = None  # type: ignore[assignment]
     _LOGFIRE_AVAILABLE = False
 
+if _LOGFIRE_AVAILABLE:
+    # code.filepath/lineno of forwarded logs must point at the real caller,
+    # not at this forwarder (structlog itself is already skipped as site-packages).
+    try:
+        _logfire.add_non_user_code_prefix(__file__)
+    except Exception:
+        pass
+
 _TRUTHY = ("1", "true", "yes")
 
 # None = not attempted, True = configured, False = failed (no retry)
@@ -65,6 +73,9 @@ _SCRUB_KEEP_PATHS = frozenset(
         "caller_channel_id",
         "bridge_id",
         "conn_id",
+        # module names such as src.core.session_store match Logfire's "session" pattern
+        "logger",
+        "component",
         _EXC_TYPE_KEY,
         _EXC_MESSAGE_KEY,
         _EXC_STACK_KEY,
