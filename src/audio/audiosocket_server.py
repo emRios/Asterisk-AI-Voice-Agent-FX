@@ -17,6 +17,7 @@ from typing import Awaitable, Callable, Dict, Optional
 from prometheus_client import Counter, Gauge
 
 from src.logging_config import get_logger
+from src.observability import get_observability
 
 logger = get_logger(__name__)
 
@@ -196,6 +197,10 @@ class AudioSocketServer:
                             conn_id=conn_id,
                             uuid=uuid_str,
                         )
+                        try:
+                            get_observability().media_rejected(transport="audiosocket", reason="uuid_rejected", conn_id=conn_id)
+                        except Exception:
+                            pass
                         await self._send_error(writer, b"uuid-rejected")
                         return
 
@@ -203,6 +208,10 @@ class AudioSocketServer:
                         self._conn_to_uuid[conn_id] = uuid_str
                     handshake_complete = True
                     logger.info("AudioSocket UUID bound", conn_id=conn_id, uuid=uuid_str)
+                    try:
+                        get_observability().media_connected(transport="audiosocket", conn_id=conn_id)
+                    except Exception:
+                        pass
                     continue
 
                 # Post-handshake frames
@@ -217,6 +226,10 @@ class AudioSocketServer:
                                 conn_id=conn_id,
                                 bytes=len(payload),
                             )
+                            try:
+                                get_observability().media_first_audio(transport="audiosocket", conn_id=conn_id)
+                            except Exception:
+                                pass
                         await self._on_audio(conn_id, payload)
                 elif msg_type == TYPE_DTMF:
                     if self._on_dtmf and payload:
@@ -249,6 +262,10 @@ class AudioSocketServer:
             writer.close()
             with contextlib.suppress(Exception):
                 await writer.wait_closed()
+            try:
+                get_observability().media_disconnected(transport="audiosocket", conn_id=conn_id)
+            except Exception:
+                pass
             if self._on_disconnect:
                 await self._on_disconnect(conn_id)
 
