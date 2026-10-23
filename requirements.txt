@@ -12,11 +12,10 @@ prometheus-client==0.23.1
 PyYAML==6.0.3
 
 # Observability (optional - engine works without it)
-logfire[aiohttp-client,aiohttp-server]
+logfire[aiohttp-client,aiohttp-server]==5.3.0
 
 # Utilities
 tenacity==8.2.3
-numpy>=1.24.0
 
 # WebRTC VAD for robust speech detection
 webrtcvad==2.0.10
@@ -25,4 +24,3 @@ webrtcvad==2.0.10
 resend>=2.0.0
 jinja2==3.1.6
 dnspython==2.8.0
-uvloop>=0.19.0
