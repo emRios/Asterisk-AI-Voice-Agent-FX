@@ -1,10 +1,10 @@
 active_pipeline: deepgram_full_local
 asterisk:
-  app_name: asterisk-ai-voice-agent
+  app_name: asterisk-voice-bridge
 audio_transport: audiosocket
 audiosocket:
   format: slin
-  host: "172.31.7.92"
+  host: "172.31.3.225"
   port: 9092
 barge_in:
   enabled: false
@@ -233,15 +233,15 @@ tools:
     # Configuración específica de Redis para esta tool
     http:
       # URL de conexión a Redis; se puede sobreescribir con la variable de entorno REDIS_URL
-      url: ${CALL_EVENT_HTTP_URL:-http://172.31.7.92:8080/ingest}
+      url: ${CALL_EVENT_HTTP_URL:-http://172.31.3.225:8080/ingest}
       # endpoints por evento
       urls_by_event_type:
-        CALL_STARTED: https://j3n2gdia43.execute-api.us-east-2.amazonaws.com/dev/api/v1/calls/call-status
-        TRANSFER_REQUESTED: https://j3n2gdia43.execute-api.us-east-2.amazonaws.com/dev/api/v1/calls/call-status
-        PURCHASE_INTENT_HIGH: https://j3n2gdia43.execute-api.us-east-2.amazonaws.com/dev/api/v1/calls/call-status
-        DATA_EXTRACTION: https://j3n2gdia43.execute-api.us-east-2.amazonaws.com/dev/api/v1/calls/call-status
-        TRANSITION: https://j3n2gdia43.execute-api.us-east-2.amazonaws.com/dev/api/v1/calls/call-status
-        ANSWERING_MACHINE: https://j3n2gdia43.execute-api.us-east-2.amazonaws.com/dev/api/v1/calls/call-status
+        CALL_STARTED: https://cypqa185j7.execute-api.us-east-2.amazonaws.com/prod/api/v1/calls/call-status
+        TRANSFER_REQUESTED: https://cypqa185j7.execute-api.us-east-2.amazonaws.com/prod/api/v1/calls/call-status
+        PURCHASE_INTENT_HIGH: https://cypqa185j7.execute-api.us-east-2.amazonaws.com/prod/api/v1/calls/call-status
+        DATA_EXTRACTION: https://cypqa185j7.execute-api.us-east-2.amazonaws.com/prod/api/v1/calls/call-status
+        TRANSITION: https://cypqa185j7.execute-api.us-east-2.amazonaws.com/prod/api/v1/calls/call-status
+        ANSWERING_MACHINE: https://cypqa185j7.execute-api.us-east-2.amazonaws.com/prod/api/v1/calls/call-status
       timeout_secs: 5
     enabled: true
 
