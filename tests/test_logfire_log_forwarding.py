@@ -351,6 +351,8 @@ AUTH_CASES = [
     ('{"Authorization": "Bearer abc\\"LEAKTAIL", "call_id": "c1"}', "LEAKTAIL"),
     ('Authorization: Digest username="u", response="LEAKDIGEST"', "LEAKDIGEST"),
     ("headers={'Authorization': 'Digest username=\"u\", response=\"LEAKD2\"', 'call_id': 'c2'}", "LEAKD2"),
+    ("Authorization: Token abc123 Proxy-Authorization: Token SECONDSECRET call_id=c1", "SECONDSECRET"),
+    ("Authorization: Token FIRSTSECRET Proxy-Authorization: Token abc123 call_id=c1", "FIRSTSECRET"),
 ]
 
 
@@ -460,6 +462,7 @@ def test_stdout_byte_identical_with_and_without_logfire(lf, monkeypatch, capsys)
         ('{"Authorization": "Bearer abc\\"LEAKTAIL", "call_id": "c1"}', '"call_id": "c1"'),
         ("headers={'Authorization': 'Digest username=\"u\", response=\"X\"', 'call_id': 'c2'}", "'call_id': 'c2'"),
         ("Authorization: Token abcdefghij call_id=c1", "call_id=c1"),
+        ("Authorization: Token a1 Proxy-Authorization: Token b2 call_id=c1", "call_id=c1"),
         ("Authorization header missing", "Authorization header missing"),
     ],
 )

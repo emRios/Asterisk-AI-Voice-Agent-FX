@@ -186,6 +186,10 @@ def _redact_auth_header(m: "re.Match[str]") -> str:
         else:
             bm = _BARE_CREDENTIAL.match(body)
             rest = body[bm.end():] if bm else body
+    # The bare alternative consumed the rest of the line: later headers in it
+    # must be processed too (rest is strictly shorter, so this terminates).
+    if rest:
+        rest = _AUTH_HEADER.sub(_redact_auth_header, rest)
     return prefix + quote + scheme + REDACTED + (quote if closed else "") + rest
 
 
