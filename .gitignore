@@ -290,3 +290,6 @@ data/*.db-journal
 data/*.db-wal
 data/*.db-shm
 !data/.gitkeep
+
+# Escrito en runtime por src/core/adaptive_streaming.py (AdaptiveStreaming cache): no versionar
+data/provider_patterns.json
