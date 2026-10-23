@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import threading
 import time
 from typing import Any, Dict, Optional
 
@@ -158,6 +159,7 @@ _MEDIA_SESSIONS_STALLED = Gauge(
 
 _instance: Optional[Observability] = None
 _aiohttp_instrumented = False
+_aiohttp_instrument_lock = threading.Lock()
 
 
 class Observability:
@@ -203,12 +205,13 @@ class Observability:
                 return
 
             # Instrument aiohttp client (outbound HTTP to Asterisk ARI) once
-            if not _aiohttp_instrumented:
-                try:
-                    _logfire.instrument_aiohttp_client()
-                    _aiohttp_instrumented = True
-                except Exception:
-                    logger.debug("Logfire aiohttp-client instrumentation failed", exc_info=True)
+            with _aiohttp_instrument_lock:
+                if not _aiohttp_instrumented:
+                    try:
+                        _logfire.instrument_aiohttp_client()
+                        _aiohttp_instrumented = True
+                    except Exception:
+                        logger.debug("Logfire aiohttp-client instrumentation failed", exc_info=True)
 
             settings = logfire_settings()
             self._logfire_ok = True

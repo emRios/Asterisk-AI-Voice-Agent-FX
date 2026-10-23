@@ -94,6 +94,7 @@ def _has_forwarder():
         "pylf_v1_us_AbCdEfGh123456",
         "wk-AbCdEfGh12345678 ws-AbCdEfGh12345678",
         "Basic dXNlcjpwYXNzd29yZA==",
+        f'{{"password": "abc\\"{SECRET}"}}',
     ],
 )
 def test_redact_text_removes_secret(text):
@@ -338,3 +339,113 @@ def test_logger_created_before_configure_is_forwarded(lf):
     configure_logging()
     early.info("desde logger temprano")
     assert [s["attributes"]["logfire.msg"] for s in _logs(lf)] == ["desde logger temprano"]
+
+
+# --------------------------------------------------------------------------- Codex r5 (código)
+
+AUTH_CASES = [
+    ("Authorization: Token abcdefghijklmnopqrstuvwxyz123456", "abcdefghijklmnopqrstuvwxyz123456"),
+    ("Authorization: Basic dXNlcjpwYXNz", "dXNlcjpwYXNz"),
+    ("Authorization: Bearer abc123", "abc123"),
+    ("{'Authorization': 'Bearer xyz987', 'call_id': 'c9'}", "xyz987"),
+]
+
+
+@pytest.mark.parametrize("text,secret", AUTH_CASES)
+def test_authorization_credential_fully_redacted_everywhere(lf, monkeypatch, capsys, text, secret):
+    monkeypatch.setenv("LOG_SHOW_TRACEBACKS", "always")
+    configure_logging()
+    log = structlog.get_logger("t")
+    log.info(text)
+    try:
+        raise RuntimeError(text)
+    except RuntimeError:
+        log.error("fallo", exc_info=True)
+    logs = _logs(lf)
+    assert secret not in _dump(logs)
+    assert logs[1]["attributes"]["exception_message"] != ""
+    assert secret in capsys.readouterr().out  # stdout as today
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        '{"password": "abc\\"LEAKTAIL", "call_id": "c1"}',
+        "{'password': 'abc\\'LEAKTAIL', 'call_id': 'c1'}",
+        '{"token": "abc\\\\\\"LEAKTAIL", "call_id": "c1"}',
+        '"password": "abc LEAKTAIL',
+    ],
+)
+def test_escaped_quotes_do_not_leak_and_keep_following_ids(text):
+    out = logfire_setup.redact_text(text)
+    assert "LEAKTAIL" not in out
+    if "call_id" in text:
+        assert '"c1"' in out or "'c1'" in out
+
+
+def test_exception_type_is_redacted():
+    Dyn = type("DynErr", (Exception,), {"__module__": "token=type-secret"})
+    fields = logfire_setup._exception_fields(Dyn("x"))
+    assert "type-secret" not in fields["exception_type"]
+    assert fields["exception_type"].endswith(".DynErr")
+
+
+def test_concurrent_observability_instruments_aiohttp_once(lf, monkeypatch):
+    import threading
+    import time
+
+    from src import observability
+
+    calls = []
+
+    def slow_instrument(*a, **k):
+        calls.append(1)
+        time.sleep(0.2)
+
+    monkeypatch.setattr(observability, "_aiohttp_instrumented", False)
+    monkeypatch.setattr(logfire, "instrument_aiohttp_client", slow_instrument)
+    logfire_setup.ensure_logfire_configured()
+    threads = [threading.Thread(target=observability.Observability) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len(calls) == 1
+
+
+def test_stdout_byte_identical_with_and_without_logfire(lf, monkeypatch, capsys):
+    class FixedStamper:
+        def __init__(self, *a, **k):
+            pass
+
+        def __call__(self, logger, name, event_dict):
+            event_dict["timestamp"] = "2026-10-23T00:00:00Z"
+            return event_dict
+
+    monkeypatch.setattr(structlog.processors, "TimeStamper", FixedStamper)
+    monkeypatch.setenv("LOG_SHOW_TRACEBACKS", "always")
+
+    def emit():
+        log = structlog.get_logger("t")
+        log.info("Deepgram conversation text", call_id="c1", role="user", text="hola", segments=[{"a": 1}])
+        log.info(f"Authorization: Bearer {SECRET}", api_key="abcdef", call_id="c1")
+        try:
+            try:
+                raise KeyError("inner")
+            except KeyError as inner:
+                raise RuntimeError(f"token={SECRET}") from inner
+        except RuntimeError:
+            log.error("fallo", exc_info=True)
+
+    configure_logging()
+    assert _has_forwarder()
+    emit()
+    with_lf = capsys.readouterr().out
+
+    monkeypatch.setenv("LOGFIRE_ENABLED", "0")
+    logfire_setup._reset_for_tests()
+    configure_logging()
+    assert not _has_forwarder()
+    emit()
+    without_lf = capsys.readouterr().out
+    assert with_lf == without_lf and with_lf.count("\n") == 3

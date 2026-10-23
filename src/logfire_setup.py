@@ -120,15 +120,24 @@ def logfire_config_error() -> Optional[str]:
 # ---------------------------------------------------------------------------
 REDACTED = "***REDACTED***"
 
-_VALUE = r"""(?:"[^"]*"|'[^']*'|[^\s"',;&}\]]+)"""
+# Quoted values honour escapes; an unterminated quote redacts to end of line.
+_VALUE = r"""(?:"(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'|[^\s"',;&}\]]+|["'][^\n]*)"""
+_AUTH_SCHEMES = r"(?:bearer|basic|token|digest|apikey|api-key|key|hmac|negotiate|dsn|aws4-hmac-sha256)"
 _SECRET_PATTERNS = [
-    # Authorization schemes
+    # Authorization header: whole credential, any length (scheme kept)
+    (
+        re.compile(
+            r"(?i)(\b(?:proxy-)?authorization\b[\"']?\s*[:=]\s*[\"']?)(" + _AUTH_SCHEMES + r"\s+)?" + _VALUE
+        ),
+        r"\1\2" + REDACTED,
+    ),
+    # Authorization schemes outside a header
     (re.compile(r"(?i)(\bbearer\s+)[A-Za-z0-9._~+/-]{8,}=*"), r"\1" + REDACTED),
     (re.compile(r"(?i)(\bbasic\s+)(?=[A-Za-z0-9+/]*[0-9+/=])[A-Za-z0-9+/]{8,}={0,2}"), r"\1" + REDACTED),
     # name=value / name: value / "name": "value"
     (
         re.compile(
-            r"(?i)(\b(?:proxy-authorization|authorization|x-api-key|api[_-]?key|access[_-]?token|"
+            r"(?i)(\b(?:x-api-key|api[_-]?key|access[_-]?token|"
             r"refresh[_-]?token|auth[_-]?token|client[_-]?secret|modal[_-]?key|modal[_-]?secret|"
             r"token|secret|password|passwd|pwd)\b[\"']?\s*[:=]\s*)"
             r"(?!(?:bearer|basic)\s)" + _VALUE
@@ -163,6 +172,7 @@ _DROP_FIELDS = {
 }
 _TEXT_LEN_SOURCE = "text"
 
+# Limits in characters (not bytes), applied after redaction.
 _MAX_EXC_MESSAGE = 2 * 1024
 _MAX_EXC_STACK = 16 * 1024
 _EXC_UNAVAILABLE = "<no disponible: error al formatear>"
@@ -198,7 +208,7 @@ def _resolve_exception(exc_info: Any) -> tuple:
 def _exception_fields(exc: BaseException) -> Dict[str, str]:
     fields: Dict[str, str] = {}
     try:
-        fields[_EXC_TYPE_KEY] = f"{type(exc).__module__}.{type(exc).__qualname__}"
+        fields[_EXC_TYPE_KEY] = f"{redact_text(str(type(exc).__module__))}.{redact_text(type(exc).__qualname__)}"
     except Exception:
         fields[_EXC_TYPE_KEY] = _EXC_UNAVAILABLE
     try:
