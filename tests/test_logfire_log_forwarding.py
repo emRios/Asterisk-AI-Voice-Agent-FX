@@ -348,6 +348,9 @@ AUTH_CASES = [
     ("Authorization: Basic dXNlcjpwYXNz", "dXNlcjpwYXNz"),
     ("Authorization: Bearer abc123", "abc123"),
     ("{'Authorization': 'Bearer xyz987', 'call_id': 'c9'}", "xyz987"),
+    ('{"Authorization": "Bearer abc\\"LEAKTAIL", "call_id": "c1"}', "LEAKTAIL"),
+    ('Authorization: Digest username="u", response="LEAKDIGEST"', "LEAKDIGEST"),
+    ("headers={'Authorization': 'Digest username=\"u\", response=\"LEAKD2\"', 'call_id': 'c2'}", "LEAKD2"),
 ]
 
 
@@ -449,3 +452,23 @@ def test_stdout_byte_identical_with_and_without_logfire(lf, monkeypatch, capsys)
     emit()
     without_lf = capsys.readouterr().out
     assert with_lf == without_lf and with_lf.count("\n") == 3
+
+
+@pytest.mark.parametrize(
+    "text,kept",
+    [
+        ('{"Authorization": "Bearer abc\\"LEAKTAIL", "call_id": "c1"}', '"call_id": "c1"'),
+        ("headers={'Authorization': 'Digest username=\"u\", response=\"X\"', 'call_id': 'c2'}", "'call_id': 'c2'"),
+        ("Authorization: Token abcdefghij call_id=c1", "call_id=c1"),
+        ("Authorization header missing", "Authorization header missing"),
+    ],
+)
+def test_authorization_keeps_following_operational_data(text, kept):
+    assert kept in logfire_setup.redact_text(text)
+
+
+def test_unterminated_quote_redacts_to_end_of_line_documented():
+    # Conservative by design: data after an unterminated quoted secret is lost.
+    out = logfire_setup.redact_text('password="abc call_id=c1 status=200\nsiguiente linea')
+    assert "abc" not in out and "call_id=c1" not in out
+    assert out.endswith("\nsiguiente linea")

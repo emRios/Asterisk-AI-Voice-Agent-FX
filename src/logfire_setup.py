@@ -124,13 +124,6 @@ REDACTED = "***REDACTED***"
 _VALUE = r"""(?:"(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'|[^\s"',;&}\]]+|["'][^\n]*)"""
 _AUTH_SCHEMES = r"(?:bearer|basic|token|digest|apikey|api-key|key|hmac|negotiate|dsn|aws4-hmac-sha256)"
 _SECRET_PATTERNS = [
-    # Authorization header: whole credential, any length (scheme kept)
-    (
-        re.compile(
-            r"(?i)(\b(?:proxy-)?authorization\b[\"']?\s*[:=]\s*[\"']?)(" + _AUTH_SCHEMES + r"\s+)?" + _VALUE
-        ),
-        r"\1\2" + REDACTED,
-    ),
     # Authorization schemes outside a header
     (re.compile(r"(?i)(\bbearer\s+)[A-Za-z0-9._~+/-]{8,}=*"), r"\1" + REDACTED),
     (re.compile(r"(?i)(\bbasic\s+)(?=[A-Za-z0-9+/]*[0-9+/=])[A-Za-z0-9+/]{8,}={0,2}"), r"\1" + REDACTED),
@@ -157,7 +150,47 @@ _SECRET_PATTERNS = [
 ]
 
 
+# Authorization header value: quoted (escapes honoured) | unterminated quote | bare.
+_AUTH_HEADER = re.compile(
+    r"""(?i)(\b(?:proxy-)?authorization\b["']?\s*[:=]\s*)"""
+    r"""("(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'|["'][^\n]*|[^\n]*)"""
+)
+_AUTH_SCHEME_RE = re.compile(r"(?i)^(" + _AUTH_SCHEMES + r")(\s+)")
+# Multi-parameter schemes: the whole rest of the value is credential.
+_AUTH_MULTI = ("digest", "hmac", "aws4-hmac-sha256", "negotiate")
+_BARE_CREDENTIAL = re.compile(r"[^\s\"',;}\]]+")
+
+
+def _redact_auth_header(m: "re.Match[str]") -> str:
+    prefix, value = m.group(1), m.group(2)
+    quote = ""
+    closed = False
+    if value[:1] in ("'", '"'):
+        quote = value[0]
+        closed = len(value) > 1 and value.endswith(quote) and not value.endswith("\\" + quote)
+        inner = value[1:-1] if closed else value[1:]
+        rest = ""
+    else:
+        inner, rest = value, None
+    scheme = ""
+    sm = _AUTH_SCHEME_RE.match(inner)
+    if sm:
+        scheme = sm.group(1) + sm.group(2)
+        body = inner[sm.end():]
+    else:
+        body = inner
+    if rest is None:
+        # Bare (unquoted): single-token schemes keep what follows the token.
+        if sm and sm.group(1).lower() in _AUTH_MULTI:
+            rest = ""
+        else:
+            bm = _BARE_CREDENTIAL.match(body)
+            rest = body[bm.end():] if bm else body
+    return prefix + quote + scheme + REDACTED + (quote if closed else "") + rest
+
+
 def redact_text(text: str) -> str:
+    text = _AUTH_HEADER.sub(_redact_auth_header, text)
     for pattern, repl in _SECRET_PATTERNS:
         text = pattern.sub(repl, text)
     return text
