@@ -12,6 +12,7 @@ PyYAML==6.0.3
 
 # Utilities
 tenacity==8.2.3
+numpy>=1.24.0
 
 # WebRTC VAD for robust speech detection
 webrtcvad==2.0.10
