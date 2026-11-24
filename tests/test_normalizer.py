@@ -74,6 +74,13 @@ def test_apply_normalizer_target_zero_no_change():
     assert out == pcm
 
 
+def test_apply_normalizer_invalid_pcm_returns_original():
+    mgr = _make_manager()
+    pcm = b"\x01"
+    out = mgr._apply_normalizer(pcm, target_rms=1400, max_gain_db=12.0)
+    assert out == pcm
+
+
 def test_apply_normalizer_respects_small_max_gain():
     mgr = _make_manager()
     pcm = _make_sine_pcm16(amplitude=1000, samples=800)
@@ -84,3 +91,44 @@ def test_apply_normalizer_respects_small_max_gain():
     # Expected RMS roughly before * 10^(0.5/20) with some integer rounding tolerance
     expected = before * (10 ** (0.5 / 20.0))
     assert after == pytest.approx(expected, rel=0.05)
+
+
+def _reference_normalizer(pcm: bytes, target_rms: int, max_gain_db: float) -> bytes:
+    # Previous pure-Python implementation, kept as the reference: the numpy
+    # version must return byte-identical audio.
+    if not pcm or target_rms <= 0:
+        return pcm
+    buf = array.array('h')
+    try:
+        buf.frombytes(pcm)
+    except ValueError:
+        return pcm
+    if len(buf) == 0:
+        return pcm
+    acc = 0.0
+    for s in buf:
+        acc += float(s) * float(s)
+    rms = math.sqrt(acc / float(len(buf)))
+    gain = min(float(target_rms) / max(1.0, rms), math.pow(10.0, float(max_gain_db) / 20.0))
+    if gain <= 1.01:
+        return pcm
+    for i, s in enumerate(buf):
+        y = float(s) * gain
+        buf[i] = int(max(-32768.0, min(32767.0, y)))
+    return buf.tobytes()
+
+
+@pytest.mark.parametrize("amplitude,target_rms,max_gain_db", [
+    (1400, 1400, 18.0),   # seed 3 differs by one LSB if computed in float32
+    (5000, 3000, 40.0),   # seed 2 differs by one LSB if computed in float32
+    (300, 1400, 9.0),     # production settings, quiet audio
+    (20000, 1400, 9.0),   # loud audio, no gain
+    (32767, 3000, 40.0),  # clipping path
+])
+def test_apply_normalizer_matches_reference_byte_for_byte(amplitude, target_rms, max_gain_db):
+    import random
+    mgr = _make_manager()
+    for seed in range(50):
+        rng = random.Random(seed)
+        pcm = array.array('h', [rng.randint(-amplitude, amplitude) for _ in range(160)]).tobytes()
+        assert mgr._apply_normalizer(pcm, target_rms, max_gain_db) == _reference_normalizer(pcm, target_rms, max_gain_db), seed
