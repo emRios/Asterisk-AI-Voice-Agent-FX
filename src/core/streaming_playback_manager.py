@@ -18,6 +18,20 @@ import math
 import os
 import wave
 
+# numpy is loaded here, at engine start-up, never lazily inside the audio path: the
+# first import takes 50-240 ms in the engine image, long enough to stall the event
+# loop for several 20 ms frames if it happened on the first normalized frame.
+# The normalizer only does element-wise math on small buffers and never uses BLAS,
+# so keep OpenBLAS from spawning one idle worker thread per core (operators can
+# still override it through the environment). Must be set before the first import.
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+try:
+    import numpy as np
+    _NUMPY_IMPORT_ERROR: Optional[str] = None
+except Exception as _numpy_exc:  # missing or broken install: keep the engine up
+    np = None
+    _NUMPY_IMPORT_ERROR = f"{type(_numpy_exc).__name__}: {_numpy_exc}"
+
 from src.audio.resampler import (
     mulaw_to_pcm16le,
     pcm16le_to_mulaw,
@@ -37,6 +51,52 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from src.core.playback_manager import PlaybackManager
 
 logger = structlog.get_logger(__name__)
+
+
+def _normalize_pcm16_numpy(pcm_bytes: bytes, target_rms: int, max_gain_db: float) -> bytes:
+    """RMS make-up gain on PCM16 audio using numpy (byte-identical to the Python path)."""
+    buf = np.frombuffer(pcm_bytes, dtype=np.int16)
+    if buf.size == 0:
+        return pcm_bytes
+    x = buf.astype(np.float64)  # float64 keeps rounding identical to the pure-Python loop
+    rms = float(np.sqrt(np.mean(x * x)))
+    effective_rms = max(1.0, rms)
+    desired = float(target_rms) / effective_rms
+    max_lin = 10.0 ** (float(max_gain_db) / 20.0)
+    gain = min(desired, max_lin)
+    if gain <= 1.01:
+        return pcm_bytes
+    return np.clip(x * gain, -32768.0, 32767.0).astype(np.int16).tobytes()
+
+
+def _normalize_pcm16_python(pcm_bytes: bytes, target_rms: int, max_gain_db: float) -> bytes:
+    """Pure-Python normalizer used when numpy is unavailable.
+
+    Same arithmetic as the implementation that shipped before numpy, so an image
+    without numpy keeps producing exactly the same audio (only slower).
+    """
+    buf = array.array('h')
+    buf.frombytes(pcm_bytes)
+    if buf.itemsize != 2 or len(buf) == 0:
+        return pcm_bytes
+    acc = 0.0
+    for s in buf:
+        acc += float(s) * float(s)
+    rms = math.sqrt(acc / float(len(buf)))
+    effective_rms = max(1.0, float(rms))
+    desired = float(target_rms) / effective_rms
+    max_lin = math.pow(10.0, float(max_gain_db) / 20.0)
+    gain = min(desired, max_lin)
+    if gain <= 1.01:
+        return pcm_bytes
+    for i, s in enumerate(buf):
+        y = float(s) * gain
+        if y > 32767.0:
+            y = 32767.0
+        elif y < -32768.0:
+            y = -32768.0
+        buf[i] = int(y)
+    return buf.tobytes()
 
 _JITTER_SENTINEL = object()
 
@@ -312,9 +372,19 @@ class StreamingPlaybackManager:
                 normalizer_enabled=bool(self.normalizer_enabled),
                 normalizer_target_rms=int(self.normalizer_target_rms),
                 normalizer_max_gain_db=float(self.normalizer_max_gain_db),
+                normalizer_backend=("numpy" if np is not None else "python"),
             )
         except Exception:
             pass
+        if np is None:
+            try:
+                logger.warning(
+                    "numpy unavailable - normalizer running on the pure-Python fallback "
+                    "(same audio, more CPU per frame); rebuild the image to install numpy",
+                    error=_NUMPY_IMPORT_ERROR,
+                )
+            except Exception:
+                pass
     
     @staticmethod
     def _canonicalize_encoding(value: Optional[str]) -> str:
@@ -2268,23 +2338,17 @@ class StreamingPlaybackManager:
             return pcm_bytes
 
     def _apply_normalizer(self, pcm_bytes: bytes, target_rms: int, max_gain_db: float) -> bytes:
-        """Apply RMS-based make-up gain to PCM16 LE audio using numpy."""
+        """Apply RMS-based make-up gain to PCM16 LE audio.
+
+        Uses numpy when it loaded at start-up and the pure-Python implementation
+        otherwise; both return the same bytes. Returns the input on any error.
+        """
         if not pcm_bytes or target_rms <= 0:
             return pcm_bytes
         try:
-            import numpy as np
-            buf = np.frombuffer(pcm_bytes, dtype=np.int16)
-            if buf.size == 0:
-                return pcm_bytes
-            x = buf.astype(np.float64)  # float64 keeps rounding identical to the previous pure-Python loop
-            rms = float(np.sqrt(np.mean(x * x)))
-            effective_rms = max(1.0, rms)
-            desired = float(target_rms) / effective_rms
-            max_lin = 10.0 ** (float(max_gain_db) / 20.0)
-            gain = min(desired, max_lin)
-            if gain <= 1.01:
-                return pcm_bytes
-            return np.clip(x * gain, -32768.0, 32767.0).astype(np.int16).tobytes()
+            if np is not None:
+                return _normalize_pcm16_numpy(pcm_bytes, target_rms, max_gain_db)
+            return _normalize_pcm16_python(pcm_bytes, target_rms, max_gain_db)
         except Exception:
             return pcm_bytes
 
